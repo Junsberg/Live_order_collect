@@ -146,6 +146,7 @@ function App() {
   const [mName, setMName] = useState("");
   const [mPrice, setMPrice] = useState("");
   const [mQty, setMQty] = useState("1");
+  const [printMode, setPrintMode] = useState(false);
 
   /* ---------- 저장/불러오기 ---------- */
   useEffect(() => {
@@ -183,6 +184,13 @@ function App() {
     }, 400);
     return () => clearTimeout(t);
   }, [products, orders, customers, shipFee, bdate, pickState, settleHeader, shipData, loaded]);
+
+  // 인쇄 종료(취소·완료) 시 인쇄 모드 해제
+  useEffect(() => {
+    const done = () => setPrintMode(false);
+    window.addEventListener("afterprint", done);
+    return () => window.removeEventListener("afterprint", done);
+  }, []);
 
   /* ---------- 파생 데이터 ---------- */
   const activeOrders = useMemo(() => orders.filter(o => !o.canceled), [orders]);
@@ -495,6 +503,15 @@ function App() {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, buildShipSheet(), "4. 송장출력_복사용(롯데)");
     XLSX.writeFile(wb, `사자창고_출고_${dateCode}.xlsx`);
+  };
+
+  // 입금 완료자별 상품 리스트 A4 인쇄 (CJ대한통운 등 · 포장 피킹용)
+  const printPickList = () => {
+    if (paidLines.length === 0) {
+      showToast("입금 완료된 주문이 없습니다. ③ 정산에서 「입금」을 체크하세요.");
+      return;
+    }
+    setPrintMode(true);
   };
 
   // 전체 상태를 숨김 시트로 저장 (불러오기 복원용)
@@ -830,7 +847,35 @@ function App() {
   }, /*#__PURE__*/React.createElement("style", null, CSS), toast && /*#__PURE__*/React.createElement("div", {
     className: "toast",
     onClick: () => setToast("")
-  }, toast), /*#__PURE__*/React.createElement("div", {
+  }, toast), printMode && (() => {
+    const grouped = {};
+    paidLines.forEach(o => {
+      (grouped[o.nick] = grouped[o.nick] || []).push(o);
+    });
+    const nicks = Object.keys(grouped).sort((a, b) => a.localeCompare(b, "ko"));
+    return /*#__PURE__*/React.createElement("div", {
+      className: "printroot"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "print-noprint"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn dark",
+      onClick: () => window.print()
+    }, "인쇄 / PDF"), /*#__PURE__*/React.createElement("button", {
+      className: "btn",
+      onClick: () => setPrintMode(false)
+    }, "닫기")), /*#__PURE__*/React.createElement("div", {
+      className: "print-head"
+    }, /*#__PURE__*/React.createElement("h1", null, "사자창고 상품 리스트"), /*#__PURE__*/React.createElement("span", null, bdate, " · 입금완료 ", nicks.length, "명")), /*#__PURE__*/React.createElement("div", {
+      className: "print-grid"
+    }, nicks.map(n => /*#__PURE__*/React.createElement("div", {
+      className: "print-box",
+      key: n
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "print-bx-h"
+    }, n), /*#__PURE__*/React.createElement("ul", null, grouped[n].map(o => /*#__PURE__*/React.createElement("li", {
+      key: o.id
+    }, o.name, "_", o.qty, "개")))))));
+  })(), /*#__PURE__*/React.createElement("div", {
     className: "topbar"
   }, /*#__PURE__*/React.createElement("div", {
     className: "livewrap"
@@ -1240,7 +1285,9 @@ function App() {
     style: {
       margin: 0
     }
-  }, "출고 파일 다운로드"), /*#__PURE__*/React.createElement("div", {
+  }, "출고 파일 다운로드 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "롯데택배")), /*#__PURE__*/React.createElement("div", {
     className: "sub"
   }, "「4. 송장출력_복사용(롯데)」 시트 1개 · 롯데 업로드용")), /*#__PURE__*/React.createElement("button", {
     className: "btn primary big",
@@ -1248,7 +1295,26 @@ function App() {
     onClick: exportShipXlsx
   }, "엑셀 다운로드")), /*#__PURE__*/React.createElement("div", {
     className: "hint"
-  }, "파일명: 사자창고_출고_", dateCode, ".xlsx"))), tab === "upload" && /*#__PURE__*/React.createElement("div", {
+  }, "파일명: 사자창고_출고_", dateCode, ".xlsx")), /*#__PURE__*/React.createElement("div", {
+    className: "card shipprint"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "rowbetween"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
+  }, "상품 리스트 인쇄 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "CJ대한통운 · 포장용")), /*#__PURE__*/React.createElement("div", {
+    className: "sub"
+  }, "입금 완료자별 「닉네임 + 상품」 박스 · A4 자동 배치·페이지 분할")), /*#__PURE__*/React.createElement("button", {
+    className: "btn dark big",
+    disabled: paidLines.length === 0,
+    onClick: printPickList
+  }, "A4 인쇄 / PDF")), /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "버튼을 누르면 인쇄 화면이 새 창으로 열립니다. 거기서 인쇄하거나 PDF로 저장하세요."))), tab === "upload" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
   }, /*#__PURE__*/React.createElement("div", {
     className: "card"
@@ -1493,6 +1559,32 @@ function OrderRow({
 }
 const CSS = `
 * { box-sizing: border-box; }
+@media print {
+  @page { size: A4; margin: 12mm; }
+  body { background: #fff; }
+  .app > *:not(.printroot) { display: none !important; }
+  .printroot { display: block !important; font-family: "Malgun Gothic","Apple SD Gothic Neo",sans-serif; color: #000; }
+  .print-noprint { display: none !important; }
+  .print-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8mm; }
+  .print-head h1 { font-size: 16px; margin: 0; }
+  .print-head span { font-size: 12px; color: #333; }
+  .print-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6mm; }
+  .print-box { border: 1.5px solid #000; border-radius: 3px; break-inside: avoid; page-break-inside: avoid; overflow: hidden; }
+  .print-bx-h { text-align: center; font-weight: 700; font-size: 15px; padding: 5px 6px; border-bottom: 1.5px solid #000; background: #f0f0f0 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .print-box ul { list-style: none; margin: 0; padding: 5px 8px; }
+  .print-box li { text-align: center; font-size: 14px; padding: 3px 0; }
+}
+/* 화면에서 인쇄 미리보기 (인쇄 전 확인용) */
+.printroot { position: fixed; inset: 0; z-index: 300; background: #fff; overflow: auto; padding: 20px; }
+.print-noprint { position: sticky; top: 0; display: flex; gap: 8px; justify-content: flex-end; padding-bottom: 12px; }
+.print-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; border-bottom: 2px solid #16191f; padding-bottom: 8px; }
+.print-head h1 { font-size: 18px; margin: 0; }
+.print-head span { font-size: 13px; color: #5b6470; }
+.print-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.print-box { border: 1.5px solid #000; border-radius: 4px; overflow: hidden; }
+.print-bx-h { text-align: center; font-weight: 700; font-size: 15px; padding: 6px; border-bottom: 1.5px solid #000; background: #f0f0f0; }
+.print-box ul { list-style: none; margin: 0; padding: 6px 10px; }
+.print-box li { text-align: center; font-size: 14px; padding: 3px 0; }
 .toast {
   position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 200;
   background: #16191f; color: #fff; padding: 12px 20px; border-radius: 12px;
@@ -1621,6 +1713,9 @@ const CSS = `
 .rowwarn td { background: #fff6f7; }
 .foot { text-align: center; font-size: 12px; color: #a7aeb8; padding: 24px 0 8px; }
 .shipdl { border-color: #0f766e; }
+.shipprint { border-color: #16191f; }
+.btn.dark { background: #16191f; border-color: #16191f; color: #fff; }
+.btn.dark:disabled { opacity: .4; cursor: default; }
 .btn.big { padding: 12px 20px; font-size: 15px; }
 .trackcell { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .whsum { background: #16191f; color: #fff; border-color: #16191f; }
