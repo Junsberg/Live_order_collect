@@ -1,0 +1,1689 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#16191f">
+<title>사자마켓 라이브</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦁</text></svg>">
+<style>
+  html, body { margin: 0; padding: 0; background: #f6f7f9; }
+  #loading { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; font-family: -apple-system, BlinkMacSystemFont, "Malgun Gothic", sans-serif; color: #16191f; }
+  #loading .dot { width: 10px; height: 10px; border-radius: 50%; background: #e8334a; animation: p 1.2s infinite; }
+  @keyframes p { 0%,100%{opacity:1} 50%{opacity:.3} }
+</style>
+<!-- React + ReactDOM + SheetJS (엑셀) CDN -->
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+<div id="root"><div id="loading"><div class="dot"></div><div>불러오는 중…</div></div></div>
+<script>
+const {
+  useState,
+  useEffect,
+  useMemo,
+  useRef
+} = React;
+
+// 브라우저 localStorage 기반 저장 어댑터 (claude.ai window.storage 대체)
+if (!window.storage) {
+  window.storage = {
+    get: async k => {
+      try {
+        const v = localStorage.getItem(k);
+        return v == null ? null : {
+          key: k,
+          value: v
+        };
+      } catch (e) {
+        return null;
+      }
+    },
+    set: async (k, v) => {
+      try {
+        localStorage.setItem(k, v);
+      } catch (e) {}
+      return {
+        key: k,
+        value: v
+      };
+    },
+    delete: async k => {
+      try {
+        localStorage.removeItem(k);
+      } catch (e) {}
+      return {
+        key: k,
+        deleted: true
+      };
+    },
+    list: async prefix => {
+      const keys = [];
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const kk = localStorage.key(i);
+          if (!prefix || kk.startsWith(prefix)) keys.push(kk);
+        }
+      } catch (e) {}
+      return {
+        keys
+      };
+    }
+  };
+}
+
+/* 사자마켓 라이브 주문 매니저
+   흐름: ① 오늘 상품 세팅 → ② 라이브 주문 입력 → ③ 정산서 발송/입금 확인 → ④ 출고/발주서
+   저장: window.storage (새로고침해도 유지) · 방송 날짜 기준 엑셀 저장 지원 */
+
+const won = n => (n || 0).toLocaleString("ko-KR");
+const uid = () => Math.random().toString(36).slice(2, 9);
+
+// 복원용 숨김 시트
+const APPDATA_SHEET = "_appdata";
+const APPDATA_MAGIC = "SAJA_APPDATA_V1";
+const APPDATA_CHUNK = 30000;
+const todayISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+const EMPTY_CUST = {
+  paid: false,
+  notified: false,
+  addrChecked: false,
+  name: "",
+  phone: "",
+  addr: "",
+  req: "",
+  memo: "",
+  tracking: "",
+  cashReceipt: "",
+  cashIssued: false
+};
+const SETTLE_HEADER = `안녕하세요.
+초보셀러 사자창고와 초보매니저 방송 지켜봐 주셔서 감사합니다.
+1) 택배발송할 성함, 연락처, 주소 전달 부탁드립니다.
+2) 입금계좌
+- 국민은행 59643701008900
+- 김상태(디스카운트미로미사점)
+3) 현금영수증
+- 필요하신 경우 현금현수증 발행 연락처도 같이 남겨주세요.`;
+function App() {
+  const [tab, setTab] = useState("order");
+  const [loaded, setLoaded] = useState(false);
+  const [products, setProducts] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [customers, setCustomers] = useState({});
+  const [shipFee, setShipFee] = useState(4000);
+  const [bdate, setBdate] = useState(todayISO());
+  const [pickState, setPickState] = useState({});
+  const [nick, setNick] = useState("");
+  const [pName, setPName] = useState("");
+  const [pPrice, setPPrice] = useState("");
+  const [copiedId, setCopiedId] = useState(null);
+  const [settleSearch, setSettleSearch] = useState("");
+  const [settleHeader, setSettleHeader] = useState(SETTLE_HEADER);
+  const [openMsg, setOpenMsg] = useState({});
+  const [openCash, setOpenCash] = useState({});
+  const [openMemo, setOpenMemo] = useState({});
+  const fileRef = useRef(null);
+  const shipFileRef = useRef(null);
+  const [shipData, setShipData] = useState([]);
+  const [shipSearch, setShipSearch] = useState("");
+  const [toast, setToast] = useState("");
+  const showToast = msg => {
+    setToast(msg);
+    window.clearTimeout(showToast._t);
+    showToast._t = window.setTimeout(() => setToast(""), 5000);
+  };
+  const [resetArm, setResetArm] = useState(false);
+  const [resetAllArm, setResetAllArm] = useState(false);
+  const [openCust, setOpenCust] = useState({});
+  const nickRef = useRef(null);
+
+  /* ---------- 저장/불러오기 ---------- */
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get("saja:session");
+        if (r && r.value) {
+          const d = JSON.parse(r.value);
+          setProducts(d.products || []);
+          setOrders(d.orders || []);
+          setCustomers(d.customers || {});
+          setShipFee(typeof d.shipFee === "number" ? d.shipFee : 4000);
+          setBdate(d.bdate || todayISO());
+          setPickState(d.pickState || {});
+          setSettleHeader(d.settleHeader || SETTLE_HEADER);
+          setShipData(d.shipData || []);
+        }
+      } catch (e) {/* 첫 실행 */}
+      setLoaded(true);
+    })();
+  }, []);
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setTimeout(() => {
+      window.storage.set("saja:session", JSON.stringify({
+        products,
+        orders,
+        customers,
+        shipFee,
+        bdate,
+        pickState,
+        settleHeader,
+        shipData
+      })).catch(() => {});
+    }, 400);
+    return () => clearTimeout(t);
+  }, [products, orders, customers, shipFee, bdate, pickState, settleHeader, shipData, loaded]);
+
+  /* ---------- 파생 데이터 ---------- */
+  const activeOrders = useMemo(() => orders.filter(o => !o.canceled), [orders]);
+  const totalSales = useMemo(() => activeOrders.reduce((s, o) => s + o.price * o.qty, 0), [activeOrders]);
+  const paidSales = useMemo(() => activeOrders.reduce((s, o) => s + (customers[o.nick] && customers[o.nick].paid ? o.price * o.qty : 0), 0), [activeOrders, customers]);
+  const nickList = useMemo(() => {
+    const s = [];
+    orders.forEach(o => {
+      if (!s.includes(o.nick)) s.push(o.nick);
+    });
+    return s;
+  }, [orders]);
+  const byNick = useMemo(() => {
+    const m = {};
+    activeOrders.forEach(o => {
+      (m[o.nick] = m[o.nick] || []).push(o);
+    });
+    return m;
+  }, [activeOrders]);
+  const paidCount = nickList.filter(n => customers[n] && customers[n].paid).length;
+  const dateCode = bdate.replace(/-/g, "");
+  const cust = n => customers[n] || EMPTY_CUST;
+  const setCust = (n, patch) => setCustomers(c => ({
+    ...c,
+    [n]: {
+      ...EMPTY_CUST,
+      ...(c[n] || {}),
+      ...patch
+    }
+  }));
+
+  /* ---------- 상품 ---------- */
+  const addProduct = () => {
+    const name = pName.trim();
+    const price = parseInt(pPrice, 10);
+    if (!name || isNaN(price)) return;
+    setProducts(p => [...p, {
+      id: uid(),
+      name,
+      price
+    }]);
+    setPName("");
+    setPPrice("");
+  };
+  const loadPrev = async () => {
+    try {
+      const r = await window.storage.get("saja:lastProducts");
+      if (r && r.value) {
+        const prev = JSON.parse(r.value);
+        setProducts(p => {
+          const names = p.map(x => x.name);
+          return [...p, ...prev.filter(x => !names.includes(x.name)).map(x => ({
+            ...x,
+            id: uid()
+          }))];
+        });
+      } else showToast("저장된 이전 방송 목록이 없습니다.");
+    } catch (e) {
+      showToast("저장된 이전 방송 목록이 없습니다.");
+    }
+  };
+  const newSession = async () => {
+    if (!resetArm) {
+      setResetArm(true);
+      setResetAllArm(false);
+      setTimeout(() => setResetArm(false), 3000);
+      return;
+    }
+    try {
+      if (products.length) await window.storage.set("saja:lastProducts", JSON.stringify(products));
+    } catch (e) {}
+    setOrders([]);
+    setCustomers({});
+    setNick("");
+    setResetArm(false);
+    setBdate(todayISO());
+    setPickState({});
+    setShipData([]);
+    setShipSearch("");
+  };
+  const newSessionAll = async () => {
+    if (!resetAllArm) {
+      setResetAllArm(true);
+      setResetArm(false);
+      setTimeout(() => setResetAllArm(false), 3000);
+      return;
+    }
+    try {
+      if (products.length) await window.storage.set("saja:lastProducts", JSON.stringify(products));
+    } catch (e) {}
+    setProducts([]);
+    setOrders([]);
+    setCustomers({});
+    setNick("");
+    setResetAllArm(false);
+    setBdate(todayISO());
+    setPickState({});
+    setShipData([]);
+    setShipSearch("");
+  };
+
+  /* ---------- 주문 ---------- */
+  const tapProduct = p => {
+    const n = nick.trim();
+    if (!n) {
+      nickRef.current && nickRef.current.focus();
+      return;
+    }
+    setOrders(os => {
+      const i = os.findIndex(o => o.nick === n && o.name === p.name && o.price === p.price && !o.canceled);
+      if (i >= 0) {
+        const cp = [...os];
+        cp[i] = {
+          ...cp[i],
+          qty: cp[i].qty + 1
+        };
+        return cp;
+      }
+      return [...os, {
+        id: uid(),
+        nick: n,
+        name: p.name,
+        price: p.price,
+        qty: 1,
+        canceled: false,
+        ts: Date.now()
+      }];
+    });
+    if (!customers[n]) setCust(n, {});
+  };
+  const chgQty = (id, d) => setOrders(os => os.map(o => o.id === id ? {
+    ...o,
+    qty: Math.max(1, o.qty + d)
+  } : o));
+  const toggleCancel = id => setOrders(os => os.map(o => o.id === id ? {
+    ...o,
+    canceled: !o.canceled
+  } : o));
+  const delOrder = id => setOrders(os => os.filter(o => o.id !== id));
+
+  /* ---------- 정산 ---------- */
+  const settleMsg = n => {
+    const list = byNick[n] || [];
+    const sum = list.reduce((s, o) => s + o.price * o.qty, 0);
+    const lines = list.map(o => `${o.name}_${o.qty}개*${o.price}원=${o.price * o.qty}원`);
+    return `${settleHeader}\n\n<정산서>\n주문하신 상품과 수량이 맞는지 확인 부탁드립니다.\n${lines.join("\n")}\n총 합계 금액은 ${won(sum)}원+합배송비 ${won(shipFee)}원 = ${won(sum + shipFee)}원 입니다.`;
+  };
+  const copyText = async (text, id, n) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    setCopiedId(id);
+    if (n) setCust(n, {
+      notified: true
+    });
+    setTimeout(() => setCopiedId(null), 1500);
+  };
+
+  /* ---------- 출고 ---------- */
+  const pivot = useMemo(() => {
+    const m = {};
+    activeOrders.forEach(o => {
+      const paid = cust(o.nick).paid;
+      m[o.name] = m[o.name] || {
+        paid: 0,
+        unpaid: 0
+      };
+      m[o.name][paid ? "paid" : "unpaid"] += o.qty;
+    });
+    return m;
+  }, [activeOrders, customers]);
+  const paidLines = useMemo(() => activeOrders.filter(o => cust(o.nick).paid), [activeOrders, customers]);
+
+  // 창고 픽업: 상품명 가나다순 정렬 + 총 픽업 수량
+  const pickupList = useMemo(() => Object.entries(pivot).sort((a, b) => a[0].localeCompare(b[0], "ko")), [pivot]);
+  const totalPickupQty = useMemo(() => Object.values(pivot).reduce((s, v) => s + v.paid + v.unpaid, 0), [pivot]);
+  const totalUnpaidQty = useMemo(() => Object.values(pivot).reduce((s, v) => s + v.unpaid, 0), [pivot]);
+  const pickedKinds = pickupList.filter(([n]) => pickState[n]).length;
+  const togglePick = name => setPickState(s => ({
+    ...s,
+    [name]: !s[name]
+  }));
+
+  // 현금영수증 번호를 입력한 사람만
+  const cashList = useMemo(() => nickList.filter(n => (cust(n).cashReceipt || "").trim()), [nickList, customers]);
+  const cashIssuedCount = cashList.filter(n => cust(n).cashIssued).length;
+
+  // 4. 송장출력_복사용(롯데) 시트 생성 — 원본 양식 그대로(A~R), 빈 컬럼도 헤더 유지, 수식 없이 값만
+  const buildShipSheet = () => {
+    // 업로드 탭에서 반영된 송장번호(닉네임 → 송장번호)
+    const trackByNick = {};
+    shipData.forEach(d => {
+      if (d.tracking) trackByNick[d.nick] = d.tracking;
+    });
+    const rows = [["이름", "전화번호", "휴대폰번호", "우편번호", "주소", "상품명", "옵션명", "추가구성", "수량", "주문번호", "운임구분", "배송시요구사항", "송장번호", "주문처", "보내는분", "전화번호", "운임", "송장번호"]];
+    paidLines.forEach(o => {
+      const c = cust(o.nick);
+      const trk = trackByNick[o.nick] || c.tracking || "";
+      rows.push([c.name || o.nick,
+      // A 이름
+      c.phone || "",
+      // B 전화번호
+      null,
+      // C 휴대폰번호 (완전 공란 · 원본과 동일)
+      "",
+      // D 우편번호 (빈 컬럼 유지)
+      c.addr || "",
+      // E 주소
+      `${o.name}_${o.qty}개`,
+      // F 상품명
+      "",
+      // G 옵션명 (빈 컬럼 유지)
+      "",
+      // H 추가구성 (빈 컬럼 유지)
+      o.qty,
+      // I 수량
+      o.nick,
+      // J 주문번호(닉네임)
+      "신용",
+      // K 운임구분 — 고정값
+      c.req || "",
+      // L 배송시요구사항
+      "",
+      // M 송장번호 (빈 컬럼 유지)
+      "사자창고",
+      // N 주문처 — 고정값
+      "사자창고",
+      // O 보내는분 — 고정값
+      "02-561-7000",
+      // P 전화번호 — 고정값
+      "",
+      // Q 운임 (빈 컬럼 유지)
+      trk // R 송장번호 — 업로드 반영값 우선
+      ]);
+    });
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws["!cols"] = [{
+      wch: 10
+    }, {
+      wch: 14
+    }, {
+      wch: 14
+    }, {
+      wch: 8
+    }, {
+      wch: 40
+    }, {
+      wch: 28
+    }, {
+      wch: 8
+    }, {
+      wch: 8
+    }, {
+      wch: 6
+    }, {
+      wch: 12
+    }, {
+      wch: 8
+    }, {
+      wch: 16
+    }, {
+      wch: 14
+    }, {
+      wch: 10
+    }, {
+      wch: 10
+    }, {
+      wch: 14
+    }, {
+      wch: 8
+    }, {
+      wch: 16
+    }];
+    return ws;
+  };
+
+  // 출고 탭 전용: 송장 시트 1개만 담긴 엑셀 다운로드
+  const exportShipXlsx = () => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, buildShipSheet(), "4. 송장출력_복사용(롯데)");
+    XLSX.writeFile(wb, `사자창고_출고_${dateCode}.xlsx`);
+  };
+
+  // 전체 상태를 숨김 시트로 저장 (불러오기 복원용)
+  const appendAppData = wb => {
+    const payload = JSON.stringify({
+      v: 1,
+      products,
+      orders,
+      customers,
+      shipFee,
+      bdate,
+      pickState,
+      settleHeader,
+      shipData
+    });
+    const rows = [[APPDATA_MAGIC]];
+    for (let i = 0; i < payload.length; i += APPDATA_CHUNK) rows.push([payload.slice(i, i + APPDATA_CHUNK)]);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), APPDATA_SHEET);
+    if (!wb.Workbook) wb.Workbook = {};
+    if (!wb.Workbook.Sheets) wb.Workbook.Sheets = [];
+    const idx = wb.SheetNames.indexOf(APPDATA_SHEET);
+    for (let i = 0; i <= idx; i++) if (!wb.Workbook.Sheets[i]) wb.Workbook.Sheets[i] = {};
+    wb.Workbook.Sheets[idx].Hidden = 1; // 숨김 시트 (인쇄·업로드 영향 없음)
+  };
+
+  // 상태 일괄 적용 (복원/파싱 공통)
+  const applyImported = d => {
+    setProducts(d.products || []);
+    setOrders(d.orders || []);
+    setCustomers(d.customers || {});
+    setShipFee(typeof d.shipFee === "number" ? d.shipFee : 4000);
+    setBdate(d.bdate || todayISO());
+    setPickState(d.pickState || {});
+    if (d.settleHeader) setSettleHeader(d.settleHeader);
+    setShipData(d.shipData || []);
+    setNick("");
+    setSettleSearch("");
+  };
+
+  // 원본 표준 양식(0.실시간_주문서 + 2.카톡_안내) 파싱
+  const parseOriginal = (wb, fileName) => {
+    const A = (ws, cell) => {
+      const c = ws[cell];
+      return c == null ? null : c.v;
+    };
+    const cell = (r, c) => XLSX.utils.encode_cell({
+      r,
+      c
+    });
+    const os = wb.Sheets["0. 실시간_주문서"];
+    const ref = XLSX.utils.decode_range(os["!ref"]);
+    const orders = [],
+      products = [],
+      noteLines = [];
+    let ts = Date.now();
+    for (let r = 1; r <= ref.e.r; r++) {
+      const nick = A(os, cell(r, 0)),
+        name = A(os, cell(r, 1));
+      const qty = A(os, cell(r, 2)),
+        price = A(os, cell(r, 3));
+      if (nick != null && name != null) {
+        let nm = String(name).trim(),
+          canceled = false;
+        if (/\(취소\)\s*$/.test(nm)) {
+          canceled = true;
+          nm = nm.replace(/\s*\(취소\)\s*$/, "").trim();
+        }
+        orders.push({
+          id: uid(),
+          nick: String(nick).trim(),
+          name: nm,
+          price: Number(price) || 0,
+          qty: Number(qty) || 1,
+          canceled,
+          ts: ts++
+        });
+      }
+      const g = A(os, cell(r, 6)),
+        h = A(os, cell(r, 7));
+      if (g != null) products.push({
+        id: uid(),
+        name: String(g).trim(),
+        price: Number(h) || 0
+      });
+      const note = A(os, cell(r, 10));
+      if (note != null && String(note).trim()) noteLines.push(String(note).trim());
+    }
+    const customers = {};
+    let shipFee = 4000;
+    const ks = wb.Sheets["2. 카톡_안내"];
+    if (ks) {
+      const kref = XLSX.utils.decode_range(ks["!ref"]);
+      const o1 = A(ks, "O1");
+      if (Number(o1)) shipFee = Number(o1);
+      for (let r = 1; r <= kref.e.r; r++) {
+        const nick = A(ks, cell(r, 0));
+        if (nick == null) continue;
+        const key = String(nick).trim();
+        const reqRaw = A(ks, cell(r, 9)),
+          cash = A(ks, cell(r, 10));
+        const issued = String(reqRaw || "").includes("발행");
+        customers[key] = {
+          ...EMPTY_CUST,
+          notified: String(A(ks, cell(r, 2)) || "").includes("안내"),
+          paid: String(A(ks, cell(r, 4)) || "").includes("확인"),
+          name: A(ks, cell(r, 6)) ? String(A(ks, cell(r, 6))) : "",
+          phone: A(ks, cell(r, 7)) ? String(A(ks, cell(r, 7))) : "",
+          addr: A(ks, cell(r, 8)) ? String(A(ks, cell(r, 8))) : "",
+          req: issued ? "" : reqRaw ? String(reqRaw) : "",
+          memo: A(ks, cell(r, 11)) ? String(A(ks, cell(r, 11))) : "",
+          cashReceipt: cash ? String(cash) : "",
+          cashIssued: issued
+        };
+      }
+    }
+    // "닉네임 - 내용" 특이사항 나열 → 해당 닉네임 memo 병합
+    const nickSet = orders.map(o => o.nick);
+    noteLines.forEach(line => {
+      const parts = line.split(/\s+-\s+/);
+      if (parts.length >= 2) {
+        const cand = parts[0].trim(),
+          content = parts.slice(1).join(" - ").trim();
+        const target = nickSet.find(nk => nk === cand);
+        if (target) {
+          if (!customers[target]) customers[target] = {
+            ...EMPTY_CUST
+          };
+          customers[target].memo = customers[target].memo ? customers[target].memo + " / " + content : content;
+        }
+      }
+    });
+    let bdate = todayISO();
+    const dm = String(fileName || "").match(/(20\d{2})(\d{2})(\d{2})/);
+    if (dm) bdate = `${dm[1]}-${dm[2]}-${dm[3]}`;
+    return {
+      products,
+      orders,
+      customers,
+      shipFee,
+      bdate,
+      pickState: {}
+    };
+  };
+
+  // 엑셀 불러오기 — 앱 저장 파일이면 복원, 원본 표준양식이면 파싱
+  const importXlsx = async file => {
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, {
+        type: "array"
+      });
+      const ws = wb.Sheets[APPDATA_SHEET];
+      if (ws) {
+        const aoa = XLSX.utils.sheet_to_json(ws, {
+          header: 1
+        });
+        if (aoa.length && aoa[0][0] === APPDATA_MAGIC) {
+          const d = JSON.parse(aoa.slice(1).map(r => r && r[0] || "").join(""));
+          applyImported(d);
+          showToast(`✓ ${d.bdate || ""} 데이터를 불러왔습니다.`);
+          return;
+        }
+      }
+      if (wb.Sheets["0. 실시간_주문서"]) {
+        const d = parseOriginal(wb, file.name);
+        applyImported(d);
+        showToast(`✓ ${d.bdate} 원본 양식 불러옴 · 주문 ${d.orders.length}건 (취소 ${d.orders.filter(o => o.canceled).length}건 · 고객 ${Object.keys(d.customers).length}명)`);
+        return;
+      }
+      showToast("불러올 데이터가 없습니다. 앱 저장 파일 또는 표준 양식(0.실시간_주문서 포함)을 올려주세요.");
+    } catch (e) {
+      showToast("불러오기 실패: " + (e.message || "파일을 읽을 수 없습니다."));
+    }
+  };
+  const onFilePick = e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    importXlsx(file);
+  };
+
+  // 5. 업로드 — 송장번호 채운 출고 파일에서 고객별 운송장 조회
+  const parseShipUpload = wb => {
+    const ws = wb.Sheets["4. 송장출력_복사용(롯데)"];
+    if (!ws) return null;
+    const clean = s => s === "#N/A" || s === "#REF!" || s === "0" ? "" : s;
+    const V = c => {
+      const x = ws[c];
+      return x == null ? "" : String(x.v == null ? "" : x.v).trim();
+    };
+    const cell = (r, c) => XLSX.utils.encode_cell({
+      r,
+      c
+    });
+    const ref = XLSX.utils.decode_range(ws["!ref"]);
+    const map = {};
+    for (let r = 1; r <= ref.e.r; r++) {
+      const nick = V(cell(r, 9)); // J열 주문번호(닉네임)
+      if (!nick || nick === "0" || nick.startsWith("#")) continue; // 빈행·오류행 제외
+      const tracking = clean(V(cell(r, 17))); // R열 송장번호
+      if (!map[nick]) {
+        map[nick] = {
+          nick,
+          name: clean(V(cell(r, 0))),
+          phone: clean(V(cell(r, 1))),
+          addr: clean(V(cell(r, 4))),
+          tracking,
+          carrier: tracking ? "롯데택배" : ""
+        };
+      } else if (tracking && !map[nick].tracking) {
+        map[nick].tracking = tracking;
+        map[nick].carrier = "롯데택배";
+      }
+    }
+    return Object.values(map);
+  };
+  const onShipFilePick = async e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, {
+        type: "array"
+      });
+      const data = parseShipUpload(wb);
+      if (!data) {
+        showToast("송장 시트(4.송장출력_복사용)를 찾을 수 없습니다. 출고 파일을 올려주세요.");
+        return;
+      }
+      // 누적 병합: 기존 목록에 합치고, 같은 닉네임은 갱신
+      let added = 0,
+        updated = 0;
+      setShipData(prev => {
+        const byNickIdx = {};
+        prev.forEach((d, i) => {
+          byNickIdx[d.nick] = i;
+        });
+        const next = [...prev];
+        data.forEach(d => {
+          if (byNickIdx[d.nick] != null) {
+            next[byNickIdx[d.nick]] = d;
+            updated++;
+          } else {
+            next.push(d);
+            byNickIdx[d.nick] = next.length - 1;
+            added++;
+          }
+        });
+        return next;
+      });
+      showToast(`✓ 반영됨 · 추가 ${added}명 · 갱신 ${updated}명`);
+    } catch (e) {
+      showToast("업로드 실패: " + (e.message || "파일을 읽을 수 없습니다."));
+    }
+  };
+  const clearShipData = () => {
+    setShipData([]);
+    setShipSearch("");
+    showToast("조회 목록을 비웠습니다.");
+  };
+
+  /* ---------- 엑셀 저장 (원본 양식 시트 구조) ---------- */
+  const exportXlsx = () => {
+    const wb = XLSX.utils.book_new();
+    const sorted = [...orders].sort((a, b) => a.nick.localeCompare(b.nick, "ko") || a.ts - b.ts);
+    // 닉네임별 특이사항을 그 닉네임의 첫 행에만 표기
+    const seenNote = {};
+
+    // 0. 실시간_주문서
+    const s0 = [["닉네임", "상품명", "수량", "금액", "수량x금액", null, "금일 판매 상품 목록", "금액", null, "특이사항"]];
+    const maxLen = Math.max(sorted.length, products.length);
+    for (let i = 0; i < maxLen; i++) {
+      const o = sorted[i],
+        p = products[i];
+      let noteCell = null;
+      if (o) {
+        const m = (cust(o.nick).memo || "").trim();
+        if (m && !seenNote[o.nick]) {
+          noteCell = `${o.nick} - ${m}`;
+          seenNote[o.nick] = true;
+        }
+      }
+      s0.push([o ? o.nick : null, o ? o.name + (o.canceled ? " (취소)" : "") : null, o ? o.qty : null, o && !o.canceled ? o.price : null, o && !o.canceled ? o.price * o.qty : null, null, p ? p.name : null, p ? p.price : null, null, noteCell]);
+    }
+    const ws0 = XLSX.utils.aoa_to_sheet(s0);
+    ws0["!cols"] = [{
+      wch: 12
+    }, {
+      wch: 24
+    }, {
+      wch: 6
+    }, {
+      wch: 10
+    }, {
+      wch: 12
+    }, {
+      wch: 3
+    }, {
+      wch: 26
+    }, {
+      wch: 10
+    }, {
+      wch: 3
+    }, {
+      wch: 32
+    }];
+    XLSX.utils.book_append_sheet(wb, ws0, "0. 실시간_주문서");
+
+    // 1. 정산서
+    const activeSorted = sorted.filter(o => !o.canceled);
+    const s1 = [["닉네임", "상품명", "수량", "금액", "수량x금액", "정산서", null, "합배송비", shipFee]];
+    activeSorted.forEach(o => {
+      const amt = o.price * o.qty;
+      s1.push([o.nick, o.name, o.qty, o.price, amt, `${o.name}_${o.qty}개*${o.price}원=${amt}원`]);
+    });
+    const ws1 = XLSX.utils.aoa_to_sheet(s1);
+    ws1["!cols"] = [{
+      wch: 12
+    }, {
+      wch: 24
+    }, {
+      wch: 6
+    }, {
+      wch: 10
+    }, {
+      wch: 12
+    }, {
+      wch: 46
+    }, {
+      wch: 3
+    }, {
+      wch: 10
+    }, {
+      wch: 8
+    }];
+    XLSX.utils.book_append_sheet(wb, ws1, "1. 정산서");
+
+    // 2. 카톡_안내
+    const s2 = [["닉네임", "총 결제금액", "안내여부", "금액", "입금여부", "주소확인", "이름", "연락처", "주소", "배송 요청사항", "현금영수증", "현금영수증 발행", "특이사항"]];
+    nickList.forEach(n => {
+      const c = cust(n);
+      const sum = (byNick[n] || []).reduce((s, o) => s + o.price * o.qty, 0);
+      s2.push([n, sum + shipFee, c.notified ? "안내" : "", sum, c.paid ? "확인" : "", c.addrChecked ? "확인" : "", c.name, c.phone, c.addr, c.req, c.cashReceipt || "", c.cashIssued ? "발행완료" : "", c.memo]);
+    });
+    const ws2 = XLSX.utils.aoa_to_sheet(s2);
+    ws2["!cols"] = [{
+      wch: 12
+    }, {
+      wch: 11
+    }, {
+      wch: 8
+    }, {
+      wch: 9
+    }, {
+      wch: 8
+    }, {
+      wch: 8
+    }, {
+      wch: 10
+    }, {
+      wch: 14
+    }, {
+      wch: 40
+    }, {
+      wch: 16
+    }, {
+      wch: 16
+    }, {
+      wch: 12
+    }, {
+      wch: 14
+    }];
+    XLSX.utils.book_append_sheet(wb, ws2, "2. 카톡_안내");
+
+    // 2-1. 출고예정품목
+    const s21 = [["상품명", "입금완료", "미입금", "합계"]];
+    let tp = 0,
+      tu = 0;
+    Object.entries(pivot).forEach(([name, v]) => {
+      s21.push([name, v.paid || 0, v.unpaid || 0, v.paid + v.unpaid]);
+      tp += v.paid;
+      tu += v.unpaid;
+    });
+    s21.push(["합계", tp, tu, tp + tu]);
+    const ws21 = XLSX.utils.aoa_to_sheet(s21);
+    ws21["!cols"] = [{
+      wch: 26
+    }, {
+      wch: 9
+    }, {
+      wch: 8
+    }, {
+      wch: 8
+    }];
+    XLSX.utils.book_append_sheet(wb, ws21, "2-1.출고예정품목");
+
+    // 3. 택배_출고_발주서
+    const s3 = [["닉네임", "상품명", "수량", "금액", "수량x금액", "입금여부", "이름", "연락처", "주소", "배송 요청사항", "택배_상품명", "운송장번호"]];
+    activeSorted.forEach(o => {
+      const c = cust(o.nick);
+      s3.push([o.nick, o.name, o.qty, o.price, o.price * o.qty, c.paid ? "확인" : "미입금", c.name || o.nick, c.phone, c.addr, c.req, `${o.name}_${o.qty}개`, ""]);
+    });
+    const ws3 = XLSX.utils.aoa_to_sheet(s3);
+    ws3["!cols"] = [{
+      wch: 12
+    }, {
+      wch: 24
+    }, {
+      wch: 6
+    }, {
+      wch: 10
+    }, {
+      wch: 12
+    }, {
+      wch: 8
+    }, {
+      wch: 10
+    }, {
+      wch: 14
+    }, {
+      wch: 40
+    }, {
+      wch: 16
+    }, {
+      wch: 28
+    }, {
+      wch: 14
+    }];
+    XLSX.utils.book_append_sheet(wb, ws3, "3. 택배_출고_발주서");
+
+    // 4. 송장출력_복사용(롯데) — 공통 빌더 사용
+    XLSX.utils.book_append_sheet(wb, buildShipSheet(), "4. 송장출력_복사용(롯데)");
+
+    // 복원용 숨김 시트 (불러오기 시 사용)
+    appendAppData(wb);
+    XLSX.writeFile(wb, `${dateCode}_사자마켓_라이브.xlsx`);
+  };
+
+  /* ---------- 렌더 ---------- */
+  const tabs = [["product", "① 상품", products.length], ["order", "② 주문", activeOrders.length], ["settle", "③ 정산", nickList.length - paidCount], ["ship", "④ 출고", paidLines.length], ["upload", "⑤ 업로드", shipData.length], ["warehouse", "📦 창고", totalPickupQty], ["extras", "🧾 영수증", cashList.length], ["settings", "⚙️ 설정", 0]];
+  return /*#__PURE__*/React.createElement("div", {
+    className: "app"
+  }, /*#__PURE__*/React.createElement("style", null, CSS), toast && /*#__PURE__*/React.createElement("div", {
+    className: "toast",
+    onClick: () => setToast("")
+  }, toast), /*#__PURE__*/React.createElement("div", {
+    className: "topbar"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "livewrap"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "livedot"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "livetxt"
+  }, "LIVE")), /*#__PURE__*/React.createElement("div", {
+    className: "topsum"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "topamts"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "topamt"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "tlabel"
+  }, "주문"), /*#__PURE__*/React.createElement("span", {
+    className: "tval"
+  }, "₩", won(totalSales))), /*#__PURE__*/React.createElement("div", {
+    className: "topamt paid"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "tlabel"
+  }, "입금"), /*#__PURE__*/React.createElement("span", {
+    className: "tval"
+  }, "₩", won(paidSales)))), /*#__PURE__*/React.createElement("div", {
+    className: "topmeta"
+  }, "주문 ", activeOrders.length, "건 · 주문자 ", nickList.length, "명 · 입금 ", paidCount, "/", nickList.length, "명")), /*#__PURE__*/React.createElement("div", {
+    className: "topright"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "datein",
+    type: "date",
+    value: bdate,
+    onChange: e => setBdate(e.target.value || todayISO())
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "btn xlbtn",
+    onClick: exportXlsx,
+    disabled: orders.length === 0 && products.length === 0
+  }, "엑셀 저장"), /*#__PURE__*/React.createElement("button", {
+    className: "btn upbtn",
+    onClick: () => fileRef.current && fileRef.current.click()
+  }, "불러오기"))), /*#__PURE__*/React.createElement("div", {
+    className: "tabs"
+  }, tabs.map(([k, label, badge]) => /*#__PURE__*/React.createElement("button", {
+    key: k,
+    className: "tab" + (tab === k ? " on" : ""),
+    onClick: () => setTab(k)
+  }, label, badge > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "badge"
+  }, badge)))), tab === "product" && /*#__PURE__*/React.createElement("div", {
+    className: "pane"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "오늘 판매 상품 목록 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "방송마다 새로 세팅")), /*#__PURE__*/React.createElement("div", {
+    className: "addrow"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "in grow",
+    placeholder: "상품명 (예: 냉감패드 그레이 SS)",
+    value: pName,
+    onChange: e => setPName(e.target.value),
+    onKeyDown: e => e.key === "Enter" && addProduct()
+  }), /*#__PURE__*/React.createElement("input", {
+    className: "in price",
+    type: "number",
+    placeholder: "금액",
+    value: pPrice,
+    onChange: e => setPPrice(e.target.value),
+    onKeyDown: e => e.key === "Enter" && addProduct()
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "btn primary",
+    onClick: addProduct
+  }, "추가")), products.length === 0 && /*#__PURE__*/React.createElement("div", {
+    className: "empty"
+  }, "아직 상품이 없습니다. 오늘 팔 상품을 등록하세요."), products.map(p => /*#__PURE__*/React.createElement("div", {
+    className: "prow",
+    key: p.id
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "in grow bare",
+    value: p.name,
+    onChange: e => setProducts(ps => ps.map(x => x.id === p.id ? {
+      ...x,
+      name: e.target.value
+    } : x))
+  }), /*#__PURE__*/React.createElement("input", {
+    className: "in price bare",
+    type: "number",
+    value: p.price,
+    onChange: e => setProducts(ps => ps.map(x => x.id === p.id ? {
+      ...x,
+      price: parseInt(e.target.value, 10) || 0
+    } : x))
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost",
+    onClick: () => setProducts(ps => ps.filter(x => x.id !== p.id))
+  }, "삭제")))), /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "방송 관리"), /*#__PURE__*/React.createElement("div", {
+    className: "rowgap"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn",
+    onClick: loadPrev
+  }, "이전 방송 상품 불러오기"), /*#__PURE__*/React.createElement("button", {
+    className: "btn " + (resetArm ? "danger" : ""),
+    onClick: newSession
+  }, resetArm ? "한 번 더 탭 (주문만 초기화)" : "새 방송 시작 (주문 초기화)"), /*#__PURE__*/React.createElement("button", {
+    className: "btn " + (resetAllArm ? "danger" : ""),
+    onClick: newSessionAll
+  }, resetAllArm ? "한 번 더 탭 (상품까지 초기화)" : "새 방송 시작 (상품 초기화)")), /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, /*#__PURE__*/React.createElement("b", null, "주문 초기화"), ": 상품 목록은 그대로 두고 주문·고객·송장만 비웁니다 (같은 상품으로 이어서 방송).", /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("b", null, "상품 초기화"), ": 상품까지 전부 비웁니다 (다른 곳에서 새 상품으로 방송). 어느 쪽이든 현재 상품은 백업되어 「이전 방송 상품 불러오기」로 되살릴 수 있습니다."))), tab === "order" && /*#__PURE__*/React.createElement("div", {
+    className: "pane"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "주문 입력 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "닉네임 입력 → 상품 탭 (같은 상품 또 탭하면 수량 +1)")), /*#__PURE__*/React.createElement("input", {
+    ref: nickRef,
+    className: "in big",
+    placeholder: "닉네임",
+    value: nick,
+    list: "nicks",
+    onChange: e => setNick(e.target.value)
+  }), /*#__PURE__*/React.createElement("datalist", {
+    id: "nicks"
+  }, nickList.map(n => /*#__PURE__*/React.createElement("option", {
+    key: n,
+    value: n
+  }))), products.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "empty"
+  }, "① 상품 탭에서 오늘 판매 상품을 먼저 등록하세요.") : /*#__PURE__*/React.createElement("div", {
+    className: "pad" + (nick.trim() ? "" : " dim")
+  }, products.map(p => /*#__PURE__*/React.createElement("button", {
+    key: p.id,
+    className: "padbtn",
+    onClick: () => tapProduct(p)
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "padname"
+  }, p.name), /*#__PURE__*/React.createElement("span", {
+    className: "padprice"
+  }, won(p.price), "원")))), !nick.trim() && products.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "닉네임을 먼저 입력하면 상품 버튼이 활성화됩니다.")), nick.trim() && (byNick[nick.trim()] || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "card focus"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "「", nick.trim(), "」 현재 주문 · 합계 ", won((byNick[nick.trim()] || []).reduce((s, o) => s + o.price * o.qty, 0)), "원"), orders.filter(o => o.nick === nick.trim()).map(o => /*#__PURE__*/React.createElement(OrderRow, {
+    key: o.id,
+    o: o,
+    chgQty: chgQty,
+    toggleCancel: toggleCancel,
+    delOrder: delOrder,
+    hideNick: true
+  })), /*#__PURE__*/React.createElement("input", {
+    className: "in",
+    style: {
+      marginTop: 8
+    },
+    placeholder: "이 주문자 특이사항 (예: 매장픽업, 킵, 문자주문)",
+    value: cust(nick.trim()).memo,
+    onChange: e => setCust(nick.trim(), {
+      memo: e.target.value
+    })
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "전체 주문 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "최신순")), orders.length === 0 && /*#__PURE__*/React.createElement("div", {
+    className: "empty"
+  }, "아직 주문이 없습니다."), [...orders].sort((a, b) => b.ts - a.ts).map(o => /*#__PURE__*/React.createElement(OrderRow, {
+    key: o.id,
+    o: o,
+    chgQty: chgQty,
+    toggleCancel: toggleCancel,
+    delOrder: delOrder
+  })))), tab === "settle" && /*#__PURE__*/React.createElement("div", {
+    className: "pane"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card settletop"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "in search",
+    placeholder: "🔍 닉네임 검색",
+    value: settleSearch,
+    onChange: e => setSettleSearch(e.target.value)
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "feeinline"
+  }, "합배송비 ", /*#__PURE__*/React.createElement("input", {
+    className: "in feesmall",
+    type: "number",
+    value: shipFee,
+    onChange: e => setShipFee(parseInt(e.target.value, 10) || 0)
+  }), "원")), nickList.length === 0 && /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "empty"
+  }, "주문이 들어오면 닉네임별 정산 카드가 생깁니다.")), nickList.length > 0 && nickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase())).length === 0 && /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "empty"
+  }, "「", settleSearch, "」 검색 결과가 없습니다.")), nickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase())).map(n => {
+    const list = byNick[n] || [];
+    const sum = list.reduce((s, o) => s + o.price * o.qty, 0);
+    const c = cust(n);
+    const open = !!openCust[n];
+    return /*#__PURE__*/React.createElement("div", {
+      className: "card" + (c.paid ? " paidcard" : ""),
+      key: n
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "rowbetween"
+    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+      className: "nickname"
+    }, n), /*#__PURE__*/React.createElement("span", {
+      className: "amount"
+    }, " ", won(sum + shipFee), "원"), /*#__PURE__*/React.createElement("span", {
+      className: "sub"
+    }, " (상품 ", won(sum), " + 배송 ", won(shipFee), ")")), /*#__PURE__*/React.createElement("div", {
+      className: "chips"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "chip" + (c.notified ? " on" : ""),
+      onClick: () => setCust(n, {
+        notified: !c.notified
+      })
+    }, "안내"), /*#__PURE__*/React.createElement("button", {
+      className: "chip pay" + (c.paid ? " on" : ""),
+      onClick: () => setCust(n, {
+        paid: !c.paid
+      })
+    }, "입금"))), list.length === 0 && /*#__PURE__*/React.createElement("div", {
+      className: "empty small"
+    }, "유효 주문 없음 (전체 취소됨)"), list.length > 0 && openMsg[n] && /*#__PURE__*/React.createElement("pre", {
+      className: "msg"
+    }, settleMsg(n)), /*#__PURE__*/React.createElement("div", {
+      className: "rowgap"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn primary",
+      disabled: list.length === 0,
+      onClick: () => copyText(settleMsg(n), "msg-" + n, n)
+    }, copiedId === "msg-" + n ? "복사됨 ✓" : "정산서 복사"), /*#__PURE__*/React.createElement("button", {
+      className: "btn",
+      disabled: list.length === 0,
+      onClick: () => setOpenMsg(s => ({
+        ...s,
+        [n]: !s[n]
+      }))
+    }, openMsg[n] ? "정산서 접기" : "정산서 보기"), /*#__PURE__*/React.createElement("button", {
+      className: "btn",
+      onClick: () => setOpenCust(s => ({
+        ...s,
+        [n]: !open
+      }))
+    }, open ? "배송지 접기" : "배송지 입력"), /*#__PURE__*/React.createElement("button", {
+      className: "btn" + (c.cashReceipt ? " hascash" : ""),
+      onClick: () => setOpenCash(s => ({
+        ...s,
+        [n]: !s[n]
+      }))
+    }, openCash[n] ? "현금영수증 접기" : c.cashReceipt ? "현금영수증 ✓" : "현금영수증"), /*#__PURE__*/React.createElement("button", {
+      className: "btn" + (c.memo ? " hasmemo" : ""),
+      onClick: () => setOpenMemo(s => ({
+        ...s,
+        [n]: !s[n]
+      }))
+    }, openMemo[n] ? "특이사항 접기" : c.memo ? "특이사항 ✓" : "특이사항")), openMemo[n] && /*#__PURE__*/React.createElement("div", {
+      className: "custform"
+    }, /*#__PURE__*/React.createElement("input", {
+      className: "in",
+      placeholder: "특이사항 (예: 매장픽업, 킵, 문자주문)",
+      value: c.memo,
+      onChange: e => setCust(n, {
+        memo: e.target.value
+      })
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "hint"
+    }, "주문 탭에서 적은 특이사항이 여기 표시됩니다. 수정하면 함께 반영됩니다.")), openCash[n] && /*#__PURE__*/React.createElement("div", {
+      className: "custform"
+    }, /*#__PURE__*/React.createElement("input", {
+      className: "in",
+      placeholder: "현금영수증 발행 번호 (연락처 또는 사업자번호)",
+      value: c.cashReceipt,
+      onChange: e => setCust(n, {
+        cashReceipt: e.target.value
+      })
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "hint"
+    }, "번호를 입력하면 「🧾 영수증」 탭에 나타나고, 거기서 발행 처리합니다.")), open && /*#__PURE__*/React.createElement("div", {
+      className: "custform"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "rowgap"
+    }, /*#__PURE__*/React.createElement("input", {
+      className: "in grow",
+      placeholder: "이름",
+      value: c.name,
+      onChange: e => setCust(n, {
+        name: e.target.value
+      })
+    }), /*#__PURE__*/React.createElement("input", {
+      className: "in grow",
+      placeholder: "연락처 (010-)",
+      value: c.phone,
+      onChange: e => setCust(n, {
+        phone: e.target.value
+      })
+    })), /*#__PURE__*/React.createElement("input", {
+      className: "in",
+      placeholder: "주소",
+      value: c.addr,
+      onChange: e => setCust(n, {
+        addr: e.target.value
+      })
+    }), /*#__PURE__*/React.createElement("input", {
+      className: "in",
+      placeholder: "배송 요청사항",
+      value: c.req,
+      onChange: e => setCust(n, {
+        req: e.target.value
+      })
+    })), c.memo && !openMemo[n] && /*#__PURE__*/React.createElement("div", {
+      className: "hint"
+    }, "특이사항: ", c.memo));
+  })), tab === "ship" && /*#__PURE__*/React.createElement("div", {
+    className: "pane"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "택배 발주서 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "입금 완료 건만 · 상단 「엑셀 저장」에 포함")), paidLines.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "empty"
+  }, "입금 확인된 주문이 아직 없습니다. ③ 정산 탭에서 「입금」을 체크하세요.") : /*#__PURE__*/React.createElement("div", {
+    className: "tblwrap"
+  }, /*#__PURE__*/React.createElement("table", {
+    className: "tbl"
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "닉네임"), /*#__PURE__*/React.createElement("th", null, "택배 상품명"), /*#__PURE__*/React.createElement("th", null, "이름"), /*#__PURE__*/React.createElement("th", null, "연락처"), /*#__PURE__*/React.createElement("th", null, "주소"))), /*#__PURE__*/React.createElement("tbody", null, paidLines.map(o => {
+    const c = cust(o.nick);
+    const missing = !c.addr || !c.phone;
+    return /*#__PURE__*/React.createElement("tr", {
+      key: o.id,
+      className: missing ? "rowwarn" : ""
+    }, /*#__PURE__*/React.createElement("td", null, o.nick), /*#__PURE__*/React.createElement("td", null, o.name, "_", o.qty, "개"), /*#__PURE__*/React.createElement("td", null, c.name || o.nick), /*#__PURE__*/React.createElement("td", null, c.phone || "—"), /*#__PURE__*/React.createElement("td", null, c.addr || "주소 미입력"));
+  }))))), /*#__PURE__*/React.createElement("div", {
+    className: "card shipdl"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "rowbetween"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
+  }, "출고 파일 다운로드"), /*#__PURE__*/React.createElement("div", {
+    className: "sub"
+  }, "「4. 송장출력_복사용(롯데)」 시트 1개 · 롯데 업로드용")), /*#__PURE__*/React.createElement("button", {
+    className: "btn primary big",
+    disabled: paidLines.length === 0,
+    onClick: exportShipXlsx
+  }, "엑셀 다운로드")), /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "파일명: 사자창고_출고_", dateCode, ".xlsx"))), tab === "upload" && /*#__PURE__*/React.createElement("div", {
+    className: "pane"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "rowbetween"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
+  }, "송장 조회 ", shipData.length > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "누적 ", shipData.length, "명 · 송장 ", shipData.filter(d => d.tracking).length, "명")), /*#__PURE__*/React.createElement("div", {
+    className: "sub"
+  }, "송장번호 채운 출고 파일 업로드 → 고객별 운송장 확인 (여러 번 올리면 누적됩니다)")), /*#__PURE__*/React.createElement("div", {
+    className: "rowgap"
+  }, shipData.length > 0 && /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost",
+    onClick: clearShipData
+  }, "초기화"), /*#__PURE__*/React.createElement("button", {
+    className: "btn primary",
+    onClick: () => shipFileRef.current && shipFileRef.current.click()
+  }, "출고 파일 업로드"))), shipData.length > 0 && /*#__PURE__*/React.createElement("input", {
+    className: "in search",
+    style: {
+      marginTop: 12
+    },
+    placeholder: "🔍 닉네임 또는 이름 검색",
+    value: shipSearch,
+    onChange: e => setShipSearch(e.target.value)
+  })), shipData.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "empty"
+  }, "④ 출고 탭에서 파일을 받아 R열(송장번호)을 채운 뒤,", /*#__PURE__*/React.createElement("br", null), "여기에 업로드하면 고객별 운송장번호를 조회할 수 있습니다.")) : (() => {
+    const q = shipSearch.trim().toLowerCase();
+    const filtered = shipData.filter(d => d.nick.toLowerCase().includes(q) || (d.name || "").toLowerCase().includes(q));
+    return /*#__PURE__*/React.createElement("div", {
+      className: "card"
+    }, filtered.length === 0 ? /*#__PURE__*/React.createElement("div", {
+      className: "empty"
+    }, "「", shipSearch, "」 검색 결과가 없습니다.") : /*#__PURE__*/React.createElement("div", {
+      className: "tblwrap"
+    }, /*#__PURE__*/React.createElement("table", {
+      className: "tbl"
+    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "닉네임"), /*#__PURE__*/React.createElement("th", null, "이름"), /*#__PURE__*/React.createElement("th", null, "연락처"), /*#__PURE__*/React.createElement("th", null, "주소"), /*#__PURE__*/React.createElement("th", null, "택배사"), /*#__PURE__*/React.createElement("th", null, "운송장번호"))), /*#__PURE__*/React.createElement("tbody", null, filtered.map((d, i) => /*#__PURE__*/React.createElement("tr", {
+      key: i,
+      className: d.tracking ? "" : "rowwarn"
+    }, /*#__PURE__*/React.createElement("td", {
+      className: "whname"
+    }, d.nick), /*#__PURE__*/React.createElement("td", null, d.name || "-"), /*#__PURE__*/React.createElement("td", null, d.phone || "-"), /*#__PURE__*/React.createElement("td", null, d.addr || "-"), /*#__PURE__*/React.createElement("td", null, d.carrier || "-"), /*#__PURE__*/React.createElement("td", {
+      className: "trackcell"
+    }, d.tracking || "미입력")))))));
+  })()), tab === "warehouse" && /*#__PURE__*/React.createElement("div", {
+    className: "pane"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card whsum"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "whsumrow"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "whbig"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "whbignum"
+  }, totalPickupQty), /*#__PURE__*/React.createElement("span", {
+    className: "whbiglabel"
+  }, "개 챙겨오기")), /*#__PURE__*/React.createElement("div", {
+    className: "whmeta"
+  }, /*#__PURE__*/React.createElement("div", null, "상품 종류 ", /*#__PURE__*/React.createElement("b", null, pickupList.length), "종"), /*#__PURE__*/React.createElement("div", null, "미입금 여분 포함 ", /*#__PURE__*/React.createElement("b", {
+    className: "warn"
+  }, totalUnpaidQty), "개"), /*#__PURE__*/React.createElement("div", null, "담음 ", /*#__PURE__*/React.createElement("b", null, pickedKinds), " / ", pickupList.length, "종"))), /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "미입금분도 나중에 입금될 수 있어 ", /*#__PURE__*/React.createElement("b", null, "총합계 수량"), "만큼 챙기는 걸 기준으로 합니다. (취소분은 제외)")), /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "상품별 픽업 수량 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "상품명 순 · 담으면서 체크")), pickupList.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "empty"
+  }, "주문이 없습니다.") : /*#__PURE__*/React.createElement("table", {
+    className: "tbl whtbl"
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null), /*#__PURE__*/React.createElement("th", null, "상품명"), /*#__PURE__*/React.createElement("th", {
+    className: "r"
+  }, "미입금"), /*#__PURE__*/React.createElement("th", {
+    className: "r"
+  }, "확인"), /*#__PURE__*/React.createElement("th", {
+    className: "r"
+  }, "총합계"))), /*#__PURE__*/React.createElement("tbody", null, pickupList.map(([name, v]) => {
+    const picked = !!pickState[name];
+    return /*#__PURE__*/React.createElement("tr", {
+      key: name,
+      className: picked ? "picked" : "",
+      onClick: () => togglePick(name)
+    }, /*#__PURE__*/React.createElement("td", {
+      className: "chk"
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked: picked,
+      onChange: () => togglePick(name),
+      onClick: e => e.stopPropagation()
+    })), /*#__PURE__*/React.createElement("td", {
+      className: "whname"
+    }, name), /*#__PURE__*/React.createElement("td", {
+      className: "r warn"
+    }, v.unpaid || "-"), /*#__PURE__*/React.createElement("td", {
+      className: "r ok"
+    }, v.paid || "-"), /*#__PURE__*/React.createElement("td", {
+      className: "r whtotal"
+    }, v.paid + v.unpaid));
+  })), /*#__PURE__*/React.createElement("tfoot", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", null, "총합계"), /*#__PURE__*/React.createElement("td", {
+    className: "r warn"
+  }, totalUnpaidQty), /*#__PURE__*/React.createElement("td", {
+    className: "r ok"
+  }, totalPickupQty - totalUnpaidQty), /*#__PURE__*/React.createElement("td", {
+    className: "r whtotal"
+  }, totalPickupQty)))))), tab === "extras" && /*#__PURE__*/React.createElement("div", {
+    className: "pane"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "현금영수증 발행 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "번호를 입력한 ", cashList.length, "명 · 발행 ", cashIssuedCount, "명")), cashList.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "empty"
+  }, "현금영수증 번호를 입력한 주문자가 없습니다.", /*#__PURE__*/React.createElement("br", null), "③ 정산 탭의 「현금영수증」 버튼에서 번호를 입력하세요.") : /*#__PURE__*/React.createElement("div", {
+    className: "cashlist"
+  }, cashList.map(n => {
+    const c = cust(n);
+    return /*#__PURE__*/React.createElement("div", {
+      className: "cashrow" + (c.cashIssued ? " issued" : ""),
+      key: n
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "cinfo"
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "cnick"
+    }, c.name || n), /*#__PURE__*/React.createElement("span", {
+      className: "cnum"
+    }, c.cashReceipt)), /*#__PURE__*/React.createElement("button", {
+      className: "cashbtn" + (c.cashIssued ? " on" : ""),
+      onClick: () => setCust(n, {
+        cashIssued: !c.cashIssued
+      })
+    }, c.cashIssued ? "발행완료 ✓" : "미발행"));
+  })))), tab === "settings" && /*#__PURE__*/React.createElement("div", {
+    className: "pane"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "정산서 안내문구 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "정산서 복사 시 맨 앞에 붙는 내용")), /*#__PURE__*/React.createElement("textarea", {
+    className: "in area",
+    style: {
+      minHeight: 240,
+      lineHeight: 1.6
+    },
+    value: settleHeader,
+    onChange: e => setSettleHeader(e.target.value)
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "rowgap",
+    style: {
+      marginTop: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn",
+    disabled: settleHeader === SETTLE_HEADER,
+    onClick: () => setSettleHeader(SETTLE_HEADER)
+  }, "기본값으로 복원")), /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "계좌·상호가 바뀌면 여기서 수정하세요. 이 문구 다음에 「<정산서> + 주문내역 + 합계」가 자동으로 붙습니다.")), /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "복사 결과 미리보기 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "예시 주문 기준")), /*#__PURE__*/React.createElement("pre", {
+    className: "msg"
+  }, `${settleHeader}\n\n<정산서>\n주문하신 상품과 수량이 맞는지 확인 부탁드립니다.\n냉감패드_4개*4000원=16000원\n총 합계 금액은 16,000원+합배송비 ${won(shipFee)}원 = ${won(16000 + shipFee)}원 입니다.`)), /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "데이터 백업 · 복원 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "상단 「엑셀 저장 / 불러오기」 버튼 사용")), /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "화면 맨 위의 ", /*#__PURE__*/React.createElement("b", null, "「엑셀 저장」"), " 파일에는 복원용 데이터가 함께 담깁니다. 그 파일을 ", /*#__PURE__*/React.createElement("b", null, "「불러오기」"), "하면 다른 PC·사람도 그 날짜 데이터로 이어서 작업할 수 있고, 지난 방송의 엑셀을 올리면 그날 데이터가 그대로 복원됩니다. 기존 사자마켓 양식 엑셀(0.실시간_주문서·2.카톡_안내 포함)도 불러오면 주문·고객·현금영수증·특이사항이 자동으로 채워집니다. (롯데 업로드·인쇄에는 영향 없는 숨김 시트로 저장)"))), /*#__PURE__*/React.createElement("input", {
+    ref: fileRef,
+    type: "file",
+    accept: ".xlsx",
+    style: {
+      display: "none"
+    },
+    onChange: onFilePick
+  }), /*#__PURE__*/React.createElement("input", {
+    ref: shipFileRef,
+    type: "file",
+    accept: ".xlsx",
+    style: {
+      display: "none"
+    },
+    onChange: onShipFilePick
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "foot"
+  }, "사자마켓 라이브 · 자동 저장됨 · 전체 저장 「", dateCode, "_사자마켓_라이브.xlsx」 · 출고 「사자창고_출고_", dateCode, ".xlsx」"));
+}
+function OrderRow({
+  o,
+  chgQty,
+  toggleCancel,
+  delOrder,
+  hideNick
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "orow" + (o.canceled ? " canceled" : "")
+  }, !hideNick && /*#__PURE__*/React.createElement("span", {
+    className: "onick"
+  }, o.nick), /*#__PURE__*/React.createElement("span", {
+    className: "oname"
+  }, o.name, o.canceled && " (취소)"), /*#__PURE__*/React.createElement("span", {
+    className: "qtybox"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "qbtn",
+    onClick: () => chgQty(o.id, -1),
+    disabled: o.canceled
+  }, "−"), /*#__PURE__*/React.createElement("span", {
+    className: "qty"
+  }, o.qty), /*#__PURE__*/React.createElement("button", {
+    className: "qbtn",
+    onClick: () => chgQty(o.id, +1),
+    disabled: o.canceled
+  }, "+")), /*#__PURE__*/React.createElement("span", {
+    className: "oamt"
+  }, won(o.price * o.qty), "원"), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm",
+    onClick: () => toggleCancel(o.id)
+  }, o.canceled ? "복구" : "취소"), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm",
+    onClick: () => delOrder(o.id)
+  }, "×"));
+}
+const CSS = `
+* { box-sizing: border-box; }
+.toast {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 200;
+  background: #16191f; color: #fff; padding: 12px 20px; border-radius: 12px;
+  font-size: 14px; font-weight: 600; box-shadow: 0 8px 24px rgba(0,0,0,.3);
+  max-width: 92%; text-align: center; cursor: pointer; border: 1px solid #0f766e;
+}
+.app {
+  max-width: 880px; margin: 0 auto; padding: 0 12px 60px;
+  font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Noto Sans KR", "Malgun Gothic", sans-serif;
+  color: #1a1d21; background: #f6f7f9; min-height: 100vh;
+}
+.topbar {
+  position: sticky; top: 0; z-index: 10; margin: 0 -12px;
+  background: #16191f; color: #fff; padding: 12px 18px;
+  display: flex; align-items: center; gap: 14px;
+}
+.livewrap { display: flex; align-items: center; gap: 6px; background: rgba(232,51,74,.15); border: 1px solid rgba(232,51,74,.5); padding: 4px 10px; border-radius: 999px; }
+.livedot { width: 8px; height: 8px; border-radius: 50%; background: #e8334a; animation: pulse 1.4s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+@media (prefers-reduced-motion: reduce) { .livedot { animation: none; } }
+.livetxt { font-size: 12px; font-weight: 800; letter-spacing: .12em; color: #ff8fa0; }
+.topsum { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.topright { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.datein {
+  padding: 7px 10px; border-radius: 10px; border: 1px solid #3a3f48; background: #22262d;
+  color: #fff; font-size: 13px; font-family: inherit; color-scheme: dark;
+}
+.datein:focus { outline: 2px solid #e8334a; }
+.xlbtn { background: #0f766e; border-color: #0f766e; color: #fff; padding: 8px 13px; }
+.xlbtn:disabled { opacity: .4; cursor: default; }
+.upbtn { background: #22262d; border-color: #3a3f48; color: #fff; padding: 8px 13px; }
+.upbtn:hover { background: #2c313a; }
+.topamts { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+.topamt { display: flex; align-items: baseline; gap: 5px; }
+.topamt .tlabel { font-size: 11px; font-weight: 600; color: #9aa3ad; }
+.topamt .tval { font-size: 21px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.topamt.paid .tlabel { color: #7fdcc8; }
+.topamt.paid .tval { color: #7fdcc8; }
+.topmeta { font-size: 12px; color: #9aa3ad; }
+.tabs { display: flex; gap: 6px; padding: 10px 0; position: sticky; top: 48px; z-index: 9; background: #f6f7f9; }
+.tab {
+  flex: 1; padding: 10px 4px; border: 1px solid #e2e5ea; background: #fff; border-radius: 10px;
+  font-size: 14px; font-weight: 600; color: #5b6470; cursor: pointer;
+}
+.tab.on { background: #16191f; color: #fff; border-color: #16191f; }
+.badge { margin-left: 5px; font-size: 11px; background: #e8334a; color: #fff; border-radius: 999px; padding: 1px 6px; font-variant-numeric: tabular-nums; }
+.tab.on .badge { background: #e8334a; }
+.pane { display: flex; flex-direction: column; gap: 12px; }
+.card { background: #fff; border: 1px solid #e6e9ee; border-radius: 14px; padding: 14px; }
+.card.focus { border-color: #16191f; }
+.card.paidcard { border-color: #b6e2d3; background: #f4fbf8; }
+.cardtitle { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
+.sub { font-size: 12px; font-weight: 500; color: #8a919c; }
+.in {
+  width: 100%; padding: 10px 12px; border: 1px solid #d9dde3; border-radius: 10px;
+  font-size: 15px; background: #fff; font-family: inherit;
+}
+.in:focus { outline: 2px solid #16191f; outline-offset: 0; border-color: #16191f; }
+.in.big { font-size: 17px; padding: 12px 14px; margin-bottom: 10px; }
+.in.price { width: 110px; text-align: right; font-variant-numeric: tabular-nums; }
+.in.bare { border-color: transparent; background: transparent; padding: 8px 6px; }
+.in.bare:focus { background: #fff; border-color: #16191f; }
+.in.area { min-height: 84px; resize: vertical; }
+.grow { flex: 1; min-width: 0; }
+.addrow, .rowgap { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.addrow { margin-bottom: 10px; }
+.rowbetween { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.prow { display: flex; gap: 6px; align-items: center; border-top: 1px solid #f0f2f5; padding: 2px 0; }
+.btn {
+  padding: 9px 14px; border-radius: 10px; border: 1px solid #d9dde3; background: #fff;
+  font-size: 14px; font-weight: 600; cursor: pointer; color: #1a1d21; font-family: inherit;
+}
+.btn.primary { background: #16191f; border-color: #16191f; color: #fff; }
+.btn.primary:disabled { opacity: .4; cursor: default; }
+.btn.danger { background: #e8334a; border-color: #e8334a; color: #fff; }
+.btn.ghost { border-color: transparent; background: transparent; color: #8a919c; }
+.btn.sm { padding: 5px 8px; font-size: 13px; }
+.hint { font-size: 12px; color: #8a919c; margin-top: 8px; }
+.empty { padding: 18px 6px; text-align: center; color: #9aa3ad; font-size: 14px; }
+.empty.small { padding: 8px; font-size: 13px; text-align: left; }
+.pad { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.pad.dim { opacity: .45; pointer-events: none; }
+.padbtn {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  padding: 12px; border-radius: 12px; border: 1px solid #d9dde3; background: #fff;
+  cursor: pointer; text-align: left; font-family: inherit;
+}
+.padbtn:active { background: #16191f; }
+.padbtn:active .padname, .padbtn:active .padprice { color: #fff; }
+.padname { font-size: 14px; font-weight: 700; line-height: 1.25; }
+.padprice { font-size: 13px; color: #e8334a; font-weight: 700; font-variant-numeric: tabular-nums; }
+.orow { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid #f0f2f5; flex-wrap: wrap; }
+.orow.canceled .onick, .orow.canceled .oname, .orow.canceled .oamt { text-decoration: line-through; color: #b0b7c0; }
+.onick { font-weight: 700; font-size: 14px; min-width: 64px; }
+.oname { flex: 1; font-size: 14px; min-width: 120px; }
+.qtybox { display: flex; align-items: center; gap: 2px; }
+.qbtn { width: 28px; height: 28px; border-radius: 8px; border: 1px solid #d9dde3; background: #fff; font-size: 16px; cursor: pointer; }
+.qbtn:disabled { opacity: .3; }
+.qty { min-width: 26px; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; }
+.oamt { min-width: 80px; text-align: right; font-weight: 700; font-size: 14px; font-variant-numeric: tabular-nums; }
+.nickname { font-size: 16px; font-weight: 800; }
+.amount { font-size: 16px; font-weight: 800; color: #e8334a; font-variant-numeric: tabular-nums; }
+.chips { display: flex; gap: 6px; }
+.chip {
+  padding: 6px 12px; border-radius: 999px; border: 1px solid #d9dde3; background: #fff;
+  font-size: 13px; font-weight: 700; color: #8a919c; cursor: pointer; font-family: inherit;
+}
+.chip.on { background: #16191f; border-color: #16191f; color: #fff; }
+.chip.pay.on { background: #0f766e; border-color: #0f766e; }
+.msg {
+  margin: 10px 0; padding: 10px 12px; background: #f6f7f9; border-radius: 10px;
+  font-size: 13px; line-height: 1.6; white-space: pre-wrap; font-family: inherit;
+}
+.custform { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.tblwrap { overflow-x: auto; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tbl th { text-align: left; font-size: 12px; color: #8a919c; font-weight: 600; padding: 6px 8px; border-bottom: 1px solid #e6e9ee; }
+.tbl td { padding: 8px; border-bottom: 1px solid #f0f2f5; font-variant-numeric: tabular-nums; }
+.tbl .r { text-align: right; }
+.tbl .ok { color: #0f766e; font-weight: 700; }
+.tbl .warn { color: #e8334a; font-weight: 700; }
+.rowwarn td { background: #fff6f7; }
+.foot { text-align: center; font-size: 12px; color: #a7aeb8; padding: 24px 0 8px; }
+.shipdl { border-color: #0f766e; }
+.btn.big { padding: 12px 20px; font-size: 15px; }
+.trackcell { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.whsum { background: #16191f; color: #fff; border-color: #16191f; }
+.whsumrow { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.whbig { display: flex; align-items: baseline; gap: 8px; }
+.whbignum { font-size: 40px; font-weight: 800; font-variant-numeric: tabular-nums; color: #ff8fa0; line-height: 1; }
+.whbiglabel { font-size: 15px; font-weight: 600; color: #cfd4db; }
+.whmeta { display: flex; flex-direction: column; gap: 3px; font-size: 13px; color: #cfd4db; text-align: right; }
+.whmeta b { color: #fff; font-size: 15px; }
+.whmeta b.warn { color: #ff8fa0; }
+.whsum .hint { color: #9aa3ad; }
+.whsum .hint b { color: #ff8fa0; }
+.whtbl td { cursor: pointer; }
+.whtbl .chk { width: 34px; }
+.whtbl input[type=checkbox] { width: 20px; height: 20px; cursor: pointer; accent-color: #0f766e; }
+.whtbl .whname { font-weight: 600; }
+.whtbl .whtotal { font-weight: 800; font-size: 15px; }
+.whtbl tr.picked { background: #f4fbf8; }
+.whtbl tr.picked .whname { color: #8a919c; text-decoration: line-through; }
+.whtbl tfoot td { border-top: 2px solid #d9dde3; font-weight: 800; padding-top: 10px; }
+.settletop { display: flex; align-items: center; gap: 10px; }
+.in.search { flex: 1; }
+.feeinline { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #8a919c; white-space: nowrap; }
+.in.feesmall { width: 66px; padding: 5px 7px; font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
+.btn.hascash { border-color: #0f766e; color: #0f766e; }
+.btn.hasmemo { border-color: #16191f; color: #16191f; }
+.cashlist { display: flex; flex-direction: column; gap: 8px; }
+.cashrow { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid #eceef2; border-radius: 10px; background: #fafbfc; }
+.cashrow.issued { border-color: #b6e2d3; background: #f4fbf8; }
+.cinfo { display: flex; flex-direction: column; min-width: 0; }
+.cnick { font-size: 15px; font-weight: 700; }
+.cnum { font-size: 13px; color: #5b6470; font-variant-numeric: tabular-nums; word-break: break-all; }
+.cashbtn { padding: 9px 16px; border-radius: 10px; border: 1px solid #e8334a; background: #fff; color: #e8334a; font-size: 14px; font-weight: 700; cursor: pointer; white-space: nowrap; font-family: inherit; }
+.cashbtn.on { background: #0f766e; border-color: #0f766e; color: #fff; }
+`;
+const _root = ReactDOM.createRoot(document.getElementById('root'));
+_root.render(React.createElement(App));
+</script>
+</body>
+</html>
