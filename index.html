@@ -142,6 +142,10 @@ function App() {
   const [resetAllArm, setResetAllArm] = useState(false);
   const [openCust, setOpenCust] = useState({});
   const nickRef = useRef(null);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [mName, setMName] = useState("");
+  const [mPrice, setMPrice] = useState("");
+  const [mQty, setMQty] = useState("1");
 
   /* ---------- 저장/불러오기 ---------- */
   useEffect(() => {
@@ -307,6 +311,30 @@ function App() {
         ts: Date.now()
       }];
     });
+    if (!customers[n]) setCust(n, {});
+  };
+  // 직접입력: 목록에 없는 상품(서비스 등)을 임의 이름·금액·수량으로 추가
+  const addManualOrder = ({
+    name,
+    price,
+    qty
+  }) => {
+    const n = nick.trim();
+    if (!n) {
+      nickRef.current && nickRef.current.focus();
+      return;
+    }
+    const nm = (name || "").trim();
+    if (!nm) return;
+    setOrders(os => [...os, {
+      id: uid(),
+      nick: n,
+      name: nm,
+      price: parseInt(price, 10) || 0,
+      qty: Math.max(1, parseInt(qty, 10) || 1),
+      canceled: false,
+      ts: Date.now()
+    }]);
     if (!customers[n]) setCust(n, {});
   };
   const chgQty = (id, d) => setOrders(os => os.map(o => o.id === id ? {
@@ -506,112 +534,7 @@ function App() {
     setSettleSearch("");
   };
 
-  // 원본 표준 양식(0.실시간_주문서 + 2.카톡_안내) 파싱
-  const parseOriginal = (wb, fileName) => {
-    const A = (ws, cell) => {
-      const c = ws[cell];
-      return c == null ? null : c.v;
-    };
-    const cell = (r, c) => XLSX.utils.encode_cell({
-      r,
-      c
-    });
-    const os = wb.Sheets["0. 실시간_주문서"];
-    const ref = XLSX.utils.decode_range(os["!ref"]);
-    const orders = [],
-      products = [],
-      noteLines = [];
-    let ts = Date.now();
-    for (let r = 1; r <= ref.e.r; r++) {
-      const nick = A(os, cell(r, 0)),
-        name = A(os, cell(r, 1));
-      const qty = A(os, cell(r, 2)),
-        price = A(os, cell(r, 3));
-      if (nick != null && name != null) {
-        let nm = String(name).trim(),
-          canceled = false;
-        if (/\(취소\)\s*$/.test(nm)) {
-          canceled = true;
-          nm = nm.replace(/\s*\(취소\)\s*$/, "").trim();
-        }
-        orders.push({
-          id: uid(),
-          nick: String(nick).trim(),
-          name: nm,
-          price: Number(price) || 0,
-          qty: Number(qty) || 1,
-          canceled,
-          ts: ts++
-        });
-      }
-      const g = A(os, cell(r, 6)),
-        h = A(os, cell(r, 7));
-      if (g != null) products.push({
-        id: uid(),
-        name: String(g).trim(),
-        price: Number(h) || 0
-      });
-      const note = A(os, cell(r, 10));
-      if (note != null && String(note).trim()) noteLines.push(String(note).trim());
-    }
-    const customers = {};
-    let shipFee = 4000;
-    const ks = wb.Sheets["2. 카톡_안내"];
-    if (ks) {
-      const kref = XLSX.utils.decode_range(ks["!ref"]);
-      const o1 = A(ks, "O1");
-      if (Number(o1)) shipFee = Number(o1);
-      for (let r = 1; r <= kref.e.r; r++) {
-        const nick = A(ks, cell(r, 0));
-        if (nick == null) continue;
-        const key = String(nick).trim();
-        const reqRaw = A(ks, cell(r, 9)),
-          cash = A(ks, cell(r, 10));
-        const issued = String(reqRaw || "").includes("발행");
-        customers[key] = {
-          ...EMPTY_CUST,
-          notified: String(A(ks, cell(r, 2)) || "").includes("안내"),
-          paid: String(A(ks, cell(r, 4)) || "").includes("확인"),
-          name: A(ks, cell(r, 6)) ? String(A(ks, cell(r, 6))) : "",
-          phone: A(ks, cell(r, 7)) ? String(A(ks, cell(r, 7))) : "",
-          addr: A(ks, cell(r, 8)) ? String(A(ks, cell(r, 8))) : "",
-          req: issued ? "" : reqRaw ? String(reqRaw) : "",
-          memo: A(ks, cell(r, 11)) ? String(A(ks, cell(r, 11))) : "",
-          cashReceipt: cash ? String(cash) : "",
-          cashIssued: issued
-        };
-      }
-    }
-    // "닉네임 - 내용" 특이사항 나열 → 해당 닉네임 memo 병합
-    const nickSet = orders.map(o => o.nick);
-    noteLines.forEach(line => {
-      const parts = line.split(/\s+-\s+/);
-      if (parts.length >= 2) {
-        const cand = parts[0].trim(),
-          content = parts.slice(1).join(" - ").trim();
-        const target = nickSet.find(nk => nk === cand);
-        if (target) {
-          if (!customers[target]) customers[target] = {
-            ...EMPTY_CUST
-          };
-          customers[target].memo = customers[target].memo ? customers[target].memo + " / " + content : content;
-        }
-      }
-    });
-    let bdate = todayISO();
-    const dm = String(fileName || "").match(/(20\d{2})(\d{2})(\d{2})/);
-    if (dm) bdate = `${dm[1]}-${dm[2]}-${dm[3]}`;
-    return {
-      products,
-      orders,
-      customers,
-      shipFee,
-      bdate,
-      pickState: {}
-    };
-  };
-
-  // 엑셀 불러오기 — 앱 저장 파일이면 복원, 원본 표준양식이면 파싱
+  // 엑셀 불러오기 — 앱이 저장한 파일(_appdata 숨김 시트) 복원
   const importXlsx = async file => {
     try {
       const buf = await file.arrayBuffer();
@@ -630,13 +553,7 @@ function App() {
           return;
         }
       }
-      if (wb.Sheets["0. 실시간_주문서"]) {
-        const d = parseOriginal(wb, file.name);
-        applyImported(d);
-        showToast(`✓ ${d.bdate} 원본 양식 불러옴 · 주문 ${d.orders.length}건 (취소 ${d.orders.filter(o => o.canceled).length}건 · 고객 ${Object.keys(d.customers).length}명)`);
-        return;
-      }
-      showToast("불러올 데이터가 없습니다. 앱 저장 파일 또는 표준 양식(0.실시간_주문서 포함)을 올려주세요.");
+      showToast("이 앱에서 「엑셀 저장」으로 만든 파일만 불러올 수 있습니다.");
     } catch (e) {
       showToast("불러오기 실패: " + (e.message || "파일을 읽을 수 없습니다."));
     }
@@ -1049,7 +966,7 @@ function App() {
     value: n
   }))), products.length === 0 ? /*#__PURE__*/React.createElement("div", {
     className: "empty"
-  }, "① 상품 탭에서 오늘 판매 상품을 먼저 등록하세요.") : /*#__PURE__*/React.createElement("div", {
+  }, "① 상품 탭에서 오늘 판매 상품을 먼저 등록하세요.", /*#__PURE__*/React.createElement("br", null), "또는 아래 「직접입력」으로 바로 추가할 수 있습니다.") : /*#__PURE__*/React.createElement("div", {
     className: "pad" + (nick.trim() ? "" : " dim")
   }, products.map(p => /*#__PURE__*/React.createElement("button", {
     key: p.id,
@@ -1059,9 +976,62 @@ function App() {
     className: "padname"
   }, p.name), /*#__PURE__*/React.createElement("span", {
     className: "padprice"
-  }, won(p.price), "원")))), !nick.trim() && products.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, won(p.price), "원")))), /*#__PURE__*/React.createElement("div", {
+    className: nick.trim() ? "" : "dim",
+    style: {
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn manualbtn",
+    disabled: !nick.trim(),
+    onClick: () => setManualOpen(v => !v)
+  }, manualOpen ? "직접입력 닫기" : "+ 직접입력 (서비스·목록에 없는 상품)"), manualOpen && nick.trim() && /*#__PURE__*/React.createElement("div", {
+    className: "manualform"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "in grow",
+    placeholder: "상품명 (예: 남색 밀짚 서비스)",
+    value: mName,
+    onChange: e => setMName(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter") {
+        addManualOrder({
+          name: mName,
+          price: mPrice,
+          qty: mQty
+        });
+        setMName("");
+        setMPrice("");
+        setMQty("1");
+      }
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    className: "in price",
+    type: "number",
+    placeholder: "금액",
+    value: mPrice,
+    onChange: e => setMPrice(e.target.value)
+  }), /*#__PURE__*/React.createElement("input", {
+    className: "in mqty",
+    type: "number",
+    placeholder: "수량",
+    value: mQty,
+    onChange: e => setMQty(e.target.value)
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "btn primary",
+    disabled: !mName.trim(),
+    onClick: () => {
+      addManualOrder({
+        name: mName,
+        price: mPrice,
+        qty: mQty
+      });
+      setMName("");
+      setMPrice("");
+      setMQty("1");
+    }
+  }, "추가"))), !nick.trim() && /*#__PURE__*/React.createElement("div", {
     className: "hint"
-  }, "닉네임을 먼저 입력하면 상품 버튼이 활성화됩니다.")), nick.trim() && (byNick[nick.trim()] || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "닉네임을 먼저 입력하면 상품 버튼·직접입력이 활성화됩니다.")), nick.trim() && (byNick[nick.trim()] || []).length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "card focus"
   }, /*#__PURE__*/React.createElement("div", {
     className: "cardtitle"
@@ -1466,7 +1436,7 @@ function App() {
     className: "sub"
   }, "상단 「엑셀 저장 / 불러오기」 버튼 사용")), /*#__PURE__*/React.createElement("div", {
     className: "hint"
-  }, "화면 맨 위의 ", /*#__PURE__*/React.createElement("b", null, "「엑셀 저장」"), " 파일에는 복원용 데이터가 함께 담깁니다. 그 파일을 ", /*#__PURE__*/React.createElement("b", null, "「불러오기」"), "하면 다른 PC·사람도 그 날짜 데이터로 이어서 작업할 수 있고, 지난 방송의 엑셀을 올리면 그날 데이터가 그대로 복원됩니다. 기존 사자마켓 양식 엑셀(0.실시간_주문서·2.카톡_안내 포함)도 불러오면 주문·고객·현금영수증·특이사항이 자동으로 채워집니다. (롯데 업로드·인쇄에는 영향 없는 숨김 시트로 저장)"))), /*#__PURE__*/React.createElement("input", {
+  }, "화면 맨 위의 ", /*#__PURE__*/React.createElement("b", null, "「엑셀 저장」"), " 파일에는 복원용 데이터가 함께 담깁니다. 그 파일을 ", /*#__PURE__*/React.createElement("b", null, "「불러오기」"), "하면 다른 PC·사람도 그 날짜 데이터로 이어서 작업할 수 있고, 지난 방송의 엑셀을 올리면 그날 데이터가 그대로 복원됩니다. (롯데 업로드·인쇄에는 영향 없는 숨김 시트로 저장)"))), /*#__PURE__*/React.createElement("input", {
     ref: fileRef,
     type: "file",
     accept: ".xlsx",
@@ -1612,6 +1582,10 @@ const CSS = `
 }
 .padbtn:active { background: #16191f; }
 .padbtn:active .padname, .padbtn:active .padprice { color: #fff; }
+.manualbtn { width: 100%; border-style: dashed; color: #5b6470; }
+.manualbtn:disabled { opacity: .45; cursor: default; }
+.manualform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; padding: 10px; background: #f6f7f9; border-radius: 10px; }
+.in.mqty { width: 74px; text-align: right; font-variant-numeric: tabular-nums; }
 .padname { font-size: 14px; font-weight: 700; line-height: 1.25; }
 .padprice { font-size: 13px; color: #e8334a; font-weight: 700; font-variant-numeric: tabular-nums; }
 .orow { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid #f0f2f5; flex-wrap: wrap; }
