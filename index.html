@@ -93,6 +93,7 @@ const todayISO = () => {
 const EMPTY_CUST = {
   paid: false,
   notified: false,
+  keep: false,
   addrChecked: false,
   name: "",
   phone: "",
@@ -125,19 +126,26 @@ function App() {
   const [pPrice, setPPrice] = useState("");
   const [copiedId, setCopiedId] = useState(null);
   const [settleSearch, setSettleSearch] = useState("");
+  const [memoOnly, setMemoOnly] = useState(false);
+  const [keepOnly, setKeepOnly] = useState(false);
+  const [unpaidOnly, setUnpaidOnly] = useState(false);
   const [settleHeader, setSettleHeader] = useState(SETTLE_HEADER);
   const [openMsg, setOpenMsg] = useState({});
   const [openCash, setOpenCash] = useState({});
   const [openMemo, setOpenMemo] = useState({});
   const fileRef = useRef(null);
   const shipFileRef = useRef(null);
+  const cjFileRef = useRef(null);
   const [shipData, setShipData] = useState([]);
   const [shipSearch, setShipSearch] = useState("");
-  const [toast, setToast] = useState("");
+  const [toasts, setToasts] = useState([]);
   const showToast = msg => {
-    setToast(msg);
-    window.clearTimeout(showToast._t);
-    showToast._t = window.setTimeout(() => setToast(""), 5000);
+    const id = uid();
+    setToasts(ts => [...ts, {
+      id,
+      msg
+    }]);
+    window.setTimeout(() => setToasts(ts => ts.filter(t => t.id !== id)), 2000);
   };
   const [resetArm, setResetArm] = useState(false);
   const [resetAllArm, setResetAllArm] = useState(false);
@@ -148,6 +156,12 @@ function App() {
   const [mPrice, setMPrice] = useState("");
   const [mQty, setMQty] = useState("1");
   const [printMode, setPrintMode] = useState(false);
+  const [recentId, setRecentId] = useState(null);
+  const flashRecent = id => {
+    setRecentId(id);
+    window.clearTimeout(flashRecent._t);
+    flashRecent._t = window.setTimeout(() => setRecentId(null), 1600);
+  };
   const [memoOpen, setMemoOpen] = useState(false);
   const [memoText, setMemoText] = useState("");
 
@@ -302,6 +316,8 @@ function App() {
       nickRef.current && nickRef.current.focus();
       return;
     }
+    const existing = orders.find(o => o.nick === n && o.name === p.name && o.price === p.price && !o.canceled);
+    const rid = existing ? existing.id : uid();
     setOrders(os => {
       const i = os.findIndex(o => o.nick === n && o.name === p.name && o.price === p.price && !o.canceled);
       if (i >= 0) {
@@ -313,7 +329,7 @@ function App() {
         return cp;
       }
       return [...os, {
-        id: uid(),
+        id: rid,
         nick: n,
         name: p.name,
         price: p.price,
@@ -322,6 +338,8 @@ function App() {
         ts: Date.now()
       }];
     });
+    flashRecent(rid);
+    if (existing) showToast(`닉네임 : ${n} //${p.name} 이미 있어 수량 ${existing.qty + 1}개로 (중복)`);
     if (!customers[n]) setCust(n, {});
   };
   // 직접입력: 목록에 없는 상품(서비스 등)을 임의 이름·금액·수량으로 추가
@@ -337,8 +355,9 @@ function App() {
     }
     const nm = (name || "").trim();
     if (!nm) return;
+    const rid = uid();
     setOrders(os => [...os, {
-      id: uid(),
+      id: rid,
       nick: n,
       name: nm,
       price: parseInt(price, 10) || 0,
@@ -346,6 +365,7 @@ function App() {
       canceled: false,
       ts: Date.now()
     }]);
+    flashRecent(rid);
     if (!customers[n]) setCust(n, {});
   };
   const chgQty = (id, d) => setOrders(os => os.map(o => o.id === id ? {
@@ -683,42 +703,107 @@ function App() {
     }
     return Object.values(map);
   };
-  const onShipFilePick = async e => {
+
+  // CJ대한통운 운송장 출력 파일 파싱 (Sheet1 · P열 닉네임, F열 송장, K/L/N 이름·연락처·주소)
+  const parseCjUpload = wb => {
+    const ws = wb.Sheets["Sheet1"];
+    if (!ws) return null;
+    const clean = s => s === "#N/A" || s === "#REF!" || s === "0" ? "" : s;
+    const V = c => {
+      const x = ws[c];
+      return x == null ? "" : String(x.v == null ? "" : x.v).trim();
+    };
+    const cell = (r, c) => XLSX.utils.encode_cell({
+      r,
+      c
+    });
+    const ref = XLSX.utils.decode_range(ws["!ref"]);
+    const map = {};
+    for (let r = 1; r <= ref.e.r; r++) {
+      const nick = V(cell(r, 15)); // P열 고객주문번호(닉네임)
+      if (!nick || nick === "0" || nick.startsWith("#")) continue;
+      const tracking = clean(V(cell(r, 5))); // F열 운송장번호
+      if (!map[nick]) {
+        map[nick] = {
+          nick,
+          name: clean(V(cell(r, 10))),
+          phone: clean(V(cell(r, 11))),
+          addr: clean(V(cell(r, 13))),
+          tracking,
+          carrier: tracking ? "CJ대한통운" : ""
+        };
+      } else if (tracking && !map[nick].tracking) {
+        map[nick].tracking = tracking;
+        map[nick].carrier = "CJ대한통운";
+      }
+    }
+    return Object.values(map);
+  };
+
+  // 조회 목록 누적 병합 (롯데·CJ 공통)
+  const mergeShipData = (data, label) => {
+    let added = 0,
+      updated = 0;
+    setShipData(prev => {
+      const idx = {};
+      prev.forEach((d, i) => {
+        idx[d.nick] = i;
+      });
+      const next = [...prev];
+      data.forEach(d => {
+        if (idx[d.nick] != null) {
+          next[idx[d.nick]] = d;
+          updated++;
+        } else {
+          next.push(d);
+          idx[d.nick] = next.length - 1;
+          added++;
+        }
+      });
+      return next;
+    });
+    showToast(`✓ ${label} 반영 · 추가 ${added}명 · 갱신 ${updated}명`);
+  };
+  const onLotteFilePick = async e => {
     const file = e.target.files && e.target.files[0];
     e.target.value = "";
     if (!file) return;
     try {
-      const buf = await file.arrayBuffer();
-      const wb = XLSX.read(buf, {
+      const wb = XLSX.read(await file.arrayBuffer(), {
         type: "array"
       });
       const data = parseShipUpload(wb);
       if (!data) {
-        showToast("송장 시트(4.송장출력_복사용)를 찾을 수 없습니다. 출고 파일을 올려주세요.");
+        showToast("롯데 출고 파일이 아닙니다 (4.송장출력_복사용 시트 없음).");
         return;
       }
-      // 누적 병합: 기존 목록에 합치고, 같은 닉네임은 갱신
-      let added = 0,
-        updated = 0;
-      setShipData(prev => {
-        const byNickIdx = {};
-        prev.forEach((d, i) => {
-          byNickIdx[d.nick] = i;
-        });
-        const next = [...prev];
-        data.forEach(d => {
-          if (byNickIdx[d.nick] != null) {
-            next[byNickIdx[d.nick]] = d;
-            updated++;
-          } else {
-            next.push(d);
-            byNickIdx[d.nick] = next.length - 1;
-            added++;
-          }
-        });
-        return next;
+      if (data.length === 0) {
+        showToast("조회할 데이터가 없습니다.");
+        return;
+      }
+      mergeShipData(data, "롯데");
+    } catch (e) {
+      showToast("업로드 실패: " + (e.message || "파일을 읽을 수 없습니다."));
+    }
+  };
+  const onCjFilePick = async e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const wb = XLSX.read(await file.arrayBuffer(), {
+        type: "array"
       });
-      showToast(`✓ 반영됨 · 추가 ${added}명 · 갱신 ${updated}명`);
+      const data = parseCjUpload(wb);
+      if (!data) {
+        showToast("CJ 운송장 파일이 아닙니다 (Sheet1 없음).");
+        return;
+      }
+      if (data.length === 0) {
+        showToast("고객주문번호(P열)에 닉네임이 없습니다. CJ 출고 시 닉네임이 들어가야 조회됩니다.");
+        return;
+      }
+      mergeShipData(data, "CJ");
     } catch (e) {
       showToast("업로드 실패: " + (e.message || "파일을 읽을 수 없습니다."));
     }
@@ -910,10 +995,13 @@ function App() {
   const tabs = [["product", "① 상품", products.length], ["order", "② 주문", activeOrders.length], ["settle", "③ 정산", nickList.length - paidCount], ["ship", "④ 출고", paidLines.length], ["upload", "⑤ 업로드", shipData.length], ["warehouse", "📦 창고", totalPickupQty], ["extras", "🧾 영수증", cashList.length], ["settings", "⚙️ 설정", 0]];
   return /*#__PURE__*/React.createElement("div", {
     className: "app"
-  }, /*#__PURE__*/React.createElement("style", null, CSS), toast && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("style", null, CSS), toasts.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "toaststack"
+  }, toasts.map(t => /*#__PURE__*/React.createElement("div", {
+    key: t.id,
     className: "toast",
-    onClick: () => setToast("")
-  }, toast), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setToasts(ts => ts.filter(x => x.id !== t.id))
+  }, t.msg))), /*#__PURE__*/React.createElement("button", {
     className: "memo-fab",
     onClick: () => setMemoOpen(v => !v),
     title: "자유 메모"
@@ -1096,7 +1184,21 @@ function App() {
   }, nickList.map(n => /*#__PURE__*/React.createElement("option", {
     key: n,
     value: n
-  }))), products.length === 0 ? /*#__PURE__*/React.createElement("div", {
+  }))), (() => {
+    const q = nick.trim().toLowerCase();
+    if (!q) return null;
+    const matches = nickList.filter(n => n.toLowerCase() !== q && n.toLowerCase().includes(q)).slice(0, 8);
+    if (matches.length === 0) return null;
+    return /*#__PURE__*/React.createElement("div", {
+      className: "nickmatch"
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "nickmatch-label"
+    }, "이미 주문:"), matches.map(n => /*#__PURE__*/React.createElement("button", {
+      key: n,
+      className: "nickchip",
+      onClick: () => setNick(n)
+    }, n)));
+  })(), products.length === 0 ? /*#__PURE__*/React.createElement("div", {
     className: "empty"
   }, "① 상품 탭에서 오늘 판매 상품을 먼저 등록하세요.", /*#__PURE__*/React.createElement("br", null), "또는 아래 「직접입력」으로 바로 추가할 수 있습니다.") : /*#__PURE__*/React.createElement("div", {
     className: "pad" + (nick.trim() ? "" : " dim")
@@ -1173,7 +1275,8 @@ function App() {
     chgQty: chgQty,
     toggleCancel: toggleCancel,
     delOrder: delOrder,
-    hideNick: true
+    hideNick: true,
+    recent: o.id === recentId
   })), /*#__PURE__*/React.createElement("input", {
     className: "in",
     style: {
@@ -1197,17 +1300,39 @@ function App() {
     o: o,
     chgQty: chgQty,
     toggleCancel: toggleCancel,
-    delOrder: delOrder
+    delOrder: delOrder,
+    recent: o.id === recentId
   })))), tab === "settle" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
-  }, /*#__PURE__*/React.createElement("div", {
+  }, nickList.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "card summarycard"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "sm-item"
+  }, "총 ", /*#__PURE__*/React.createElement("b", null, nickList.length), "명"), /*#__PURE__*/React.createElement("span", {
+    className: "sm-sep"
+  }, "·"), /*#__PURE__*/React.createElement("span", {
+    className: "sm-item paid"
+  }, "입금 ", /*#__PURE__*/React.createElement("b", null, paidCount), "명"), /*#__PURE__*/React.createElement("span", {
+    className: "sm-sep"
+  }, "·"), /*#__PURE__*/React.createElement("span", {
+    className: "sm-item unpaid"
+  }, "미입금 ", /*#__PURE__*/React.createElement("b", null, nickList.length - paidCount), "명")), /*#__PURE__*/React.createElement("div", {
     className: "card settletop"
   }, /*#__PURE__*/React.createElement("input", {
     className: "in search",
     placeholder: "🔍 닉네임 검색",
     value: settleSearch,
     onChange: e => setSettleSearch(e.target.value)
-  }), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "btn filterbtn f-memo" + (memoOnly ? " on" : ""),
+    onClick: () => setMemoOnly(v => !v)
+  }, "특이사항만"), /*#__PURE__*/React.createElement("button", {
+    className: "btn filterbtn f-keep" + (keepOnly ? " on" : ""),
+    onClick: () => setKeepOnly(v => !v)
+  }, "킵만"), /*#__PURE__*/React.createElement("button", {
+    className: "btn filterbtn f-unpaid" + (unpaidOnly ? " on" : ""),
+    onClick: () => setUnpaidOnly(v => !v)
+  }, "미입금만"), /*#__PURE__*/React.createElement("div", {
     className: "feeinline"
   }, "합배송비 ", /*#__PURE__*/React.createElement("input", {
     className: "in feesmall",
@@ -1218,17 +1343,17 @@ function App() {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "empty"
-  }, "주문이 들어오면 닉네임별 정산 카드가 생깁니다.")), nickList.length > 0 && nickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase())).length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, "주문이 들어오면 닉네임별 정산 카드가 생깁니다.")), nickList.length > 0 && nickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase()) && (!memoOnly || (cust(n).memo || "").trim()) && (!keepOnly || cust(n).keep) && (!unpaidOnly || !cust(n).paid)).length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "empty"
-  }, "「", settleSearch, "」 검색 결과가 없습니다.")), nickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase())).map(n => {
+  }, unpaidOnly ? "미입금 주문이 없습니다." : keepOnly ? "킵으로 체크된 주문이 없습니다." : memoOnly ? "특이사항이 있는 주문이 없습니다." : `「${settleSearch}」 검색 결과가 없습니다.`)), nickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase()) && (!memoOnly || (cust(n).memo || "").trim()) && (!keepOnly || cust(n).keep) && (!unpaidOnly || !cust(n).paid)).map(n => {
     const list = byNick[n] || [];
     const sum = list.reduce((s, o) => s + o.price * o.qty, 0);
     const c = cust(n);
     const open = !!openCust[n];
     return /*#__PURE__*/React.createElement("div", {
-      className: "card" + (c.paid ? " paidcard" : ""),
+      className: "card" + (c.keep ? " keepcard" : c.paid ? " paidcard" : ""),
       key: n
     }, /*#__PURE__*/React.createElement("div", {
       className: "rowbetween"
@@ -1238,7 +1363,9 @@ function App() {
       className: "amount"
     }, " ", won(sum + shipFee), "원"), /*#__PURE__*/React.createElement("span", {
       className: "sub"
-    }, " (상품 ", won(sum), " + 배송 ", won(shipFee), ")")), /*#__PURE__*/React.createElement("div", {
+    }, " (상품 ", won(sum), " + 배송 ", won(shipFee), ")"), c.paid && (!c.addr || !c.phone) && /*#__PURE__*/React.createElement("span", {
+      className: "warnbadge"
+    }, "⚠ ", !c.addr && !c.phone ? "주소·연락처" : !c.addr ? "주소" : "연락처", " 미입력")), /*#__PURE__*/React.createElement("div", {
       className: "chips"
     }, /*#__PURE__*/React.createElement("button", {
       className: "chip" + (c.notified ? " on" : ""),
@@ -1250,7 +1377,12 @@ function App() {
       onClick: () => setCust(n, {
         paid: !c.paid
       })
-    }, "입금"))), list.length === 0 && /*#__PURE__*/React.createElement("div", {
+    }, "입금"), /*#__PURE__*/React.createElement("button", {
+      className: "chip keep" + (c.keep ? " on" : ""),
+      onClick: () => setCust(n, {
+        keep: !c.keep
+      })
+    }, "킵"))), list.length === 0 && /*#__PURE__*/React.createElement("div", {
       className: "empty small"
     }, "유효 주문 없음 (전체 취소됨)"), list.length > 0 && openMsg[n] && /*#__PURE__*/React.createElement("pre", {
       className: "msg"
@@ -1433,15 +1565,18 @@ function App() {
     className: "sub"
   }, "누적 ", shipData.length, "명 · 송장 ", shipData.filter(d => d.tracking).length, "명")), /*#__PURE__*/React.createElement("div", {
     className: "sub"
-  }, "송장번호 채운 출고 파일 업로드 → 고객별 운송장 확인 (여러 번 올리면 누적됩니다)")), /*#__PURE__*/React.createElement("div", {
-    className: "rowgap"
-  }, shipData.length > 0 && /*#__PURE__*/React.createElement("button", {
+  }, "택배사별 운송장 파일을 올리면 고객별 송장번호가 조회됩니다 (롯데·CJ 섞어서 누적 가능)")), shipData.length > 0 && /*#__PURE__*/React.createElement("button", {
     className: "btn ghost",
     onClick: clearShipData
-  }, "초기화"), /*#__PURE__*/React.createElement("button", {
+  }, "초기화")), /*#__PURE__*/React.createElement("div", {
+    className: "uprow"
+  }, /*#__PURE__*/React.createElement("button", {
     className: "btn primary",
     onClick: () => shipFileRef.current && shipFileRef.current.click()
-  }, "출고 파일 업로드"))), shipData.length > 0 && /*#__PURE__*/React.createElement("input", {
+  }, "롯데 운송장 업로드"), /*#__PURE__*/React.createElement("button", {
+    className: "btn cj",
+    onClick: () => cjFileRef.current && cjFileRef.current.click()
+  }, "CJ 운송장 업로드")), shipData.length > 0 && /*#__PURE__*/React.createElement("input", {
     className: "in search",
     style: {
       marginTop: 12
@@ -1453,7 +1588,7 @@ function App() {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "empty"
-  }, "④ 출고 탭에서 파일을 받아 R열(송장번호)을 채운 뒤,", /*#__PURE__*/React.createElement("br", null), "여기에 업로드하면 고객별 운송장번호를 조회할 수 있습니다.")) : (() => {
+  }, "롯데는 출고 파일에 송장번호(R열)를 채워서, CJ는 운송장 출력 파일을 그대로 올리면", /*#__PURE__*/React.createElement("br", null), "고객별 운송장번호를 조회할 수 있습니다.")) : (() => {
     const q = shipSearch.trim().toLowerCase();
     const filtered = shipData.filter(d => d.nick.toLowerCase().includes(q) || (d.name || "").toLowerCase().includes(q));
     return /*#__PURE__*/React.createElement("div", {
@@ -1621,7 +1756,15 @@ function App() {
     style: {
       display: "none"
     },
-    onChange: onShipFilePick
+    onChange: onLotteFilePick
+  }), /*#__PURE__*/React.createElement("input", {
+    ref: cjFileRef,
+    type: "file",
+    accept: ".xlsx",
+    style: {
+      display: "none"
+    },
+    onChange: onCjFilePick
   }), /*#__PURE__*/React.createElement("div", {
     className: "foot"
   }, "사자창고 라이브 · 자동 저장됨 · 전체 저장 「", dateCode, "_사자창고_라이브.xlsx」 · 출고 「롯데/CJ_사자창고_출고_", dateCode, ".xlsx」"));
@@ -1631,10 +1774,11 @@ function OrderRow({
   chgQty,
   toggleCancel,
   delOrder,
-  hideNick
+  hideNick,
+  recent
 }) {
   return /*#__PURE__*/React.createElement("div", {
-    className: "orow" + (o.canceled ? " canceled" : "")
+    className: "orow" + (o.canceled ? " canceled" : "") + (recent ? " recent" : "")
   }, !hideNick && /*#__PURE__*/React.createElement("span", {
     className: "onick"
   }, o.nick), /*#__PURE__*/React.createElement("span", {
@@ -1709,12 +1853,18 @@ const CSS = `
 .print-bx-h { text-align: center; font-weight: 700; font-size: 15px; padding: 6px; border-bottom: 1.5px solid #000; background: #f0f0f0; }
 .print-box ul { list-style: none; margin: 0; padding: 6px 10px; }
 .print-box li { text-align: center; font-size: 14px; padding: 3px 0; }
-.toast {
-  position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 200;
-  background: #16191f; color: #fff; padding: 12px 20px; border-radius: 12px;
-  font-size: 14px; font-weight: 600; box-shadow: 0 8px 24px rgba(0,0,0,.3);
-  max-width: 92%; text-align: center; cursor: pointer; border: 1px solid #0f766e;
+.toaststack {
+  position: fixed; top: 12px; left: 12px; z-index: 200;
+  display: flex; flex-direction: column; gap: 8px;
+  max-width: min(360px, calc(100vw - 24px));
 }
+.toast {
+  background: #16191f; color: #fff; padding: 9px 14px; border-radius: 10px;
+  font-size: 13px; font-weight: 600; box-shadow: 0 6px 20px rgba(0,0,0,.3);
+  border: 1px solid #0f766e; cursor: pointer; word-break: break-word; line-height: 1.4;
+  animation: toastin .22s ease-out;
+}
+@keyframes toastin { from { opacity: 0; transform: translateX(-14px); } to { opacity: 1; transform: none; } }
 .app {
   max-width: 880px; margin: 0 auto; padding: 0 12px 60px;
   font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Noto Sans KR", "Malgun Gothic", sans-serif;
@@ -1760,6 +1910,8 @@ const CSS = `
 .card { background: #fff; border: 1px solid #e6e9ee; border-radius: 14px; padding: 14px; }
 .card.focus { border-color: #16191f; }
 .card.paidcard { border-color: #b6e2d3; background: #f4fbf8; }
+.card.keepcard { border-color: #f0a8ac; background: #fff2f3; }
+.chip.keep.on { background: #d81f26; border-color: #d81f26; color: #fff; }
 .cardtitle { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
 .sub { font-size: 12px; font-weight: 500; color: #8a919c; }
 .in {
@@ -1805,6 +1957,12 @@ const CSS = `
 .padname { font-size: 14px; font-weight: 700; line-height: 1.25; }
 .padprice { font-size: 13px; color: #e8334a; font-weight: 700; font-variant-numeric: tabular-nums; }
 .orow { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid #f0f2f5; flex-wrap: wrap; }
+.orow.recent { animation: flashrow 1.6s ease-out; border-radius: 8px; }
+@keyframes flashrow { 0% { background: #fff3c4; } 60% { background: #fff9e6; } 100% { background: transparent; } }
+.nickmatch { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.nickmatch-label { font-size: 12px; color: #8a919c; }
+.nickchip { padding: 5px 12px; font-size: 14px; font-weight: 600; border: 1px solid #16191f; background: #16191f; color: #fff; border-radius: 999px; cursor: pointer; }
+.nickchip:hover { background: #2a2f38; }
 .orow.canceled .onick, .orow.canceled .oname, .orow.canceled .oamt { text-decoration: line-through; color: #b0b7c0; }
 .onick { font-weight: 700; font-size: 14px; min-width: 64px; }
 .oname { flex: 1; font-size: 14px; min-width: 120px; }
@@ -1846,6 +2004,8 @@ const CSS = `
 .dlcard .hint { margin: 0; font-size: 11px; color: #99a0ab; word-break: break-all; }
 .btn.cj { background: #d81f26; border-color: #d81f26; color: #fff; }
 .btn.cj:disabled { opacity: .4; cursor: default; }
+.uprow { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+.uprow .btn { width: 100%; }
 @media (max-width: 560px) { .dlrow { grid-template-columns: 1fr; } }
 .btn.dark { background: #16191f; border-color: #16191f; color: #fff; }
 .btn.dark:disabled { opacity: .4; cursor: default; }
@@ -1869,7 +2029,18 @@ const CSS = `
 .whtbl tr.picked { background: #f4fbf8; }
 .whtbl tr.picked .whname { color: #8a919c; text-decoration: line-through; }
 .whtbl tfoot td { border-top: 2px solid #d9dde3; font-weight: 800; padding-top: 10px; }
-.settletop { display: flex; align-items: center; gap: 10px; }
+.settletop { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.summarycard { display: flex; align-items: center; gap: 10px; padding: 12px 16px; font-size: 15px; }
+.sm-item { color: #5b6470; } .sm-item b { color: #16191f; font-size: 17px; }
+.sm-item.paid b { color: #0f766e; } .sm-item.unpaid b { color: #d81f26; }
+.sm-sep { color: #d5d9df; }
+/* 정산 필터 버튼 (공통: 평소 중립 테두리 / on: 각 색으로 채우기) */
+.filterbtn { white-space: nowrap; border-color: #d5d9df; color: #5b6470; font-weight: 600; }
+.filterbtn.on { font-weight: 700; }
+.filterbtn.f-memo.on { background: #0f9d8f; border-color: #0f9d8f; color: #fff; }
+.filterbtn.f-keep.on { background: #d81f26; border-color: #d81f26; color: #fff; }
+.filterbtn.f-unpaid.on { background: #f5a623; border-color: #f5a623; color: #16191f; }
+.warnbadge { display: inline-block; margin-left: 8px; padding: 2px 8px; font-size: 12px; font-weight: 700; color: #fff; background: #d81f26; border-radius: 999px; vertical-align: middle; }
 .in.search { flex: 1; }
 .feeinline { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #8a919c; white-space: nowrap; }
 .in.feesmall { width: 66px; padding: 5px 7px; font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
