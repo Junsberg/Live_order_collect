@@ -158,6 +158,19 @@ function App() {
   const [resetAllArm, setResetAllArm] = useState(false);
   const [openCust, setOpenCust] = useState({});
   const nickRef = useRef(null);
+  const selectNick = n => {
+    setNick(n);
+    if (nickRef.current) {
+      try {
+        nickRef.current.scrollIntoView({
+          behavior: "smooth",
+          block: "center"
+        });
+      } catch (e) {
+        window.scrollTo(0, 0);
+      }
+    }
+  };
   const [manualOpen, setManualOpen] = useState(false);
   const [mName, setMName] = useState("");
   const [mPrice, setMPrice] = useState("");
@@ -454,7 +467,7 @@ function App() {
     let tp = 0,
       tu = 0;
     pickupList.forEach(([name, v]) => {
-      rows.push(["□", name, v.unpaid || "", v.paid || "", v.paid + v.unpaid]);
+      rows.push(["□", name, v.unpaid, v.paid, v.paid + v.unpaid]);
       tp += v.paid;
       tu += v.unpaid;
     });
@@ -980,7 +993,7 @@ function App() {
     let tp = 0,
       tu = 0;
     Object.entries(pivot).sort((a, b) => a[0].localeCompare(b[0], "ko")).forEach(([name, v]) => {
-      s21.push(["□", name, v.unpaid || "", v.paid || "", v.paid + v.unpaid]);
+      s21.push(["□", name, v.unpaid, v.paid, v.paid + v.unpaid]);
       tp += v.paid;
       tu += v.unpaid;
     });
@@ -1408,7 +1421,8 @@ function App() {
     chgQty: chgQty,
     toggleCancel: toggleCancel,
     delOrder: delOrder,
-    recent: o.id === recentId
+    recent: o.id === recentId,
+    onNickClick: selectNick
   })))), tab === "settle" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
   }, nickList.length > 0 && /*#__PURE__*/React.createElement("div", {
@@ -1774,9 +1788,9 @@ function App() {
       className: "whname"
     }, name), /*#__PURE__*/React.createElement("td", {
       className: "r warn"
-    }, v.unpaid || "-"), /*#__PURE__*/React.createElement("td", {
+    }, v.unpaid), /*#__PURE__*/React.createElement("td", {
       className: "r ok"
-    }, v.paid || "-"), /*#__PURE__*/React.createElement("td", {
+    }, v.paid), /*#__PURE__*/React.createElement("td", {
       className: "r whtotal"
     }, v.paid + v.unpaid));
   })), /*#__PURE__*/React.createElement("tfoot", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", null, "총합계"), /*#__PURE__*/React.createElement("td", {
@@ -1891,12 +1905,14 @@ function OrderRow({
   toggleCancel,
   delOrder,
   hideNick,
-  recent
+  recent,
+  onNickClick
 }) {
   return /*#__PURE__*/React.createElement("div", {
     className: "orow" + (o.canceled ? " canceled" : "") + (recent ? " recent" : "")
   }, !hideNick && /*#__PURE__*/React.createElement("span", {
-    className: "onick"
+    className: "onick" + (onNickClick ? " clickable" : ""),
+    onClick: onNickClick ? () => onNickClick(o.nick) : undefined
   }, o.nick), /*#__PURE__*/React.createElement("span", {
     className: "oname"
   }, o.name, o.canceled && " (취소)"), /*#__PURE__*/React.createElement("span", {
@@ -2118,6 +2134,8 @@ const CSS = `
 .nickchip:hover { background: #2a2f38; }
 .orow.canceled .onick, .orow.canceled .oname, .orow.canceled .oamt { text-decoration: line-through; color: #b0b7c0; }
 .onick { font-weight: 700; font-size: 14px; min-width: 64px; }
+.onick.clickable { cursor: pointer; color: #0f766e; text-decoration: underline; text-decoration-color: #b6e2d3; text-underline-offset: 2px; }
+.onick.clickable:hover { color: #0a5c51; text-decoration-color: #0f766e; }
 .oname { flex: 1; font-size: 14px; min-width: 120px; }
 .qtybox { display: flex; align-items: center; gap: 2px; }
 .qbtn { width: 28px; height: 28px; border-radius: 8px; border: 1px solid #d9dde3; background: #fff; font-size: 16px; cursor: pointer; }
