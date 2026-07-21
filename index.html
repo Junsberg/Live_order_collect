@@ -767,6 +767,7 @@ function App() {
 
   // CJ대한통운 운송장 출력 파일 파싱 (Sheet1)
   // 닉네임: X열(배송메세지1)의 "닉네임//요청"에서 // 앞부분 우선, 없으면 P열(고객주문번호)
+  // 운송장·택배사만 파일에서 가져오고, 이름·연락처·주소는 앱 출고 데이터 사용 (CJ 파일은 마스킹됨)
   const parseCjUpload = wb => {
     const ws = wb.Sheets["Sheet1"];
     if (!ws) return null;
@@ -791,11 +792,12 @@ function App() {
       if (!nick || nick === "0" || nick.startsWith("#")) continue;
       const tracking = clean(V(cell(r, 5))); // F열 운송장번호
       if (!map[nick]) {
+        const c = cust(nick); // 이름·연락처·주소는 앱 출고 데이터 (마스킹 회피)
         map[nick] = {
           nick,
-          name: clean(V(cell(r, 10))),
-          phone: clean(V(cell(r, 11))),
-          addr: clean(V(cell(r, 13))),
+          name: c.name || nick,
+          phone: c.phone || "",
+          addr: c.addr || "",
           tracking,
           carrier: tracking ? "CJ대한통운" : ""
         };
@@ -867,7 +869,7 @@ function App() {
         return;
       }
       if (data.length === 0) {
-        showToast("고객주문번호(P열)에 닉네임이 없습니다. CJ 출고 시 닉네임이 들어가야 조회됩니다.");
+        showToast("배송메세지1(X열)이나 고객주문번호에 닉네임이 없습니다. 새 CJ 출고 파일로 출력했는지 확인해주세요.");
         return;
       }
       mergeShipData(data, "CJ");
