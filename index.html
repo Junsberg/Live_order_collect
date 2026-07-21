@@ -83,8 +83,49 @@ if (!window.storage) {
    흐름: ① 오늘 상품 세팅 → ② 라이브 주문 입력 → ③ 정산서 발송/입금 확인 → ④ 출고/발주서
    저장: window.storage (새로고침해도 유지) · 방송 날짜 기준 엑셀 저장 지원 */
 
+// 편집용: 옵션 그룹(값에 _id 포함)을 조합으로 전개 — 수정 시 기존 주문 매칭에 id 사용(이름 변경에도 안전)
+const expandGroupsWithIds = (base, groups) => {
+  const gs = (groups || []).map(g => (g.values || []).filter(v => (v.name || "").trim())).filter(vs => vs.length);
+  if (!base || !gs.length) return [];
+  let combos = [[]];
+  gs.forEach(vs => {
+    const next = [];
+    combos.forEach(c => vs.forEach(v => next.push([...c, v])));
+    combos = next;
+  });
+  return combos.map(vals => ({
+    name: base.trim() + " " + vals.map(v => (v.name || "").trim()).join(" "),
+    price: vals.reduce((s, v) => s + (parseInt(v.price, 10) || 0), 0),
+    idKey: vals.map(v => v._id).join("|")
+  }));
+};
 const won = n => (n || 0).toLocaleString("ko-KR");
 const uid = () => Math.random().toString(36).slice(2, 9);
+
+// 옵션 상품을 변형 조합으로 전개. 단순 상품은 그대로 1개. (엑셀 참조목록·재고 등에서 사용)
+const COMBO_SEP = "\u241f"; // 조합 재고 키 구분자 (이름에 안 쓰이는 문자)
+const expandProduct = p => {
+  if (!p.options || !p.options.length) return [{
+    name: p.name,
+    price: p.price,
+    key: null,
+    names: []
+  }];
+  let combos = [[]];
+  p.options.forEach(g => {
+    const vs = (g.values || []).filter(v => v && (v.name || "").trim());
+    if (!vs.length) return;
+    const next = [];
+    combos.forEach(c => vs.forEach(v => next.push([...c, v])));
+    combos = next;
+  });
+  return combos.map(vals => ({
+    names: vals.map(v => v.name),
+    key: vals.map(v => v.name).join(COMBO_SEP),
+    name: p.name + " " + vals.map(v => v.name).join(" "),
+    price: (p.price || 0) + vals.reduce((s, v) => s + (v.price || 0), 0)
+  }));
+};
 
 // 복원용 숨김 시트
 const APPDATA_SHEET = "_appdata";
@@ -131,11 +172,28 @@ function App() {
   const [pName, setPName] = useState("");
   const [pPrice, setPPrice] = useState("");
   const [pStock, setPStock] = useState("");
+  const [optOpen, setOptOpen] = useState(false);
+  const [optName, setOptName] = useState("");
+  const [optGroups, setOptGroups] = useState([{
+    label: "",
+    values: [{
+      name: "",
+      price: ""
+    }, {
+      name: "",
+      price: ""
+    }]
+  }]);
+  const [optStocks, setOptStocks] = useState({}); // 조합별 재고 (comboKey → 문자열)
+  const [optEditId, setOptEditId] = useState(null); // 수정 중인 옵션상품 id (null=신규)
+  const [optOldMap, setOptOldMap] = useState({}); // 수정 시 옛조합이름 → idKey (기존 주문 반영용)
+  const [pick, setPick] = useState(null); // 옵션 상품 주문 드릴다운: { productId, chosen: [{name,price}] } | null
   const [copiedId, setCopiedId] = useState(null);
   const [settleSearch, setSettleSearch] = useState("");
   const [memoOnly, setMemoOnly] = useState(false);
   const [keepOnly, setKeepOnly] = useState(false);
   const [unpaidOnly, setUnpaidOnly] = useState(false);
+  const [paidOnly, setPaidOnly] = useState(false);
   const [settleHeader, setSettleHeader] = useState(SETTLE_HEADER);
   const [openMsg, setOpenMsg] = useState({});
   const [openCash, setOpenCash] = useState({});
@@ -158,6 +216,8 @@ function App() {
   const [resetAllArm, setResetAllArm] = useState(false);
   const [dragId, setDragId] = useState(null);
   const [delNickArm, setDelNickArm] = useState(null);
+  const [editNickFor, setEditNickFor] = useState(null);
+  const [editNickVal, setEditNickVal] = useState("");
   const [openCust, setOpenCust] = useState({});
   const nickRef = useRef(null);
   const dragRef = useRef({
@@ -288,6 +348,11 @@ function App() {
     return () => window.removeEventListener("afterprint", done);
   }, []);
 
+  // 옵션 상품 드릴다운 중 그 상품이 사라지면 선택 취소
+  useEffect(() => {
+    if (pick && !products.find(p => p.id === pick.productId)) setPick(null);
+  }, [pick, products]);
+
   /* ---------- 파생 데이터 ---------- */
   const activeOrders = useMemo(() => orders.filter(o => !o.canceled), [orders]);
   const totalSales = useMemo(() => activeOrders.reduce((s, o) => s + o.price * o.qty, 0), [activeOrders]);
@@ -323,6 +388,23 @@ function App() {
     });
     return Object.values(m).sort((a, b) => b.lastTs - a.lastTs);
   }, [orders]);
+  // 옵션 조합 상품 미리보기 (데카르트 곱, 가격=값 가격 합산)
+  const optVariants = useMemo(() => {
+    const base = optName.trim();
+    const groups = optGroups.map(g => g.values.filter(v => v.name.trim())).filter(vs => vs.length > 0);
+    if (!base || groups.length === 0) return [];
+    let combos = [[]];
+    groups.forEach(vs => {
+      const next = [];
+      combos.forEach(c => vs.forEach(v => next.push([...c, v])));
+      combos = next;
+    });
+    return combos.map(vals => ({
+      key: vals.map(v => v.name.trim()).join(COMBO_SEP),
+      name: base + " " + vals.map(v => v.name.trim()).join(" "),
+      price: vals.reduce((s, v) => s + (parseInt(v.price, 10) || 0), 0)
+    }));
+  }, [optName, optGroups]);
   const paidCount = nickList.filter(n => customers[n] && customers[n].paid).length;
   const dateCode = bdate.replace(/-/g, "");
   const cust = n => customers[n] || EMPTY_CUST;
@@ -351,6 +433,149 @@ function App() {
     setPPrice("");
     setPStock("");
   };
+  // 옵션 생성기 핸들러
+  const optAddGroup = () => setOptGroups(g => g.length >= 4 ? g : [...g, {
+    label: "",
+    values: [{
+      name: "",
+      price: "",
+      _id: uid()
+    }, {
+      name: "",
+      price: "",
+      _id: uid()
+    }]
+  }]);
+  const optRemoveGroup = gi => setOptGroups(g => g.length <= 1 ? g : g.filter((_, i) => i !== gi));
+  const optSetGroupLabel = (gi, label) => setOptGroups(g => g.map((grp, i) => i === gi ? {
+    ...grp,
+    label
+  } : grp));
+  const optAddValue = gi => setOptGroups(g => g.map((grp, i) => i === gi ? {
+    ...grp,
+    values: [...grp.values, {
+      name: "",
+      price: "",
+      _id: uid()
+    }]
+  } : grp));
+  const optRemoveValue = (gi, vi) => setOptGroups(g => g.map((grp, i) => i === gi ? {
+    ...grp,
+    values: grp.values.filter((_, j) => j !== vi)
+  } : grp));
+  const optSetValue = (gi, vi, patch) => setOptGroups(g => g.map((grp, i) => i === gi ? {
+    ...grp,
+    values: grp.values.map((v, j) => j === vi ? {
+      ...v,
+      ...patch
+    } : v)
+  } : grp));
+  const optReset = () => {
+    setOptName("");
+    setOptGroups([{
+      label: "",
+      values: [{
+        name: "",
+        price: "",
+        _id: uid()
+      }, {
+        name: "",
+        price: "",
+        _id: uid()
+      }]
+    }]);
+    setOptStocks({});
+    setOptEditId(null);
+    setOptOldMap({});
+  };
+  // 옵션 상품 수정 열기 (기존 값 채워넣기 + 각 값에 내부 id 부여 + 옛조합 매핑 기록)
+  const openEditOption = p => {
+    const groups = (p.options || []).map(g => ({
+      label: g.label || "",
+      values: (g.values || []).map(v => ({
+        name: v.name,
+        price: v.price ? String(v.price) : "",
+        _id: uid()
+      }))
+    }));
+    const oldMap = {};
+    expandGroupsWithIds(p.name, groups).forEach(c => {
+      oldMap[c.name] = c.idKey;
+    });
+    setOptOldMap(oldMap);
+    setOptName(p.name);
+    setOptGroups(groups);
+    setOptStocks(Object.fromEntries(Object.entries(p.stocks || {}).map(([k, v]) => [k, String(v)])));
+    setOptEditId(p.id);
+    setOptOpen(true);
+  };
+  const generateVariants = () => {
+    const base = optName.trim();
+    const groups = optGroups.map(g => ({
+      label: g.label.trim(),
+      values: g.values.filter(v => v.name.trim()).map(v => ({
+        name: v.name.trim(),
+        price: parseInt(v.price, 10) || 0
+      }))
+    })).filter(g => g.values.length > 0);
+    if (!base || groups.length === 0) {
+      showToast("상품명과 옵션값을 입력하세요");
+      return;
+    }
+    // 이름 중복 검사 (수정 중인 자기 자신은 제외)
+    if (products.some(p => p.name === base && p.id !== optEditId)) {
+      showToast(`"${base}" 상품이 이미 있습니다`);
+      return;
+    }
+    // 조합별 재고 맵 (현재 유효 조합 키만, 빈 값은 무제한)
+    const validKeys = new Set(optVariants.map(v => v.key));
+    const stocks = {};
+    Object.entries(optStocks).forEach(([k, v]) => {
+      const s = (v == null ? "" : String(v)).trim();
+      if (validKeys.has(k) && s !== "") stocks[k] = Math.max(0, parseInt(s, 10) || 0);
+    });
+    if (optEditId) {
+      const newByIdKey = {};
+      expandGroupsWithIds(base, optGroups).forEach(c => {
+        newByIdKey[c.idKey] = {
+          name: c.name,
+          price: c.price
+        };
+      });
+      setOrders(os => os.map(o => {
+        if (o.productId !== optEditId) return o;
+        const idKey = optOldMap[o.name];
+        if (idKey == null) return o;
+        const nu = newByIdKey[idKey];
+        if (!nu) return o;
+        return {
+          ...o,
+          name: nu.name,
+          price: nu.price
+        };
+      }));
+      setProducts(ps => ps.map(p => p.id === optEditId ? {
+        ...p,
+        name: base,
+        price: 0,
+        options: groups,
+        stocks
+      } : p));
+      showToast(`옵션 상품 "${base}" 수정됨 · 기존 주문도 정정`);
+    } else {
+      setProducts(ps => [...ps, {
+        id: uid(),
+        name: base,
+        price: 0,
+        stock: null,
+        options: groups,
+        stocks
+      }]);
+      showToast(`옵션 상품 "${base}" 추가 · ${optVariants.length}개 조합`);
+    }
+    optReset();
+    setOptOpen(false);
+  };
   const loadPrev = async () => {
     try {
       const r = await window.storage.get("saja:lastProducts");
@@ -376,6 +601,7 @@ function App() {
     setMemoOnly(false);
     setKeepOnly(false);
     setUnpaidOnly(false);
+    setPaidOnly(false);
     setSettleSearch("");
     setRecentId(null);
   };
@@ -418,16 +644,18 @@ function App() {
   };
 
   /* ---------- 주문 ---------- */
-  const tapProduct = p => {
+  const tapProduct = p => addResolvedOrder(p.id, p.name, p.price);
+  // 주문 추가 코어 (이름·금액 확정본). 옵션 상품 드릴다운도 이걸 사용.
+  const addResolvedOrder = (productId, name, price) => {
     const n = nick.trim();
     if (!n) {
       nickRef.current && nickRef.current.focus();
       return;
     }
-    const existing = orders.find(o => o.nick === n && o.name === p.name && o.price === p.price && !o.canceled);
+    const existing = orders.find(o => o.nick === n && o.name === name && o.price === price && !o.canceled);
     const rid = existing ? existing.id : uid();
     setOrders(os => {
-      const i = os.findIndex(o => o.nick === n && o.name === p.name && o.price === p.price && !o.canceled);
+      const i = os.findIndex(o => o.nick === n && o.name === name && o.price === price && !o.canceled);
       if (i >= 0) {
         const cp = [...os];
         cp[i] = {
@@ -438,10 +666,10 @@ function App() {
       }
       return [...os, {
         id: rid,
-        productId: p.id,
+        productId,
         nick: n,
-        name: p.name,
-        price: p.price,
+        name,
+        price,
         qty: 1,
         canceled: false,
         ts: Date.now()
@@ -449,6 +677,22 @@ function App() {
     });
     flashRecent(rid);
     if (!customers[n]) setCust(n, {});
+  };
+  // 옵션 상품 드릴다운: 값 하나 선택
+  const choosePickValue = (prod, value) => {
+    const chosen = [...pick.chosen, value];
+    if (chosen.length >= prod.options.length) {
+      const name = prod.name + " " + chosen.map(c => c.name).join(" ");
+      const price = (prod.price || 0) + chosen.reduce((s, c) => s + (c.price || 0), 0);
+      addResolvedOrder(prod.id, name, price);
+      showToast(`${name} 추가`);
+      setPick(null);
+    } else {
+      setPick({
+        ...pick,
+        chosen
+      });
+    }
   };
   // 직접입력: 목록에 없는 상품(서비스 등)을 임의 이름·금액·수량으로 추가
   const addManualOrder = ({
@@ -495,6 +739,55 @@ function App() {
     setOrders(os => os.filter(o => o.nick !== n));
     setDelNickArm(null);
     showToast(n + " 주문 전체 삭제됨");
+  };
+  // 닉네임 변경 — 주문·고객정보·송장조회 전부 반영 (픽업체크는 상품명 키라 무관)
+  const renameNick = (oldNick, newNick) => {
+    const nn = (newNick || "").trim();
+    if (!nn) {
+      showToast("닉네임을 입력하세요");
+      return false;
+    }
+    if (nn === oldNick) return true;
+    if (orders.some(o => o.nick === nn) || customers[nn]) {
+      showToast(`"${nn}" 닉네임이 이미 있어 변경할 수 없어요`);
+      return false;
+    }
+    setOrders(os => os.map(o => o.nick === oldNick ? {
+      ...o,
+      nick: nn
+    } : o));
+    setCustomers(c => {
+      if (!c[oldNick]) return c;
+      const {
+        [oldNick]: mv,
+        ...rest
+      } = c;
+      return {
+        ...rest,
+        [nn]: mv
+      };
+    });
+    setShipData(sd => sd.map(d => d.nick === oldNick ? {
+      ...d,
+      nick: nn
+    } : d));
+    setOpenCust(s => {
+      if (!(oldNick in s)) return s;
+      const {
+        [oldNick]: v,
+        ...rest
+      } = s;
+      return {
+        ...rest,
+        [nn]: v
+      };
+    });
+    setNick(cur => cur === oldNick ? nn : cur);
+    showToast(`닉네임 "${oldNick}" → "${nn}"`);
+    return true;
+  };
+  const commitNickEdit = oldNick => {
+    if (renameNick(oldNick, editNickVal)) setEditNickFor(null);
   };
 
   /* ---------- 정산 ---------- */
@@ -818,6 +1111,7 @@ function App() {
     setMemoOnly(false);
     setKeepOnly(false);
     setUnpaidOnly(false);
+    setPaidOnly(false);
     setRecentId(null);
     setTab("order");
   };
@@ -1016,10 +1310,11 @@ function App() {
 
     // 0. 실시간_주문서
     const s0 = [["닉네임", "상품명", "수량", "금액", "수량x금액", null, "금일 판매 상품 목록", "금액", null, "특이사항"]];
-    const maxLen = Math.max(sorted.length, products.length);
+    const productRef = products.flatMap(p => expandProduct(p));
+    const maxLen = Math.max(sorted.length, productRef.length);
     for (let i = 0; i < maxLen; i++) {
       const o = sorted[i],
-        p = products[i];
+        p = productRef[i];
       let noteCell = null;
       if (o) {
         const m = (cust(o.nick).memo || "").trim();
@@ -1341,9 +1636,145 @@ function App() {
   }), /*#__PURE__*/React.createElement("button", {
     className: "btn primary",
     onClick: addProduct
-  }, "추가")), products.length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, "추가")), /*#__PURE__*/React.createElement("button", {
+    className: "btn optopen",
+    onClick: () => {
+      if (optOpen) {
+        setOptOpen(false);
+        optReset();
+      } else {
+        optReset();
+        setOptOpen(true);
+      }
+    }
+  }, optOpen ? "▲ 옵션 상품 닫기" : "＋ 옵션으로 여러 개 추가 (색상·사이즈 등)"), optOpen && /*#__PURE__*/React.createElement("div", {
+    className: "optgen"
+  }, optEditId && /*#__PURE__*/React.createElement("div", {
+    className: "optedit-badge"
+  }, "✎ 옵션 상품 수정 중"), /*#__PURE__*/React.createElement("input", {
+    className: "in grow",
+    placeholder: "상품명 (예: 냉감패드)",
+    value: optName,
+    onChange: e => setOptName(e.target.value)
+  }), optGroups.map((g, gi) => /*#__PURE__*/React.createElement("div", {
+    className: "optgroup",
+    key: gi
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "optgroup-head"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "in optlabel",
+    placeholder: `옵션${gi + 1} 이름 (예: ${gi === 0 ? "색상" : "사이즈"})`,
+    value: g.label,
+    onChange: e => optSetGroupLabel(gi, e.target.value)
+  }), optGroups.length > 1 && /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm",
+    onClick: () => optRemoveGroup(gi)
+  }, "옵션 삭제")), g.values.map((v, vi) => /*#__PURE__*/React.createElement("div", {
+    className: "optval",
+    key: vi
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "in grow",
+    placeholder: "값 (예: 그레이)",
+    value: v.name,
+    onChange: e => optSetValue(gi, vi, {
+      name: e.target.value
+    })
+  }), /*#__PURE__*/React.createElement("input", {
+    className: "in price",
+    type: "number",
+    placeholder: "가격(선택)",
+    value: v.price,
+    onChange: e => optSetValue(gi, vi, {
+      price: e.target.value
+    })
+  }), g.values.length > 1 && /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm optx",
+    onClick: () => optRemoveValue(gi, vi)
+  }, "×"))), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm optadd",
+    onClick: () => optAddValue(gi)
+  }, "＋ 값 추가"))), optGroups.length < 4 && /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost optaddgroup",
+    onClick: optAddGroup
+  }, "＋ 옵션 추가"), optVariants.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "optpreview"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "optpreview-t"
+  }, "조합 ", optVariants.length, "개 · 가격 · 재고(비우면 무제한)"), optVariants.map(v => /*#__PURE__*/React.createElement("div", {
+    className: "optpreview-row",
+    key: v.key
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "opr-name"
+  }, v.name), /*#__PURE__*/React.createElement("b", {
+    className: "opr-price"
+  }, won(v.price), "원"), /*#__PURE__*/React.createElement("input", {
+    className: "in opr-stock",
+    type: "number",
+    placeholder: "무제한",
+    value: optStocks[v.key] ?? "",
+    onChange: e => {
+      const val = e.target.value;
+      setOptStocks(s => ({
+        ...s,
+        [v.key]: val
+      }));
+    }
+  })))), /*#__PURE__*/React.createElement("button", {
+    className: "btn primary optgo",
+    disabled: optVariants.length === 0,
+    onClick: generateVariants
+  }, optVariants.length === 0 ? "상품명과 옵션값을 입력하세요" : optEditId ? `수정 저장 · ${optVariants.length}개 조합` : `옵션 상품 만들기 · ${optVariants.length}개 조합`), optEditId && /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost",
+    onClick: () => {
+      optReset();
+      setOptOpen(false);
+    }
+  }, "수정 취소"), /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "「냉감패드」 하나로 등록되고, 주문 탭에서 상품을 누르면 옵션(색상 → 사이즈)을 단계별로 골라 추가돼요. 가격 = 각 값 금액의 ", /*#__PURE__*/React.createElement("b", null, "합"), "(같으면 비워서 0원). ", /*#__PURE__*/React.createElement("b", null, "재고"), "는 조합마다 따로 입력(비우면 무제한). ", /*#__PURE__*/React.createElement("b", null, "수정하면 이미 담긴 주문의 상품명·가격도 같은 조합끼리 자동 정정"), "돼요(삭제한 조합의 기존 주문은 그대로 보존).")), products.length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "empty"
   }, "아직 상품이 없습니다. 오늘 팔 상품을 등록하세요."), products.map(p => {
+    if (p.options && p.options.length) {
+      const combos = expandProduct(p);
+      const stocked = combos.filter(c => p.stocks && p.stocks[c.key] != null);
+      return /*#__PURE__*/React.createElement("div", {
+        className: "prow" + (dragId === p.id ? " dragging" : ""),
+        key: p.id,
+        "data-prow": p.id
+      }, /*#__PURE__*/React.createElement("div", {
+        className: "prow-main"
+      }, /*#__PURE__*/React.createElement("span", {
+        className: "draghandle",
+        title: "드래그로 순서 변경",
+        onPointerDown: e => onDragStart(e, p.id),
+        onPointerMove: onDragMove,
+        onPointerUp: onDragEnd,
+        onPointerCancel: onDragEnd
+      }, "≡"), /*#__PURE__*/React.createElement("div", {
+        className: "opt-prod"
+      }, /*#__PURE__*/React.createElement("div", {
+        className: "opt-prod-name"
+      }, p.name, " ", /*#__PURE__*/React.createElement("span", {
+        className: "opt-badge"
+      }, "옵션")), p.options.map((g, gi) => /*#__PURE__*/React.createElement("div", {
+        className: "opt-prod-g",
+        key: gi
+      }, /*#__PURE__*/React.createElement("b", null, g.label || `옵션${gi + 1}`, ":"), " ", g.values.map(v => v.name + (v.price ? ` (${won(v.price)})` : "")).join(" / "))), stocked.length > 0 && /*#__PURE__*/React.createElement("div", {
+        className: "opt-prod-stock"
+      }, "재고: ", stocked.map(c => {
+        const sold = activeOrders.filter(o => o.name === c.name).reduce((s, o) => s + o.qty, 0);
+        const left = Math.max(0, p.stocks[c.key] - sold);
+        return `${c.names.join(" ")} ${left}`;
+      }).join(" · "))), /*#__PURE__*/React.createElement("div", {
+        className: "opt-prod-btns"
+      }, /*#__PURE__*/React.createElement("button", {
+        className: "btn ghost sm",
+        onClick: () => openEditOption(p)
+      }, "수정"), /*#__PURE__*/React.createElement("button", {
+        className: "btn ghost sm",
+        onClick: () => setProducts(ps => ps.filter(x => x.id !== p.id))
+      }, "삭제"))));
+    }
     const sold = activeOrders.filter(o => o.name === p.name && o.price === p.price).reduce((s, o) => s + o.qty, 0);
     const left = p.stock == null ? null : p.stock - sold;
     const soldOut = left != null && left <= 0;
@@ -1500,9 +1931,78 @@ function App() {
     className: "sub"
   }, "닉네임 먼저 입력")), products.length === 0 ? /*#__PURE__*/React.createElement("div", {
     className: "empty"
-  }, "① 상품 탭에서 오늘 판매 상품을 먼저 등록하세요.", /*#__PURE__*/React.createElement("br", null), "또는 아래 「직접입력」으로 바로 추가할 수 있습니다.") : /*#__PURE__*/React.createElement("div", {
+  }, "① 상품 탭에서 오늘 판매 상품을 먼저 등록하세요.", /*#__PURE__*/React.createElement("br", null), "또는 아래 「직접입력」으로 바로 추가할 수 있습니다.") : pick ? (() => {
+    const prod = products.find(x => x.id === pick.productId);
+    if (!prod) return null;
+    const gi = pick.chosen.length;
+    const group = prod.options[gi];
+    const isLast = gi === prod.options.length - 1;
+    return /*#__PURE__*/React.createElement("div", {
+      className: "pad picking"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "pickhead"
+    }, /*#__PURE__*/React.createElement("b", null, prod.name), pick.chosen.length > 0 && /*#__PURE__*/React.createElement("span", {
+      className: "pickchosen"
+    }, " " + pick.chosen.map(c => c.name).join(" ")), /*#__PURE__*/React.createElement("span", {
+      className: "pickstep"
+    }, " · ", group.label || `옵션${gi + 1}`, " 선택")), group.values.map((v, vi) => {
+      let left = null,
+        soldOut = false;
+      if (isLast && prod.stocks) {
+        const names = [...pick.chosen.map(c => c.name), v.name];
+        const key = names.join(COMBO_SEP);
+        if (prod.stocks[key] != null) {
+          const cname = prod.name + " " + names.join(" ");
+          const sold = activeOrders.filter(o => o.name === cname).reduce((s, o) => s + o.qty, 0);
+          left = Math.max(0, prod.stocks[key] - sold);
+          soldOut = left <= 0;
+        }
+      }
+      return /*#__PURE__*/React.createElement("button", {
+        key: vi,
+        className: "padbtn optvalbtn" + (soldOut ? " soldout" : ""),
+        onClick: () => {
+          if (soldOut) {
+            showToast(`${v.name} //재고 소진으로 품절`);
+            return;
+          }
+          choosePickValue(prod, v);
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        className: "padname"
+      }, v.name), (v.price || left != null) && /*#__PURE__*/React.createElement("span", {
+        className: "padprice"
+      }, v.price ? `+${won(v.price)}원` : "", left != null ? `${v.price ? " · " : ""}${soldOut ? "품절" : `남은 ${left}`}` : ""));
+    }), /*#__PURE__*/React.createElement("button", {
+      className: "btn ghost pickback",
+      onClick: () => setPick(pick.chosen.length ? {
+        ...pick,
+        chosen: pick.chosen.slice(0, -1)
+      } : null)
+    }, pick.chosen.length ? "← 뒤로" : "취소"));
+  })() : /*#__PURE__*/React.createElement("div", {
     className: "pad" + (nick.trim() ? "" : " dim")
   }, products.map(p => {
+    if (p.options && p.options.length) {
+      return /*#__PURE__*/React.createElement("button", {
+        key: p.id,
+        className: "padbtn optbtn",
+        onClick: () => {
+          if (!nick.trim()) {
+            nickRef.current && nickRef.current.focus();
+            return;
+          }
+          setPick({
+            productId: p.id,
+            chosen: []
+          });
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        className: "padname"
+      }, p.name), /*#__PURE__*/React.createElement("span", {
+        className: "padprice"
+      }, "옵션 선택 ▸"));
+    }
     const sold = activeOrders.filter(o => o.name === p.name && o.price === p.price).reduce((s, o) => s + o.qty, 0);
     const left = p.stock == null ? null : p.stock - sold;
     const soldOut = left != null && left <= 0;
@@ -1585,15 +2085,38 @@ function App() {
   }, "아직 주문이 없습니다."), nickSummary.map(s => /*#__PURE__*/React.createElement("div", {
     className: "nrow",
     key: s.nick
-  }, /*#__PURE__*/React.createElement("span", {
+  }, editNickFor === s.nick ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("input", {
+    className: "in grow nickedit",
+    value: editNickVal,
+    autoFocus: true,
+    onChange: e => setEditNickVal(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter") commitNickEdit(s.nick);
+      if (e.key === "Escape") setEditNickFor(null);
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "btn primary sm",
+    onClick: () => commitNickEdit(s.nick)
+  }, "확인"), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm",
+    onClick: () => setEditNickFor(null)
+  }, "취소")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
     className: "onick clickable",
     onClick: () => selectNick(s.nick)
-  }, s.nick), /*#__PURE__*/React.createElement("span", {
+  }, s.nick), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm nickeditbtn",
+    title: "닉네임 수정",
+    onClick: () => {
+      setEditNickFor(s.nick);
+      setEditNickVal(s.nick);
+      setDelNickArm(null);
+    }
+  }, "✎"), /*#__PURE__*/React.createElement("span", {
     className: "nsum" + (s.active === 0 ? " zero" : "")
   }, won(s.total), "원"), /*#__PURE__*/React.createElement("button", {
     className: "btn ghost sm" + (delNickArm === s.nick ? " danger" : ""),
     onClick: () => delNickOrders(s.nick)
-  }, delNickArm === s.nick ? "삭제?" : "삭제"))))), tab === "settle" && /*#__PURE__*/React.createElement("div", {
+  }, delNickArm === s.nick ? "삭제?" : "삭제")))))), tab === "settle" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
   }, nickList.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "card summarycard"
@@ -1622,8 +2145,17 @@ function App() {
     onClick: () => setKeepOnly(v => !v)
   }, "킵만"), /*#__PURE__*/React.createElement("button", {
     className: "btn filterbtn f-unpaid" + (unpaidOnly ? " on" : ""),
-    onClick: () => setUnpaidOnly(v => !v)
-  }, "미입금만"), /*#__PURE__*/React.createElement("div", {
+    onClick: () => {
+      setUnpaidOnly(v => !v);
+      setPaidOnly(false);
+    }
+  }, "미입금만"), /*#__PURE__*/React.createElement("button", {
+    className: "btn filterbtn f-paid" + (paidOnly ? " on" : ""),
+    onClick: () => {
+      setPaidOnly(v => !v);
+      setUnpaidOnly(false);
+    }
+  }, "입금만"), /*#__PURE__*/React.createElement("div", {
     className: "feeinline"
   }, "합배송비 ", /*#__PURE__*/React.createElement("input", {
     className: "in feesmall",
@@ -1634,11 +2166,11 @@ function App() {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "empty"
-  }, "주문이 들어오면 닉네임별 정산 카드가 생깁니다.")), nickList.length > 0 && nickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase()) && (!memoOnly || (cust(n).memo || "").trim()) && (!keepOnly || cust(n).keep) && (!unpaidOnly || !cust(n).paid)).length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, "주문이 들어오면 닉네임별 정산 카드가 생깁니다.")), nickList.length > 0 && nickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase()) && (!memoOnly || (cust(n).memo || "").trim()) && (!keepOnly || cust(n).keep) && (!unpaidOnly || !cust(n).paid) && (!paidOnly || cust(n).paid)).length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "empty"
-  }, unpaidOnly ? "미입금 주문이 없습니다." : keepOnly ? "킵으로 체크된 주문이 없습니다." : memoOnly ? "특이사항이 있는 주문이 없습니다." : `「${settleSearch}」 검색 결과가 없습니다.`)), nickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase()) && (!memoOnly || (cust(n).memo || "").trim()) && (!keepOnly || cust(n).keep) && (!unpaidOnly || !cust(n).paid)).map(n => {
+  }, paidOnly ? "입금완료 주문이 없습니다." : unpaidOnly ? "미입금 주문이 없습니다." : keepOnly ? "킵으로 체크된 주문이 없습니다." : memoOnly ? "특이사항이 있는 주문이 없습니다." : `「${settleSearch}」 검색 결과가 없습니다.`)), nickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase()) && (!memoOnly || (cust(n).memo || "").trim()) && (!keepOnly || cust(n).keep) && (!unpaidOnly || !cust(n).paid) && (!paidOnly || cust(n).paid)).map(n => {
     const list = byNick[n] || [];
     const sum = list.reduce((s, o) => s + o.price * o.qty, 0);
     const c = cust(n);
@@ -2323,6 +2855,42 @@ const CSS = `
 .nrow { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #f0f2f5; }
 .nsum { flex: 1; text-align: right; font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
 .nsum.zero { color: #b0b7c0; text-decoration: line-through; }
+.nickeditbtn { flex: 0 0 auto; padding: 5px 9px; color: #8a919c; }
+.in.nickedit { flex: 1; min-width: 0; font-weight: 700; padding: 7px 9px; }
+.optopen { width: 100%; margin-top: 8px; border-color: #0f766e; color: #0f766e; font-weight: 700; }
+.optgen { margin-top: 10px; padding: 12px; border: 1px solid #d5d9df; border-radius: 10px; background: #fafbfc; display: flex; flex-direction: column; gap: 10px; }
+.optgroup { border: 1px solid #eceef2; border-radius: 8px; padding: 10px; background: #fff; display: flex; flex-direction: column; gap: 6px; }
+.optgroup-head { display: flex; gap: 6px; align-items: center; }
+.in.optlabel { flex: 1; font-weight: 700; }
+.optval { display: flex; gap: 6px; align-items: center; }
+.optval .in.price { width: 108px; }
+.optx { flex: 0 0 auto; padding: 6px 10px; }
+.optadd { align-self: flex-start; }
+.optaddgroup { border-style: dashed; }
+.optpreview { border: 1px dashed #0f766e; border-radius: 8px; padding: 8px 10px; background: #f4fbf8; }
+.optpreview-t { font-size: 12px; font-weight: 700; color: #0f766e; margin-bottom: 4px; }
+.optpreview-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; padding: 3px 0; }
+.optpreview-row .opr-name { flex: 1; min-width: 0; }
+.optpreview-row .opr-price { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.optpreview-row .in.opr-stock { width: 72px; padding: 5px 7px; font-size: 13px; text-align: right; }
+.optedit-badge { font-size: 12px; font-weight: 700; color: #b8860b; }
+.opt-prod-stock { font-size: 12px; color: #0f766e; font-weight: 600; }
+.opt-prod-btns { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
+.optgo { margin-top: 2px; }
+.opt-prod { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.opt-prod-name { font-size: 15px; font-weight: 700; }
+.opt-badge { display: inline-block; margin-left: 6px; padding: 1px 7px; font-size: 11px; font-weight: 700; color: #fff; background: #0f766e; border-radius: 999px; vertical-align: middle; }
+.opt-prod-g { font-size: 12px; color: #5b6470; }
+.opt-prod-g b { color: #16191f; font-weight: 700; }
+.padbtn.optbtn { border-color: #0f766e; }
+.padbtn.optbtn .padprice { color: #0f766e; font-weight: 700; }
+.pad.picking { }
+.pickhead { grid-column: 1 / -1; font-size: 14px; color: #16191f; padding: 2px 2px 6px; }
+.pickhead b { font-size: 15px; }
+.pickchosen { color: #0f766e; font-weight: 700; }
+.pickstep { color: #8a919c; }
+.padbtn.optvalbtn { border-color: #b6e2d3; background: #f4fbf8; }
+.pickback { grid-column: 1 / -1; margin-top: 4px; }
 .ps-sold { color: #aab0ba; }
 .ps-out { display: inline-block; margin-left: 8px; padding: 1px 7px; font-size: 11px; font-weight: 700; color: #fff; background: #d81f26; border-radius: 999px; }
 .btn {
@@ -2450,6 +3018,7 @@ const CSS = `
 .filterbtn.f-memo.on { background: #0f9d8f; border-color: #0f9d8f; color: #fff; }
 .filterbtn.f-keep.on { background: #d81f26; border-color: #d81f26; color: #fff; }
 .filterbtn.f-unpaid.on { background: #f5a623; border-color: #f5a623; color: #16191f; }
+.filterbtn.f-paid.on { background: #0f766e; border-color: #0f766e; color: #fff; }
 .warnbadge { display: inline-block; margin-left: 8px; padding: 2px 8px; font-size: 12px; font-weight: 700; color: #fff; background: #d81f26; border-radius: 999px; vertical-align: middle; }
 .in.search { flex: 1; }
 .feeinline { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #8a919c; white-space: nowrap; }
