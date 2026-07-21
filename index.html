@@ -357,6 +357,10 @@ function App() {
   const activeOrders = useMemo(() => orders.filter(o => !o.canceled), [orders]);
   const totalSales = useMemo(() => activeOrders.reduce((s, o) => s + o.price * o.qty, 0), [activeOrders]);
   const paidSales = useMemo(() => activeOrders.reduce((s, o) => s + (customers[o.nick] && customers[o.nick].paid ? o.price * o.qty : 0), 0), [activeOrders, customers]);
+  const orderNickCount = useMemo(() => new Set(activeOrders.map(o => o.nick)).size, [activeOrders]);
+  const paidNickCount = useMemo(() => new Set(activeOrders.filter(o => customers[o.nick] && customers[o.nick].paid).map(o => o.nick)).size, [activeOrders, customers]);
+  const totalWithShip = totalSales + orderNickCount * shipFee;
+  const paidWithShip = paidSales + paidNickCount * shipFee;
   const nickList = useMemo(() => {
     const s = [];
     orders.forEach(o => {
@@ -1573,13 +1577,15 @@ function App() {
     className: "tlabel"
   }, "주문"), /*#__PURE__*/React.createElement("span", {
     className: "tval"
-  }, "₩", won(totalSales))), /*#__PURE__*/React.createElement("div", {
+  }, "₩", won(totalWithShip))), /*#__PURE__*/React.createElement("div", {
     className: "topamt paid"
   }, /*#__PURE__*/React.createElement("span", {
     className: "tlabel"
   }, "입금"), /*#__PURE__*/React.createElement("span", {
     className: "tval"
-  }, "₩", won(paidSales)))), /*#__PURE__*/React.createElement("div", {
+  }, "₩", won(paidWithShip)))), orderNickCount > 0 && shipFee > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "topship"
+  }, "상품 ₩", won(totalSales), " + 배송비 ₩", won(shipFee), "×", orderNickCount, "명 (배송비 포함)"), /*#__PURE__*/React.createElement("div", {
     className: "topmeta"
   }, "주문 ", activeOrders.length, "건 · 주문자 ", nickList.length, "명 · 입금 ", paidCount, "/", nickList.length, "명")), /*#__PURE__*/React.createElement("div", {
     className: "topright"
@@ -2805,6 +2811,7 @@ const CSS = `
 .topamt .tlabel { font-size: 11px; font-weight: 600; color: #9aa3ad; }
 .topamt .tval { font-size: 21px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .topamt.paid .tlabel { color: #7fdcc8; }
+.topship { font-size: 11px; color: #9aa3ad; margin-top: 2px; font-variant-numeric: tabular-nums; }
 .topamt.paid .tval { color: #7fdcc8; }
 .topmeta { font-size: 12px; color: #9aa3ad; }
 .tabs { display: flex; gap: 6px; padding: 10px 0; position: sticky; top: 48px; z-index: 9; background: #f6f7f9; }
