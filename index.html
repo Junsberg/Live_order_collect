@@ -1057,6 +1057,9 @@ function App() {
     // 4. 송장출력_복사용(롯데) — 공통 빌더 사용
     XLSX.utils.book_append_sheet(wb, buildShipSheet(), "4. 송장출력_복사용(롯데)");
 
+    // 5. 송장출력_복사용(CJ대한통운) — 공통 빌더 사용
+    XLSX.utils.book_append_sheet(wb, buildCjSheet(), "5. 송장출력_복사용(CJ대한통운)");
+
     // 복원용 숨김 시트 (불러오기 시 사용)
     appendAppData(wb);
     XLSX.writeFile(wb, `${dateCode}_사자창고_라이브.xlsx`);
