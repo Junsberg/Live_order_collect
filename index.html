@@ -592,21 +592,21 @@ function App() {
   // CJ대한통운 출고 시트 — 입금완료자별 1행(합포장이라 수량 무관 대표 1개)
   const buildCjSheet = () => {
     const rows = [["보내는분성명", "보내는분전화번호", "보내는분주소(전체, 분할)", "품목명", "내품수량", "박스타입", "받는분성명", "받는분전화번호", "받는분주소(전체, 분할)", "배송메세지1", "고객주문번호"]];
-    const seen = new Set();
     paidLines.forEach(o => {
-      if (seen.has(o.nick)) return; // 닉네임당 1행
-      seen.add(o.nick);
+      // 롯데처럼 상품별 1행
       const c = cust(o.nick);
+      const req = (c.req || "").trim();
+      const msg = req ? `${o.nick}//${req}` : o.nick; // 요청 없으면 닉네임만, 있으면 닉네임//요청
       rows.push(["사자창고",
       // A 보내는분성명 — 고정
       "02-561-7000",
       // B 보내는분전화번호 — 고정
       "경기도 광주시 오포로240, 8동",
       // C 보내는분주소 — 고정
-      "사자창고_라이브_상품",
-      // D 품목명 — 고정
-      1,
-      // E 내품수량 — 대표 1
+      o.name,
+      // D 품목명 — 실제 상품명
+      o.qty,
+      // E 내품수량 — 실제 수량
       "",
       // F 박스타입 — 빈값
       c.name || o.nick,
@@ -615,20 +615,20 @@ function App() {
       // H 받는분전화번호 — 연락처
       c.addr || "",
       // I 받는분주소 — 주소
-      c.req || "",
-      // J 배송메세지1 — 배송메시지
+      msg,
+      // J 배송메세지1 — 닉네임(//요청)
       o.nick // K 고객주문번호 — 닉네임
       ]);
     });
     const ws = XLSX.utils.aoa_to_sheet(rows);
     ws["!cols"] = [{
-      wch: 12
+      wch: 14
     }, {
       wch: 14
     }, {
       wch: 30
     }, {
-      wch: 18
+      wch: 30
     }, {
       wch: 8
     }, {
@@ -640,7 +640,7 @@ function App() {
     }, {
       wch: 40
     }, {
-      wch: 20
+      wch: 24
     }, {
       wch: 12
     }];
