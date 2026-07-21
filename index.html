@@ -451,6 +451,29 @@ function App() {
   }, [activeOrders, customers]);
   const paidLines = useMemo(() => activeOrders.filter(o => cust(o.nick).paid), [activeOrders, customers]);
 
+  // 출고 선택 모드: 전체(기본) 또는 체크한 사람만
+  const [shipSelectMode, setShipSelectMode] = useState(false);
+  const [shipSelected, setShipSelected] = useState({});
+  // 입금완료자 닉네임(중복 제거, 최초 등장 순)
+  const paidNicks = useMemo(() => {
+    const seen = new Set();
+    const list = [];
+    paidLines.forEach(o => {
+      if (!seen.has(o.nick)) {
+        seen.add(o.nick);
+        list.push(o.nick);
+      }
+    });
+    return list;
+  }, [paidLines]);
+  // 실제 출고 파일에 담길 라인 (선택 모드면 체크된 닉네임만)
+  const shipLines = useMemo(() => {
+    if (!shipSelectMode) return paidLines;
+    return paidLines.filter(o => shipSelected[o.nick]);
+  }, [paidLines, shipSelectMode, shipSelected]);
+  const shipNickCount = shipSelectMode ? paidNicks.filter(n => shipSelected[n]).length : paidNicks.length;
+  const nickProductSummary = nick => paidLines.filter(o => o.nick === nick).map(o => `${o.name}${o.qty > 1 ? ` ${o.qty}개` : ""}`).join(", ");
+
   // 창고 픽업: 상품명 가나다순 정렬 + 총 픽업 수량
   const pickupList = useMemo(() => Object.entries(pivot).sort((a, b) => a[0].localeCompare(b[0], "ko")), [pivot]);
   const totalPickupQty = useMemo(() => Object.values(pivot).reduce((s, v) => s + v.paid + v.unpaid, 0), [pivot]);
@@ -494,14 +517,14 @@ function App() {
   const cashIssuedCount = cashList.filter(n => cust(n).cashIssued).length;
 
   // 4. 송장출력_복사용(롯데) 시트 생성 — 원본 양식 그대로(A~R), 빈 컬럼도 헤더 유지, 수식 없이 값만
-  const buildShipSheet = () => {
+  const buildShipSheet = lines => {
     // 업로드 탭에서 반영된 송장번호(닉네임 → 송장번호)
     const trackByNick = {};
     shipData.forEach(d => {
       if (d.tracking) trackByNick[d.nick] = d.tracking;
     });
     const rows = [["이름", "전화번호", "휴대폰번호", "우편번호", "주소", "상품명", "옵션명", "추가구성", "수량", "주문번호", "운임구분", "배송시요구사항", "송장번호", "주문처", "보내는분", "전화번호", "운임", "송장번호"]];
-    paidLines.forEach(o => {
+    lines.forEach(o => {
       const c = cust(o.nick);
       const trk = trackByNick[o.nick] || c.tracking || "";
       rows.push([c.name || o.nick,
@@ -584,15 +607,19 @@ function App() {
 
   // 출고 탭 전용: 송장 시트 1개만 담긴 엑셀 다운로드
   const exportShipXlsx = () => {
+    if (shipSelectMode && shipLines.length === 0) {
+      showToast("선택된 사람이 없습니다. 다운로드할 사람을 체크하세요.");
+      return;
+    }
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, buildShipSheet(), "4. 송장출력_복사용(롯데)");
+    XLSX.utils.book_append_sheet(wb, buildShipSheet(shipLines), "4. 송장출력_복사용(롯데)");
     XLSX.writeFile(wb, `롯데_사자창고_출고_${dateCode}.xlsx`);
   };
 
   // CJ대한통운 출고 시트 — 입금완료자별 1행(합포장이라 수량 무관 대표 1개)
-  const buildCjSheet = () => {
+  const buildCjSheet = lines => {
     const rows = [["보내는분성명", "보내는분전화번호", "보내는분주소(전체, 분할)", "품목명", "내품수량", "박스타입", "받는분성명", "받는분전화번호", "받는분주소(전체, 분할)", "배송메세지1", "고객주문번호"]];
-    paidLines.forEach(o => {
+    lines.forEach(o => {
       // 롯데처럼 상품별 1행
       const c = cust(o.nick);
       const req = (c.req || "").trim();
@@ -647,8 +674,12 @@ function App() {
     return ws;
   };
   const exportCjXlsx = () => {
+    if (shipSelectMode && shipLines.length === 0) {
+      showToast("선택된 사람이 없습니다. 다운로드할 사람을 체크하세요.");
+      return;
+    }
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, buildCjSheet(), "Sheet1");
+    XLSX.utils.book_append_sheet(wb, buildCjSheet(shipLines), "Sheet1");
     XLSX.writeFile(wb, `CJ_사자창고_출고_${dateCode}.xlsx`);
   };
 
@@ -1054,11 +1085,11 @@ function App() {
     }];
     XLSX.utils.book_append_sheet(wb, ws3, "3. 택배_출고_발주서");
 
-    // 4. 송장출력_복사용(롯데) — 공통 빌더 사용
-    XLSX.utils.book_append_sheet(wb, buildShipSheet(), "4. 송장출력_복사용(롯데)");
+    // 4. 송장출력_복사용(롯데) — 공통 빌더 사용 (전체 백업)
+    XLSX.utils.book_append_sheet(wb, buildShipSheet(paidLines), "4. 송장출력_복사용(롯데)");
 
-    // 5. 송장출력_복사용(CJ대한통운) — 공통 빌더 사용
-    XLSX.utils.book_append_sheet(wb, buildCjSheet(), "5. 송장출력_복사용(CJ대한통운)");
+    // 5. 송장출력_복사용(CJ대한통운) — 공통 빌더 사용 (전체 백업)
+    XLSX.utils.book_append_sheet(wb, buildCjSheet(paidLines), "5. 송장출력_복사용(CJ대한통운)");
 
     // 복원용 숨김 시트 (불러오기 시 사용)
     appendAppData(wb);
@@ -1609,6 +1640,57 @@ function App() {
   })), tab === "ship" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
   }, /*#__PURE__*/React.createElement("div", {
+    className: "card shipmode"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "rowbetween"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
+  }, "출고 대상"), /*#__PURE__*/React.createElement("div", {
+    className: "sub"
+  }, shipSelectMode ? "체크한 사람만 출고 파일에 담깁니다" : "입금 완료자 전체가 담깁니다 (기본)")), /*#__PURE__*/React.createElement("div", {
+    className: "modeswitch"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "modebtn" + (!shipSelectMode ? " on" : ""),
+    onClick: () => setShipSelectMode(false)
+  }, "전체"), /*#__PURE__*/React.createElement("button", {
+    className: "modebtn" + (shipSelectMode ? " on" : ""),
+    onClick: () => setShipSelectMode(true)
+  }, "선택"))), shipSelectMode && /*#__PURE__*/React.createElement("div", {
+    className: "shipsel"
+  }, paidNicks.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "empty"
+  }, "입금 완료자가 없습니다.") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "shipsel-tools"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm",
+    onClick: () => {
+      const all = {};
+      paidNicks.forEach(n => {
+        all[n] = true;
+      });
+      setShipSelected(all);
+    }
+  }, "전체 선택"), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm",
+    onClick: () => setShipSelected({})
+  }, "전체 해제")), paidNicks.map(n => /*#__PURE__*/React.createElement("label", {
+    className: "shipsel-row" + (shipSelected[n] ? " on" : ""),
+    key: n
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: !!shipSelected[n],
+    onChange: e => setShipSelected(s => ({
+      ...s,
+      [n]: e.target.checked
+    }))
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "ss-nick"
+  }, n), /*#__PURE__*/React.createElement("span", {
+    className: "ss-prod"
+  }, nickProductSummary(n))))))), /*#__PURE__*/React.createElement("div", {
     className: "dlrow"
   }, /*#__PURE__*/React.createElement("div", {
     className: "card shipdl dlcard"
@@ -1623,9 +1705,9 @@ function App() {
     className: "sub"
   }, "롯데 업로드용 · 상품별 행")), /*#__PURE__*/React.createElement("button", {
     className: "btn primary big",
-    disabled: paidLines.length === 0,
+    disabled: paidLines.length === 0 || shipSelectMode && shipNickCount === 0,
     onClick: exportShipXlsx
-  }, "엑셀 다운로드"), /*#__PURE__*/React.createElement("div", {
+  }, "엑셀 다운로드 (", shipNickCount, "명)"), /*#__PURE__*/React.createElement("div", {
     className: "hint"
   }, "롯데_사자창고_출고_", dateCode, ".xlsx")), /*#__PURE__*/React.createElement("div", {
     className: "card shipcj dlcard"
@@ -1638,11 +1720,11 @@ function App() {
     }
   }, "출고 파일 · CJ대한통운"), /*#__PURE__*/React.createElement("div", {
     className: "sub"
-  }, "CJ 업로드용 · 닉네임당 1행")), /*#__PURE__*/React.createElement("button", {
+  }, "CJ 업로드용 · 상품별 행")), /*#__PURE__*/React.createElement("button", {
     className: "btn cj big",
-    disabled: paidLines.length === 0,
+    disabled: paidLines.length === 0 || shipSelectMode && shipNickCount === 0,
     onClick: exportCjXlsx
-  }, "엑셀 다운로드"), /*#__PURE__*/React.createElement("div", {
+  }, "엑셀 다운로드 (", shipNickCount, "명)"), /*#__PURE__*/React.createElement("div", {
     className: "hint"
   }, "CJ_사자창고_출고_", dateCode, ".xlsx"))), /*#__PURE__*/React.createElement("div", {
     className: "card shipprint"
@@ -2121,11 +2203,11 @@ const CSS = `
 .hint { font-size: 12px; color: #8a919c; margin-top: 8px; }
 .empty { padding: 18px 6px; text-align: center; color: #9aa3ad; font-size: 14px; }
 .empty.small { padding: 8px; font-size: 13px; text-align: left; }
-.pad { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.pad { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 6px; }
 .pad.dim { opacity: .45; pointer-events: none; }
 .padbtn {
-  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
-  padding: 12px; border-radius: 12px; border: 1px solid #d9dde3; background: #fff;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  padding: 8px 10px; border-radius: 10px; border: 1px solid #d9dde3; background: #fff;
   cursor: pointer; text-align: left; font-family: inherit;
 }
 .padbtn:active { background: #16191f; }
@@ -2134,8 +2216,8 @@ const CSS = `
 .manualbtn:disabled { opacity: .45; cursor: default; }
 .manualform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; padding: 10px; background: #f6f7f9; border-radius: 10px; }
 .in.mqty { width: 74px; text-align: right; font-variant-numeric: tabular-nums; }
-.padname { font-size: 14px; font-weight: 700; line-height: 1.25; }
-.padprice { font-size: 13px; color: #e8334a; font-weight: 700; font-variant-numeric: tabular-nums; }
+.padname { font-size: 13px; font-weight: 700; line-height: 1.2; }
+.padprice { font-size: 12px; color: #e8334a; font-weight: 700; font-variant-numeric: tabular-nums; }
 .orow { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid #f0f2f5; flex-wrap: wrap; }
 .orow.recent { animation: flashrow 1.6s ease-out; border-radius: 8px; }
 @keyframes flashrow { 0% { background: #fff3c4; } 60% { background: #fff9e6; } 100% { background: transparent; } }
@@ -2180,6 +2262,18 @@ const CSS = `
 .shipcj { border-color: #d81f26; }
 .shipprint { border-color: #16191f; }
 .dlrow { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.shipmode { border-color: #d5d9df; }
+.modeswitch { display: inline-flex; border: 1px solid #d5d9df; border-radius: 8px; overflow: hidden; }
+.modebtn { padding: 7px 16px; font-size: 13px; font-weight: 600; border: none; background: #fff; color: #5b6470; cursor: pointer; }
+.modebtn.on { background: #16191f; color: #fff; }
+.shipsel { margin-top: 12px; border-top: 1px solid #eef0f3; padding-top: 12px; }
+.shipsel-tools { display: flex; gap: 8px; margin-bottom: 8px; }
+.shipsel-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+.shipsel-row:hover { background: #f6f7f9; }
+.shipsel-row.on { background: #f4fbf8; border-color: #b6e2d3; }
+.shipsel-row input { width: 18px; height: 18px; flex-shrink: 0; cursor: pointer; }
+.ss-nick { font-weight: 700; font-size: 14px; min-width: 80px; }
+.ss-prod { font-size: 13px; color: #8a919c; }
 .dlcard { display: flex; flex-direction: column; gap: 10px; }
 .dlcard-top { min-height: 40px; }
 .dlcard .btn.big { width: 100%; }
