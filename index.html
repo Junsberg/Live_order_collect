@@ -373,6 +373,7 @@ function App() {
       }
       return [...os, {
         id: rid,
+        productId: p.id,
         nick: n,
         name: p.name,
         price: p.price,
@@ -1278,18 +1279,34 @@ function App() {
     }, /*#__PURE__*/React.createElement("input", {
       className: "in grow bare",
       value: p.name,
-      onChange: e => setProducts(ps => ps.map(x => x.id === p.id ? {
-        ...x,
-        name: e.target.value
-      } : x))
+      onChange: e => {
+        const newName = e.target.value;
+        setProducts(ps => ps.map(x => x.id === p.id ? {
+          ...x,
+          name: newName
+        } : x));
+        setOrders(os => os.map(o => o.productId === p.id || !o.productId && o.name === p.name && o.price === p.price ? {
+          ...o,
+          productId: p.id,
+          name: newName
+        } : o));
+      }
     }), /*#__PURE__*/React.createElement("input", {
       className: "in price bare",
       type: "number",
       value: p.price,
-      onChange: e => setProducts(ps => ps.map(x => x.id === p.id ? {
-        ...x,
-        price: parseInt(e.target.value, 10) || 0
-      } : x))
+      onChange: e => {
+        const newPrice = parseInt(e.target.value, 10) || 0;
+        setOrders(os => os.map(o => o.productId === p.id || !o.productId && o.name === p.name && o.price === p.price ? {
+          ...o,
+          productId: p.id,
+          price: newPrice
+        } : o));
+        setProducts(ps => ps.map(x => x.id === p.id ? {
+          ...x,
+          price: newPrice
+        } : x));
+      }
     }), /*#__PURE__*/React.createElement("input", {
       className: "in qty bare",
       type: "number",
