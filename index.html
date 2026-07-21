@@ -765,7 +765,8 @@ function App() {
     return Object.values(map);
   };
 
-  // CJ대한통운 운송장 출력 파일 파싱 (Sheet1 · P열 닉네임, F열 송장, K/L/N 이름·연락처·주소)
+  // CJ대한통운 운송장 출력 파일 파싱 (Sheet1)
+  // 닉네임: X열(배송메세지1)의 "닉네임//요청"에서 // 앞부분 우선, 없으면 P열(고객주문번호)
   const parseCjUpload = wb => {
     const ws = wb.Sheets["Sheet1"];
     if (!ws) return null;
@@ -779,9 +780,14 @@ function App() {
       c
     });
     const ref = XLSX.utils.decode_range(ws["!ref"]);
+    const nickOf = r => {
+      const x = V(cell(r, 23)); // X열 배송메세지1
+      if (x) return x.split("//")[0].trim(); // "닉네임//요청" → 닉네임
+      return V(cell(r, 15)); // P열 고객주문번호 (차선)
+    };
     const map = {};
     for (let r = 1; r <= ref.e.r; r++) {
-      const nick = V(cell(r, 15)); // P열 고객주문번호(닉네임)
+      const nick = nickOf(r);
       if (!nick || nick === "0" || nick.startsWith("#")) continue;
       const tracking = clean(V(cell(r, 5))); // F열 운송장번호
       if (!map[nick]) {
