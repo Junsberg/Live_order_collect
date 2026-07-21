@@ -303,6 +303,17 @@ function App() {
       showToast("저장된 이전 방송 목록이 없습니다.");
     }
   };
+  const resetTransient = () => {
+    setShipData([]);
+    setShipSearch("");
+    setShipSelectMode(false);
+    setShipSelected({});
+    setMemoOnly(false);
+    setKeepOnly(false);
+    setUnpaidOnly(false);
+    setSettleSearch("");
+    setRecentId(null);
+  };
   const newSession = async () => {
     if (!resetArm) {
       setResetArm(true);
@@ -319,8 +330,7 @@ function App() {
     setResetArm(false);
     setBdate(todayISO());
     setPickState({});
-    setShipData([]);
-    setShipSearch("");
+    resetTransient();
   };
   const newSessionAll = async () => {
     if (!resetAllArm) {
@@ -339,8 +349,7 @@ function App() {
     setResetAllArm(false);
     setBdate(todayISO());
     setPickState({});
-    setShipData([]);
-    setShipSearch("");
+    resetTransient();
   };
 
   /* ---------- 주문 ---------- */
@@ -727,6 +736,13 @@ function App() {
     setShipData(d.shipData || []);
     setNick("");
     setSettleSearch("");
+    setShipSelectMode(false);
+    setShipSelected({});
+    setMemoOnly(false);
+    setKeepOnly(false);
+    setUnpaidOnly(false);
+    setRecentId(null);
+    setTab("order");
   };
 
   // 엑셀 불러오기 — 앱이 저장한 파일(_appdata 숨김 시트) 복원
