@@ -156,8 +156,13 @@ function App() {
   };
   const [resetArm, setResetArm] = useState(false);
   const [resetAllArm, setResetAllArm] = useState(false);
+  const [dragId, setDragId] = useState(null);
+  const [delNickArm, setDelNickArm] = useState(null);
   const [openCust, setOpenCust] = useState({});
   const nickRef = useRef(null);
+  const dragRef = useRef({
+    id: null
+  });
   const selectNick = n => {
     setNick(n);
     if (nickRef.current) {
@@ -170,6 +175,49 @@ function App() {
         window.scrollTo(0, 0);
       }
     }
+  };
+
+  // 상품 드래그 정렬 (포인터 이벤트: 마우스+터치 통합, 손잡이 ≡ 로만 시작)
+  const onDragStart = (e, id) => {
+    e.preventDefault();
+    dragRef.current.id = id;
+    setDragId(id);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch (err) {}
+  };
+  const onDragMove = e => {
+    const from = dragRef.current.id;
+    if (from == null) return;
+    e.preventDefault();
+    const rows = Array.from(document.querySelectorAll("[data-prow]"));
+    let targetId = null;
+    for (const r of rows) {
+      const rect = r.getBoundingClientRect();
+      if (e.clientY < rect.top + rect.height / 2) {
+        targetId = r.getAttribute("data-prow");
+        break;
+      }
+    }
+    if (targetId === from) return;
+    setProducts(ps => {
+      const fi = ps.findIndex(x => x.id === from);
+      if (fi < 0) return ps;
+      const arr = ps.slice();
+      const [moved] = arr.splice(fi, 1);
+      let at = targetId == null ? arr.length : arr.findIndex(x => x.id === targetId);
+      if (at < 0) at = arr.length;
+      arr.splice(at, 0, moved);
+      if (arr.every((x, i) => x.id === ps[i].id)) return ps;
+      return arr;
+    });
+  };
+  const onDragEnd = e => {
+    dragRef.current.id = null;
+    setDragId(null);
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch (err) {}
   };
   const [manualOpen, setManualOpen] = useState(false);
   const [mName, setMName] = useState("");
@@ -258,6 +306,23 @@ function App() {
     });
     return m;
   }, [activeOrders]);
+  const nickSummary = useMemo(() => {
+    const m = {};
+    orders.forEach(o => {
+      const e = m[o.nick] || (m[o.nick] = {
+        nick: o.nick,
+        total: 0,
+        lastTs: 0,
+        active: 0
+      });
+      e.lastTs = Math.max(e.lastTs, o.ts || 0);
+      if (!o.canceled) {
+        e.total += o.price * o.qty;
+        e.active += 1;
+      }
+    });
+    return Object.values(m).sort((a, b) => b.lastTs - a.lastTs);
+  }, [orders]);
   const paidCount = nickList.filter(n => customers[n] && customers[n].paid).length;
   const dateCode = bdate.replace(/-/g, "");
   const cust = n => customers[n] || EMPTY_CUST;
@@ -420,6 +485,17 @@ function App() {
     canceled: !o.canceled
   } : o));
   const delOrder = id => setOrders(os => os.filter(o => o.id !== id));
+  // 전체주문(닉네임별)에서 그 사람 주문 전체 삭제 — 실수 방지 2단 탭
+  const delNickOrders = n => {
+    if (delNickArm !== n) {
+      setDelNickArm(n);
+      setTimeout(() => setDelNickArm(c => c === n ? null : c), 3000);
+      return;
+    }
+    setOrders(os => os.filter(o => o.nick !== n));
+    setDelNickArm(null);
+    showToast(n + " 주문 전체 삭제됨");
+  };
 
   /* ---------- 정산 ---------- */
   const settleMsg = n => {
@@ -1272,11 +1348,19 @@ function App() {
     const left = p.stock == null ? null : p.stock - sold;
     const soldOut = left != null && left <= 0;
     return /*#__PURE__*/React.createElement("div", {
-      className: "prow",
-      key: p.id
+      className: "prow" + (dragId === p.id ? " dragging" : ""),
+      key: p.id,
+      "data-prow": p.id
     }, /*#__PURE__*/React.createElement("div", {
       className: "prow-main"
-    }, /*#__PURE__*/React.createElement("input", {
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "draghandle",
+      title: "드래그로 순서 변경",
+      onPointerDown: e => onDragStart(e, p.id),
+      onPointerMove: onDragMove,
+      onPointerUp: onDragEnd,
+      onPointerCancel: onDragEnd
+    }, "≡"), /*#__PURE__*/React.createElement("input", {
       className: "in grow bare",
       value: p.name,
       onChange: e => {
@@ -1356,7 +1440,7 @@ function App() {
     className: "cardtitle"
   }, "주문 입력 ", /*#__PURE__*/React.createElement("span", {
     className: "sub"
-  }, "닉네임 입력 → 상품 탭 (같은 상품 또 탭하면 수량 +1)")), /*#__PURE__*/React.createElement("input", {
+  }, "닉네임 입력 → 아래 상품 탭 (같은 상품 또 탭하면 +1)")), /*#__PURE__*/React.createElement("input", {
     ref: nickRef,
     className: "in big",
     placeholder: "닉네임",
@@ -1382,7 +1466,39 @@ function App() {
       className: "nickchip",
       onClick: () => setNick(n)
     }, n)));
-  })(), products.length === 0 ? /*#__PURE__*/React.createElement("div", {
+  })(), !nick.trim() && /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "닉네임을 먼저 입력하면 상품 버튼·직접입력이 활성화됩니다.")), nick.trim() && (byNick[nick.trim()] || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "card focus"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "「", nick.trim(), "」 현재 주문 · 합계 ", won((byNick[nick.trim()] || []).reduce((s, o) => s + o.price * o.qty, 0)), "원"), orders.filter(o => o.nick === nick.trim()).map(o => /*#__PURE__*/React.createElement(OrderRow, {
+    key: o.id,
+    o: o,
+    chgQty: chgQty,
+    toggleCancel: toggleCancel,
+    delOrder: delOrder,
+    hideNick: true,
+    recent: o.id === recentId
+  })), /*#__PURE__*/React.createElement("input", {
+    className: "in",
+    style: {
+      marginTop: 8
+    },
+    placeholder: "이 주문자 특이사항 (예: 매장픽업, 킵, 문자주문)",
+    value: cust(nick.trim()).memo,
+    onChange: e => setCust(nick.trim(), {
+      memo: e.target.value
+    })
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "상품 선택 ", nick.trim() ? /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "탭하면 「", nick.trim(), "」 주문에 추가") : /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "닉네임 먼저 입력")), products.length === 0 ? /*#__PURE__*/React.createElement("div", {
     className: "empty"
   }, "① 상품 탭에서 오늘 판매 상품을 먼저 등록하세요.", /*#__PURE__*/React.createElement("br", null), "또는 아래 「직접입력」으로 바로 추가할 수 있습니다.") : /*#__PURE__*/React.createElement("div", {
     className: "pad" + (nick.trim() ? "" : " dim")
@@ -1458,47 +1574,26 @@ function App() {
       setMPrice("");
       setMQty("1");
     }
-  }, "추가"))), !nick.trim() && /*#__PURE__*/React.createElement("div", {
-    className: "hint"
-  }, "닉네임을 먼저 입력하면 상품 버튼·직접입력이 활성화됩니다.")), nick.trim() && (byNick[nick.trim()] || []).length > 0 && /*#__PURE__*/React.createElement("div", {
-    className: "card focus"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "cardtitle"
-  }, "「", nick.trim(), "」 현재 주문 · 합계 ", won((byNick[nick.trim()] || []).reduce((s, o) => s + o.price * o.qty, 0)), "원"), orders.filter(o => o.nick === nick.trim()).map(o => /*#__PURE__*/React.createElement(OrderRow, {
-    key: o.id,
-    o: o,
-    chgQty: chgQty,
-    toggleCancel: toggleCancel,
-    delOrder: delOrder,
-    hideNick: true,
-    recent: o.id === recentId
-  })), /*#__PURE__*/React.createElement("input", {
-    className: "in",
-    style: {
-      marginTop: 8
-    },
-    placeholder: "이 주문자 특이사항 (예: 매장픽업, 킵, 문자주문)",
-    value: cust(nick.trim()).memo,
-    onChange: e => setCust(nick.trim(), {
-      memo: e.target.value
-    })
-  })), /*#__PURE__*/React.createElement("div", {
+  }, "추가")))), /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "cardtitle"
   }, "전체 주문 ", /*#__PURE__*/React.createElement("span", {
     className: "sub"
-  }, "최신순")), orders.length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, "닉네임별 · 최신순 (닉네임 탭 → 위에서 상품 추가·수정)")), nickSummary.length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "empty"
-  }, "아직 주문이 없습니다."), [...orders].sort((a, b) => b.ts - a.ts).map(o => /*#__PURE__*/React.createElement(OrderRow, {
-    key: o.id,
-    o: o,
-    chgQty: chgQty,
-    toggleCancel: toggleCancel,
-    delOrder: delOrder,
-    recent: o.id === recentId,
-    onNickClick: selectNick
-  })))), tab === "settle" && /*#__PURE__*/React.createElement("div", {
+  }, "아직 주문이 없습니다."), nickSummary.map(s => /*#__PURE__*/React.createElement("div", {
+    className: "nrow",
+    key: s.nick
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "onick clickable",
+    onClick: () => selectNick(s.nick)
+  }, s.nick), /*#__PURE__*/React.createElement("span", {
+    className: "nsum" + (s.active === 0 ? " zero" : "")
+  }, won(s.total), "원"), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm" + (delNickArm === s.nick ? " danger" : ""),
+    onClick: () => delNickOrders(s.nick)
+  }, delNickArm === s.nick ? "삭제?" : "삭제"))))), tab === "settle" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
   }, nickList.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "card summarycard"
@@ -2222,6 +2317,12 @@ const CSS = `
 .prow-stock b { font-weight: 700; }
 .prow-stock b.ok { color: #0f766e; }
 .prow-stock b.out { color: #d81f26; }
+.draghandle { flex: 0 0 auto; cursor: grab; touch-action: none; user-select: none; color: #c0c6cf; font-size: 20px; line-height: 1; padding: 4px 6px; margin-left: -4px; }
+.draghandle:active { cursor: grabbing; color: #0f766e; }
+.prow.dragging { background: #f4fbf8; box-shadow: 0 2px 10px rgba(15,118,110,.18); border-radius: 8px; }
+.nrow { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #f0f2f5; }
+.nsum { flex: 1; text-align: right; font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
+.nsum.zero { color: #b0b7c0; text-decoration: line-through; }
 .ps-sold { color: #aab0ba; }
 .ps-out { display: inline-block; margin-left: 8px; padding: 1px 7px; font-size: 11px; font-weight: 700; color: #fff; background: #d81f26; border-radius: 999px; }
 .btn {
@@ -2251,7 +2352,7 @@ const CSS = `
 .in.mqty { width: 74px; text-align: right; font-variant-numeric: tabular-nums; }
 .padname { font-size: 13px; font-weight: 700; line-height: 1.2; }
 .padprice { font-size: 12px; color: #e8334a; font-weight: 700; font-variant-numeric: tabular-nums; }
-.orow { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid #f0f2f5; flex-wrap: wrap; }
+.orow { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-top: 1px solid #f0f2f5; flex-wrap: wrap; }
 .orow.recent { animation: flashrow 1.6s ease-out; border-radius: 8px; }
 @keyframes flashrow { 0% { background: #fff3c4; } 60% { background: #fff9e6; } 100% { background: transparent; } }
 .nickmatch { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
