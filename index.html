@@ -986,6 +986,187 @@ function App() {
     XLSX.writeFile(wb, `창고_픽업_${dateCode}.xlsx`);
   };
 
+  // ===== 결산 엑셀 (그날 판매 내역 정리) =====
+  const exportClosingXlsx = () => {
+    if (activeOrders.length === 0) {
+      showToast("결산할 주문이 없습니다.");
+      return;
+    }
+    const wb = XLSX.utils.book_new();
+    const nicks = nickList.filter(n => activeOrders.some(o => o.nick === n));
+    const sumOf = n => activeOrders.filter(o => o.nick === n).reduce((s, o) => s + o.price * o.qty, 0);
+    const qtyOf = n => activeOrders.filter(o => o.nick === n).reduce((s, o) => s + o.qty, 0);
+    const paidList = nicks.filter(n => cust(n).paid);
+    const pickList = nicks.filter(n => cust(n).pickup);
+    const feeList = nicks.filter(n => !cust(n).pickup);
+    const paidFeeList = paidList.filter(n => !cust(n).pickup);
+    const goods = activeOrders.reduce((s, o) => s + o.price * o.qty, 0);
+    const feeSum = feeList.length * shipFee;
+    const total = goods + feeSum;
+    const paidGoods = paidList.reduce((s, n) => s + sumOf(n), 0);
+    const paidTotal = paidGoods + paidFeeList.length * shipFee;
+    const totalQty = activeOrders.reduce((s, o) => s + o.qty, 0);
+    const canceledCnt = orders.filter(o => o.canceled).length;
+
+    // 1) 총괄 요약
+    const s1 = [[`사자창고 라이브 결산`, bdate], [], ["[매출]", ""], ["상품 매출", goods], ["배송비 수입", feeSum, `${feeList.length}명 × ${shipFee}원 (픽업 ${pickList.length}명 제외)`], ["총 매출", total], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["미수금", total - paidTotal, `${nicks.length - paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0], ["입금률 (금액)", total ? Math.round(paidTotal / total * 100) / 100 : 0], [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", activeOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(activeOrders.map(o => o.name)).size], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
+    const ws1 = XLSX.utils.aoa_to_sheet(s1);
+    ws1["!cols"] = [{
+      wch: 20
+    }, {
+      wch: 14
+    }, {
+      wch: 40
+    }];
+    ["D4", "D5", "D6", "D9", "D10", "D18"].forEach(() => {});
+    [4, 5, 6, 9, 10, 18].forEach(r => {
+      const c = ws1["B" + r];
+      if (c) c.z = "#,##0";
+    });
+    [11, 12].forEach(r => {
+      const c = ws1["B" + r];
+      if (c) c.z = "0%";
+    });
+    XLSX.utils.book_append_sheet(wb, ws1, "1. 총괄");
+
+    // 2) 상품별 판매 실적 (매출순)
+    const pm = {};
+    activeOrders.forEach(o => {
+      const paid = cust(o.nick).paid;
+      pm[o.name] = pm[o.name] || {
+        price: o.price,
+        qty: 0,
+        amt: 0,
+        paidQty: 0,
+        unpaidQty: 0,
+        buyers: new Set()
+      };
+      pm[o.name].qty += o.qty;
+      pm[o.name].amt += o.price * o.qty;
+      pm[o.name][paid ? "paidQty" : "unpaidQty"] += o.qty;
+      pm[o.name].buyers.add(o.nick);
+    });
+    const plist = Object.entries(pm).sort((a, b) => b[1].amt - a[1].amt || a[0].localeCompare(b[0], "ko"));
+    const s2 = [["순위", "상품명", "단가", "판매수량", "매출액", "매출비중", "구매자수", "입금수량", "미입금수량"]];
+    plist.forEach(([name, v], i) => {
+      s2.push([i + 1, name, v.price, v.qty, v.amt, goods ? Math.round(v.amt / goods * 10000) / 10000 : 0, v.buyers.size, v.paidQty, v.unpaidQty]);
+    });
+    s2.push(["", "합계", "", totalQty, goods, 1, "", plist.reduce((s, x) => s + x[1].paidQty, 0), plist.reduce((s, x) => s + x[1].unpaidQty, 0)]);
+    const ws2 = XLSX.utils.aoa_to_sheet(s2);
+    ws2["!cols"] = [{
+      wch: 6
+    }, {
+      wch: 30
+    }, {
+      wch: 10
+    }, {
+      wch: 10
+    }, {
+      wch: 12
+    }, {
+      wch: 10
+    }, {
+      wch: 10
+    }, {
+      wch: 10
+    }, {
+      wch: 12
+    }];
+    for (let r = 2; r <= s2.length; r++) {
+      ["C", "E"].forEach(c => {
+        const cell = ws2[c + r];
+        if (cell) cell.z = "#,##0";
+      });
+      const f = ws2["F" + r];
+      if (f) f.z = "0.0%";
+    }
+    XLSX.utils.book_append_sheet(wb, ws2, "2. 상품별 실적");
+
+    // 3) 고객별 정산 내역 (결제금액 큰 순)
+    const s3 = [["닉네임", "이름", "연락처", "상품금액", "배송비", "총 결제금액", "입금", "수령방식", "안내", "주문건수", "수량", "상품내역", "현금영수증", "특이사항"]];
+    const sortedNicks = [...nicks].sort((a, b) => sumOf(b) + feeOf(b) - (sumOf(a) + feeOf(a)) || a.localeCompare(b, "ko"));
+    sortedNicks.forEach(n => {
+      const c = cust(n);
+      const g = sumOf(n),
+        f = feeOf(n);
+      const lines = activeOrders.filter(o => o.nick === n).map(o => `${o.name}${o.qty > 1 ? ` ${o.qty}개` : ""}`).join(", ");
+      s3.push([n, c.name || "", c.phone || "", g, f, g + f, c.paid ? "입금" : "미입금", c.pickup ? "픽업수령" : "택배", c.notified ? "안내" : "", activeOrders.filter(o => o.nick === n).length, qtyOf(n), lines, c.cashReceipt || "", c.memo || ""]);
+    });
+    s3.push(["합계", "", "", goods, feeSum, total, `입금 ${paidList.length} / 미입금 ${nicks.length - paidList.length}`, "", "", activeOrders.length, totalQty, "", "", ""]);
+    const ws3 = XLSX.utils.aoa_to_sheet(s3);
+    ws3["!cols"] = [{
+      wch: 14
+    }, {
+      wch: 12
+    }, {
+      wch: 15
+    }, {
+      wch: 12
+    }, {
+      wch: 9
+    }, {
+      wch: 13
+    }, {
+      wch: 8
+    }, {
+      wch: 10
+    }, {
+      wch: 6
+    }, {
+      wch: 9
+    }, {
+      wch: 7
+    }, {
+      wch: 50
+    }, {
+      wch: 16
+    }, {
+      wch: 24
+    }];
+    for (let r = 2; r <= s3.length; r++) ["D", "E", "F"].forEach(c => {
+      const cell = ws3[c + r];
+      if (cell) cell.z = "#,##0";
+    });
+    XLSX.utils.book_append_sheet(wb, ws3, "3. 고객별 정산");
+
+    // 4) 현금영수증 발행 대상
+    const s4 = [["이름", "닉네임", "현금영수증 번호", "상품금액", "배송비", "결제금액", "발행여부"]];
+    cashList.forEach(n => {
+      const c = cust(n);
+      const g = sumOf(n),
+        f = feeOf(n);
+      s4.push([c.name || "", n, c.cashReceipt || "", g, f, g + f, c.cashIssued ? "발행완료" : "미발행"]);
+    });
+    if (cashList.length) {
+      s4.push(["합계", "", "", cashList.reduce((s, n) => s + sumOf(n), 0), cashList.reduce((s, n) => s + feeOf(n), 0), cashList.reduce((s, n) => s + sumOf(n) + feeOf(n), 0), `발행 ${cashIssuedCount} / 미발행 ${cashList.length - cashIssuedCount}`]);
+    } else {
+      s4.push(["현금영수증을 신청한 사람이 없습니다.", "", "", "", "", "", ""]);
+    }
+    const ws4 = XLSX.utils.aoa_to_sheet(s4);
+    ws4["!cols"] = [{
+      wch: 12
+    }, {
+      wch: 14
+    }, {
+      wch: 20
+    }, {
+      wch: 12
+    }, {
+      wch: 9
+    }, {
+      wch: 12
+    }, {
+      wch: 12
+    }];
+    for (let r = 2; r <= s4.length; r++) ["D", "E", "F"].forEach(c => {
+      const cell = ws4[c + r];
+      if (cell) cell.z = "#,##0";
+    });
+    XLSX.utils.book_append_sheet(wb, ws4, "4. 현금영수증");
+    XLSX.writeFile(wb, `결산_사자창고_${dateCode}.xlsx`);
+    showToast(`✓ 결산 파일을 저장했습니다 · 총 매출 ${won(total)}원`);
+  };
+
   // 현금영수증 번호를 입력한 사람만
   const cashList = useMemo(() => nickList.filter(n => (cust(n).cashReceipt || "").trim()), [nickList, customers]);
   const cashIssuedCount = cashList.filter(n => cust(n).cashIssued).length;
@@ -2389,7 +2570,12 @@ function App() {
     className: "sm-sep"
   }, "·"), /*#__PURE__*/React.createElement("span", {
     className: "sm-item unpaid"
-  }, "미입금 ", /*#__PURE__*/React.createElement("b", null, nickList.length - paidCount), "명")), /*#__PURE__*/React.createElement("div", {
+  }, "미입금 ", /*#__PURE__*/React.createElement("b", null, nickList.length - paidCount), "명"), /*#__PURE__*/React.createElement("button", {
+    className: "btn closingbtn",
+    disabled: activeOrders.length === 0,
+    onClick: exportClosingXlsx,
+    title: `결산_사자창고_${dateCode}.xlsx 로 저장`
+  }, "📊 결산 엑셀")), /*#__PURE__*/React.createElement("div", {
     className: "card settletop"
   }, /*#__PURE__*/React.createElement("input", {
     className: "in search",
@@ -3412,6 +3598,8 @@ const CSS = `
 .whtbl tfoot td { border-top: 2px solid #d9dde3; font-weight: 800; padding-top: 10px; }
 .settletop { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .summarycard { display: flex; align-items: center; gap: 10px; padding: 12px 16px; font-size: 15px; }
+.closingbtn { margin-left: auto; background: #16191f; border-color: #16191f; color: #fff; white-space: nowrap; }
+.closingbtn:disabled { opacity: .4; cursor: default; }
 .sm-item { color: #5b6470; } .sm-item b { color: #16191f; font-size: 17px; }
 .sm-item.paid b { color: #0f766e; } .sm-item.unpaid b { color: #d81f26; }
 .sm-sep { color: #d5d9df; }
