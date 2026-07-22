@@ -2275,7 +2275,9 @@ function App() {
       className: "amount"
     }, " ", won(sum + shipFee), "원"), /*#__PURE__*/React.createElement("span", {
       className: "sub"
-    }, " (상품 ", won(sum), " + 배송 ", won(shipFee), ")"), c.paid && (!c.addr || !c.phone) && /*#__PURE__*/React.createElement("span", {
+    }, " (상품 ", won(sum), " + 배송 ", won(shipFee), ")"), (c.name || "").trim() && /*#__PURE__*/React.createElement("span", {
+      className: "shipname"
+    }, "배송지 이름 : ", c.name.trim()), c.paid && (!c.addr || !c.phone) && /*#__PURE__*/React.createElement("span", {
       className: "warnbadge"
     }, "⚠ ", !c.addr && !c.phone ? "주소·연락처" : !c.addr ? "주소" : "연락처", " 미입력")), /*#__PURE__*/React.createElement("div", {
       className: "chips"
@@ -3128,6 +3130,12 @@ const CSS = `
 .filterbtn.f-unpaid.on { background: #f5a623; border-color: #f5a623; color: #16191f; }
 .filterbtn.f-paid.on { background: #0f766e; border-color: #0f766e; color: #fff; }
 .warnbadge { display: inline-block; margin-left: 8px; padding: 2px 8px; font-size: 12px; font-weight: 700; color: #fff; background: #d81f26; border-radius: 999px; vertical-align: middle; }
+/* 정산 카드: 배송지에 이름이 입력된 사람만 표시 */
+.shipname {
+  display: inline-block; margin-left: 8px; padding: 2px 9px; border-radius: 999px;
+  font-size: 12px; font-weight: 700; color: #0f766e;
+  background: #e7f5f1; border: 1px solid #b6e2d3; vertical-align: middle;
+}
 .in.search { flex: 1; }
 .feeinline { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #8a919c; white-space: nowrap; }
 .in.feesmall { width: 66px; padding: 5px 7px; font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
