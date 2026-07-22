@@ -2549,7 +2549,7 @@ function App() {
       setDelNickArm(null);
     }
   }, "✎"), cust(s.nick).paid && (cust(s.nick).name || "").trim() && /*#__PURE__*/React.createElement("span", {
-    className: "oname",
+    className: "nrowname",
     title: cust(s.nick).name.trim()
   }, cust(s.nick).name.trim()), /*#__PURE__*/React.createElement("span", {
     className: "nsum" + (s.active === 0 ? " zero" : "")
@@ -3436,8 +3436,8 @@ const CSS = `
 /* 닉네임 행 버튼 터치 타깃 확대 (오탭 방지) */
 .nrow .btn.sm { min-height: 40px; padding: 8px 12px; }
 .nrow .nickeditbtn { min-width: 40px; padding: 8px 10px; font-size: 15px; }
-/* 전체주문: 입금 + 배송지 이름 입력된 사람만 이름 표시 */
-.oname {
+/* 전체주문: 입금 + 배송지 이름 입력된 사람만 이름 표시 (상품명 .oname 과 겹치지 않게 별도 클래스) */
+.nrowname {
   flex-shrink: 0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 700;
   color: #0f766e; background: #e7f5f1; border: 1px solid #b6e2d3;
