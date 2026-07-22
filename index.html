@@ -150,6 +150,7 @@ const EMPTY_CUST = {
   paid: false,
   notified: false,
   keep: false,
+  pickup: false,
   addrChecked: false,
   name: "",
   phone: "",
@@ -168,6 +169,12 @@ const SETTLE_HEADER = `안녕하세요.
 - 김상태(디스카운트미로미사점)
 3) 현금영수증
 - 필요하신 경우 현금현수증 발행 연락처도 같이 남겨주세요.`;
+
+// 운송장 안내 기본 문구 — 이 다음에 "[운송장 정보] 택배사 송장번호"가 자동으로 붙는다
+const TRACK_HEADER = `안녕하세요! 사자창고입니다.
+주문하신 상품 잘 포장해서 출고되었습니다.
+오늘도 즐거운 하루 되세요!
+감사합니다.`;
 function App() {
   const [tab, setTab] = useState("order");
   const [loaded, setLoaded] = useState(false);
@@ -206,6 +213,8 @@ function App() {
   const [unpaidOnly, setUnpaidOnly] = useState(false);
   const [paidOnly, setPaidOnly] = useState(false);
   const [settleHeader, setSettleHeader] = useState(SETTLE_HEADER);
+  const [trackHeader, setTrackHeader] = useState(TRACK_HEADER);
+  const [settingEdit, setSettingEdit] = useState(null); // null | "settle" | "track"
   const [openMsg, setOpenMsg] = useState({});
   const [openCash, setOpenCash] = useState({});
   const [openMemo, setOpenMemo] = useState({});
@@ -321,6 +330,7 @@ function App() {
           setBdate(d.bdate || todayISO());
           setPickState(d.pickState || {});
           setSettleHeader(d.settleHeader || SETTLE_HEADER);
+          setTrackHeader(d.trackHeader || TRACK_HEADER);
           setShipData(d.shipData || []);
         }
       } catch (e) {/* 첫 실행 */}
@@ -357,11 +367,12 @@ function App() {
         bdate,
         pickState,
         settleHeader,
+        trackHeader,
         shipData
       })).catch(() => {});
     }, 400);
     return () => clearTimeout(t);
-  }, [products, orders, customers, shipFee, bdate, pickState, settleHeader, shipData, loaded]);
+  }, [products, orders, customers, shipFee, bdate, pickState, settleHeader, trackHeader, shipData, loaded]);
 
   // 상단바 실제 높이를 --topbar-h 로 추적 → 탭 줄이 정확히 그 아래에 고정되도록
   useEffect(() => {
@@ -414,8 +425,16 @@ function App() {
   const paidSales = useMemo(() => activeOrders.reduce((s, o) => s + (customers[o.nick] && customers[o.nick].paid ? o.price * o.qty : 0), 0), [activeOrders, customers]);
   const orderNickCount = useMemo(() => new Set(activeOrders.map(o => o.nick)).size, [activeOrders]);
   const paidNickCount = useMemo(() => new Set(activeOrders.filter(o => customers[o.nick] && customers[o.nick].paid).map(o => o.nick)).size, [activeOrders, customers]);
-  const totalWithShip = totalSales + orderNickCount * shipFee;
-  const paidWithShip = paidSales + paidNickCount * shipFee;
+  // 픽업수령(직접 방문)은 배송비를 받지 않음 → 그 사람의 합배송비는 0원
+  const feeOf = nick => customers[nick] && customers[nick].pickup ? 0 : shipFee;
+  // 배송비를 실제로 내는 사람 수 (픽업 제외)
+  const shipPayNickCount = useMemo(() => new Set(activeOrders.filter(o => !(customers[o.nick] && customers[o.nick].pickup)).map(o => o.nick)).size, [activeOrders, customers]);
+  const paidShipPayNickCount = useMemo(() => new Set(activeOrders.filter(o => {
+    const c = customers[o.nick];
+    return c && c.paid && !c.pickup;
+  }).map(o => o.nick)).size, [activeOrders, customers]);
+  const totalWithShip = totalSales + shipPayNickCount * shipFee;
+  const paidWithShip = paidSales + paidShipPayNickCount * shipFee;
   const nickList = useMemo(() => {
     const s = [];
     orders.forEach(o => {
@@ -856,7 +875,9 @@ function App() {
     const list = byNick[n] || [];
     const sum = list.reduce((s, o) => s + o.price * o.qty, 0);
     const lines = list.map(o => `${o.name}_${o.qty}개*${o.price}원=${o.price * o.qty}원`);
-    return `${settleHeader}\n\n<정산서>\n주문하신 상품과 수량이 맞는지 확인 부탁드립니다.\n${lines.join("\n")}\n총 합계 금액은 ${won(sum)}원+합배송비 ${won(shipFee)}원 = ${won(sum + shipFee)}원 입니다.`;
+    const fee = feeOf(n);
+    const total = fee > 0 ? `총 합계 금액은 ${won(sum)}원+합배송비 ${won(fee)}원 = ${won(sum + fee)}원 입니다.` : `총 합계 금액은 ${won(sum)}원 입니다. (픽업수령 · 배송비 없음)`;
+    return `${settleHeader}\n\n<정산서>\n주문하신 상품과 수량이 맞는지 확인 부탁드립니다.\n${lines.join("\n")}\n${total}`;
   };
   const copyText = async (text, id, n) => {
     try {
@@ -881,21 +902,28 @@ function App() {
   // 운송장 안내 문구 (업로드 탭 · 고객에게 보낼 내용). 택배사는 조회된 값 그대로 사용.
   const trackMsg = d => {
     const carrier = (d.carrier || "").trim() || "택배";
-    return ["안녕하세요! 사자창고입니다.", "주문하신 상품 잘 포장해서 출고되었습니다.", "오늘도 즐거운 하루 되세요!", "감사합니다.", "", "[운송장 정보]", `${carrier} ${d.tracking}`].join("\n");
+    return `${trackHeader}\n\n[운송장 정보]\n${carrier} ${d.tracking}`;
   };
+  // 창고 픽업 집계 — ③ 정산에서 「안내」를 보낸 주문만 카운팅 (아직 안내 전이면 확정 전으로 보고 제외)
   const pivot = useMemo(() => {
     const m = {};
     activeOrders.forEach(o => {
-      const paid = cust(o.nick).paid;
+      const c = cust(o.nick);
+      if (!c.notified) return;
       m[o.name] = m[o.name] || {
         paid: 0,
         unpaid: 0
       };
-      m[o.name][paid ? "paid" : "unpaid"] += o.qty;
+      m[o.name][c.paid ? "paid" : "unpaid"] += o.qty;
     });
     return m;
   }, [activeOrders, customers]);
-  const paidLines = useMemo(() => activeOrders.filter(o => cust(o.nick).paid), [activeOrders, customers]);
+
+  // 택배 출고 대상 = 입금 완료자. 단 픽업수령(직접 방문)은 택배를 안 보내므로 제외.
+  const paidLines = useMemo(() => activeOrders.filter(o => {
+    const c = cust(o.nick);
+    return c.paid && !c.pickup;
+  }), [activeOrders, customers]);
 
   // 출고 선택 모드: 전체(기본) 또는 체크한 사람만
   const [shipSelectMode, setShipSelectMode] = useState(false);
@@ -932,7 +960,7 @@ function App() {
 
   // 창고 탭 전용: 픽업 체크리스트 1시트만 엑셀로 다운로드 (출력용)
   const exportWarehouseXlsx = () => {
-    const rows = [["담기", "상품명", "미입금", "확인", "총합계"]];
+    const rows = [["담기", "상품명", "미입금", "입금", "총합계"]];
     let tp = 0,
       tu = 0;
     pickupList.forEach(([name, v]) => {
@@ -1165,6 +1193,7 @@ function App() {
       bdate,
       pickState,
       settleHeader,
+      trackHeader,
       shipData
     });
     const rows = [[APPDATA_MAGIC]];
@@ -1186,6 +1215,7 @@ function App() {
     setBdate(d.bdate || todayISO());
     setPickState(d.pickState || {});
     if (d.settleHeader) setSettleHeader(d.settleHeader);
+    setTrackHeader(d.trackHeader || TRACK_HEADER); // 구버전 파일엔 없음 → 기본값
     setShipData(d.shipData || []);
     setNick("");
     setSettleSearch("");
@@ -1601,7 +1631,7 @@ function App() {
     nickList.forEach(n => {
       const c = cust(n);
       const sum = (byNick[n] || []).reduce((s, o) => s + o.price * o.qty, 0);
-      s2.push([n, sum + shipFee, c.notified ? "안내" : "", sum, c.paid ? "확인" : "", c.addrChecked ? "확인" : "", c.name, c.phone, c.addr, c.req, c.cashReceipt || "", c.cashIssued ? "발행완료" : "", c.memo]);
+      s2.push([n, sum + feeOf(n), c.notified ? "안내" : "", sum, c.paid ? "확인" : "", c.addrChecked ? "확인" : "", c.name, c.phone, c.addr, c.req, c.cashReceipt || "", c.cashIssued ? "발행완료" : "", c.memo]);
     });
     const ws2 = XLSX.utils.aoa_to_sheet(s2);
     ws2["!cols"] = [{
@@ -1634,7 +1664,7 @@ function App() {
     XLSX.utils.book_append_sheet(wb, ws2, "2. 카톡_안내");
 
     // 2-1. 창고 픽업 체크리스트 (출력해서 창고에서 담으며 체크)
-    const s21 = [["담기", "상품명", "미입금", "확인", "총합계"]];
+    const s21 = [["담기", "상품명", "미입금", "입금", "총합계"]];
     let tp = 0,
       tu = 0;
     Object.entries(pivot).sort((a, b) => a[0].localeCompare(b[0], "ko")).forEach(([name, v]) => {
@@ -1798,9 +1828,9 @@ function App() {
     className: "tlabel"
   }, "입금"), /*#__PURE__*/React.createElement("span", {
     className: "tval"
-  }, "₩", won(paidWithShip)))), orderNickCount > 0 && shipFee > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "₩", won(paidWithShip)))), shipPayNickCount > 0 && shipFee > 0 && /*#__PURE__*/React.createElement("div", {
     className: "topship"
-  }, "상품 ₩", won(totalSales), " + 배송비 ₩", won(shipFee), "×", orderNickCount, "명 (배송비 포함)"), /*#__PURE__*/React.createElement("div", {
+  }, "상품 ₩", won(totalSales), " + 배송비 ₩", won(shipFee), "×", shipPayNickCount, "명 (배송비 포함)"), /*#__PURE__*/React.createElement("div", {
     className: "topmeta"
   }, "주문 ", activeOrders.length, "건 · 주문자 ", nickList.length, "명 · 입금 ", paidCount, "/", nickList.length, "명"), loadedFile && loadedFile.name && /*#__PURE__*/React.createElement("div", {
     className: "topfile",
@@ -2402,7 +2432,7 @@ function App() {
     const c = cust(n);
     const open = !!openCust[n];
     return /*#__PURE__*/React.createElement("div", {
-      className: "card" + (c.keep ? " keepcard" : c.paid ? " paidcard" : ""),
+      className: "card" + (c.pickup ? " pickupcard" : c.keep ? " keepcard" : c.paid ? " paidcard" : ""),
       key: n
     }, /*#__PURE__*/React.createElement("div", {
       className: "rowbetween"
@@ -2410,11 +2440,15 @@ function App() {
       className: "nickname"
     }, n), /*#__PURE__*/React.createElement("span", {
       className: "amount"
-    }, " ", won(sum + shipFee), "원"), /*#__PURE__*/React.createElement("span", {
+    }, " ", won(sum + feeOf(n)), "원"), feeOf(n) > 0 ? /*#__PURE__*/React.createElement("span", {
       className: "sub"
-    }, " (상품 ", won(sum), " + 배송 ", won(shipFee), ")"), (c.name || "").trim() && /*#__PURE__*/React.createElement("span", {
+    }, " (상품 ", won(sum), " + 배송 ", won(shipFee), ")") : /*#__PURE__*/React.createElement("span", {
+      className: "sub"
+    }, " (상품 ", won(sum), " · 배송비 없음)"), c.pickup && /*#__PURE__*/React.createElement("span", {
+      className: "pickupbadge"
+    }, "🏠 픽업수령 · 택배 제외"), (c.name || "").trim() && /*#__PURE__*/React.createElement("span", {
       className: "shipname"
-    }, "배송지 이름 : ", c.name.trim()), c.paid && (!c.addr || !c.phone) && /*#__PURE__*/React.createElement("span", {
+    }, "배송지 이름 : ", c.name.trim()), c.paid && !c.pickup && (!c.addr || !c.phone) && /*#__PURE__*/React.createElement("span", {
       className: "warnbadge"
     }, "⚠ ", !c.addr && !c.phone ? "주소·연락처" : !c.addr ? "주소" : "연락처", " 미입력")), /*#__PURE__*/React.createElement("div", {
       className: "chips"
@@ -2433,7 +2467,12 @@ function App() {
       onClick: () => setCust(n, {
         keep: !c.keep
       })
-    }, "킵"))), list.length === 0 && /*#__PURE__*/React.createElement("div", {
+    }, "킵"), /*#__PURE__*/React.createElement("button", {
+      className: "chip pickup" + (c.pickup ? " on" : ""),
+      onClick: () => setCust(n, {
+        pickup: !c.pickup
+      })
+    }, "픽업"))), list.length === 0 && /*#__PURE__*/React.createElement("div", {
       className: "empty small"
     }, "유효 주문 없음 (전체 취소됨)"), list.length > 0 && openMsg[n] && /*#__PURE__*/React.createElement("pre", {
       className: "msg"
@@ -2731,7 +2770,7 @@ function App() {
     className: "warn"
   }, totalUnpaidQty), "개"), /*#__PURE__*/React.createElement("div", null, "담음 ", /*#__PURE__*/React.createElement("b", null, pickedKinds), " / ", pickupList.length, "종"))), /*#__PURE__*/React.createElement("div", {
     className: "hint"
-  }, "미입금분도 나중에 입금될 수 있어 ", /*#__PURE__*/React.createElement("b", null, "총합계 수량"), "만큼 챙기는 걸 기준으로 합니다. (취소분은 제외)")), /*#__PURE__*/React.createElement("div", {
+  }, "③ 정산에서 ", /*#__PURE__*/React.createElement("b", null, "「안내」를 보낸 주문"), "만 집계합니다. 미입금분도 나중에 입금될 수 있어 ", /*#__PURE__*/React.createElement("b", null, "총합계 수량"), "만큼 챙기는 걸 기준으로 합니다. (취소분 제외)")), /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "rowbetween"
@@ -2748,13 +2787,13 @@ function App() {
     onClick: exportWarehouseXlsx
   }, "엑셀 다운로드")), pickupList.length === 0 ? /*#__PURE__*/React.createElement("div", {
     className: "empty"
-  }, "주문이 없습니다.") : /*#__PURE__*/React.createElement("table", {
+  }, "안내를 보낸 주문이 없습니다. ③ 정산에서 「안내」를 체크하면 여기에 집계됩니다.") : /*#__PURE__*/React.createElement("table", {
     className: "tbl whtbl"
   }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null), /*#__PURE__*/React.createElement("th", null, "상품명"), /*#__PURE__*/React.createElement("th", {
     className: "r"
   }, "미입금"), /*#__PURE__*/React.createElement("th", {
     className: "r"
-  }, "확인"), /*#__PURE__*/React.createElement("th", {
+  }, "입금"), /*#__PURE__*/React.createElement("th", {
     className: "r"
   }, "총합계"))), /*#__PURE__*/React.createElement("tbody", null, pickupList.map(([name, v]) => {
     const picked = !!pickState[name];
@@ -2798,6 +2837,8 @@ function App() {
     className: "cashlist"
   }, cashList.map(n => {
     const c = cust(n);
+    const sum = (byNick[n] || []).reduce((s, o) => s + o.price * o.qty, 0);
+    const fee = feeOf(n);
     return /*#__PURE__*/React.createElement("div", {
       className: "cashrow" + (c.cashIssued ? " issued" : ""),
       key: n
@@ -2807,7 +2848,11 @@ function App() {
       className: "cnick"
     }, c.name || n), /*#__PURE__*/React.createElement("span", {
       className: "cnum"
-    }, c.cashReceipt)), /*#__PURE__*/React.createElement("button", {
+    }, c.cashReceipt), /*#__PURE__*/React.createElement("span", {
+      className: "camt"
+    }, won(sum + fee), "원", /*#__PURE__*/React.createElement("span", {
+      className: "camtsub"
+    }, fee > 0 ? ` (상품 ${won(sum)} + 배송 ${won(fee)})` : ` (상품 ${won(sum)} · 픽업수령)`))), /*#__PURE__*/React.createElement("button", {
       className: "cashbtn" + (c.cashIssued ? " on" : ""),
       onClick: () => setCust(n, {
         cashIssued: !c.cashIssued
@@ -2815,17 +2860,70 @@ function App() {
     }, c.cashIssued ? "발행완료 ✓" : "미발행"));
   })))), tab === "settings" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
-  }, /*#__PURE__*/React.createElement("div", {
+  }, settingEdit === null && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "cardtitle"
-  }, "정산서 안내문구 ", /*#__PURE__*/React.createElement("span", {
+  }, "문구 설정 ", /*#__PURE__*/React.createElement("span", {
     className: "sub"
-  }, "정산서 복사 시 맨 앞에 붙는 내용")), /*#__PURE__*/React.createElement("textarea", {
+  }, "복사 기능에 쓰이는 안내 문구")), /*#__PURE__*/React.createElement("div", {
+    className: "setlist"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "setrow",
+    onClick: () => setSettingEdit("settle")
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "setinfo"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "setname"
+  }, "정산서 안내문구"), /*#__PURE__*/React.createElement("span", {
+    className: "setdesc"
+  }, "③ 정산 「정산서 복사」 맨 앞에 붙는 내용")), /*#__PURE__*/React.createElement("span", {
+    className: "setright"
+  }, settleHeader !== SETTLE_HEADER && /*#__PURE__*/React.createElement("span", {
+    className: "setchanged"
+  }, "수정됨"), /*#__PURE__*/React.createElement("span", {
+    className: "setarrow"
+  }, "›"))), /*#__PURE__*/React.createElement("button", {
+    className: "setrow",
+    onClick: () => setSettingEdit("track")
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "setinfo"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "setname"
+  }, "운송장 안내문구"), /*#__PURE__*/React.createElement("span", {
+    className: "setdesc"
+  }, "⑤ 업로드 「운송장 복사」 맨 앞에 붙는 내용")), /*#__PURE__*/React.createElement("span", {
+    className: "setright"
+  }, trackHeader !== TRACK_HEADER && /*#__PURE__*/React.createElement("span", {
+    className: "setchanged"
+  }, "수정됨"), /*#__PURE__*/React.createElement("span", {
+    className: "setarrow"
+  }, "›"))))), /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "데이터 백업 · 복원 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "상단 「엑셀 저장 / 불러오기」 버튼 사용")), /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "화면 맨 위의 ", /*#__PURE__*/React.createElement("b", null, "「엑셀 저장」"), " 파일에는 복원용 데이터가 함께 담깁니다. 그 파일을 ", /*#__PURE__*/React.createElement("b", null, "「불러오기」"), "하면 다른 PC·사람도 그 날짜 데이터로 이어서 작업할 수 있고, 지난 방송의 엑셀을 올리면 그날 데이터가 그대로 복원됩니다. (롯데 업로드·인쇄에는 영향 없는 숨김 시트로 저장)"))), settingEdit === "settle" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "rowbetween"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
+  }, "정산서 안내문구"), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost",
+    onClick: () => setSettingEdit(null)
+  }, "‹ 설정으로")), /*#__PURE__*/React.createElement("textarea", {
     className: "in area",
     style: {
       minHeight: 240,
-      lineHeight: 1.6
+      lineHeight: 1.6,
+      marginTop: 10
     },
     value: settleHeader,
     onChange: e => setSettleHeader(e.target.value)
@@ -2840,7 +2938,7 @@ function App() {
     onClick: () => setSettleHeader(SETTLE_HEADER)
   }, "기본값으로 복원")), /*#__PURE__*/React.createElement("div", {
     className: "hint"
-  }, "계좌·상호가 바뀌면 여기서 수정하세요. 이 문구 다음에 「<정산서> + 주문내역 + 합계」가 자동으로 붙습니다.")), /*#__PURE__*/React.createElement("div", {
+  }, "계좌·상호가 바뀌면 여기서 수정하세요. 이 문구 다음에 「<정산서> + 주문내역 + 합계」가 자동으로 붙습니다. (수정 즉시 저장됨)")), /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "cardtitle"
@@ -2848,15 +2946,52 @@ function App() {
     className: "sub"
   }, "예시 주문 기준")), /*#__PURE__*/React.createElement("pre", {
     className: "msg"
-  }, `${settleHeader}\n\n<정산서>\n주문하신 상품과 수량이 맞는지 확인 부탁드립니다.\n냉감패드_4개*4000원=16000원\n총 합계 금액은 16,000원+합배송비 ${won(shipFee)}원 = ${won(16000 + shipFee)}원 입니다.`)), /*#__PURE__*/React.createElement("div", {
+  }, `${settleHeader}\n\n<정산서>\n주문하신 상품과 수량이 맞는지 확인 부탁드립니다.\n냉감패드_4개*4000원=16000원\n총 합계 금액은 16,000원+합배송비 ${won(shipFee)}원 = ${won(16000 + shipFee)}원 입니다.`))), settingEdit === "track" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "rowbetween"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
+  }, "운송장 안내문구"), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost",
+    onClick: () => setSettingEdit(null)
+  }, "‹ 설정으로")), /*#__PURE__*/React.createElement("textarea", {
+    className: "in area",
+    style: {
+      minHeight: 180,
+      lineHeight: 1.6,
+      marginTop: 10
+    },
+    value: trackHeader,
+    onChange: e => setTrackHeader(e.target.value)
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "rowgap",
+    style: {
+      marginTop: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn",
+    disabled: trackHeader === TRACK_HEADER,
+    onClick: () => setTrackHeader(TRACK_HEADER)
+  }, "기본값으로 복원")), /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "이 문구 다음에 「[운송장 정보] + 택배사 + 송장번호」가 자동으로 붙습니다. 택배사는 업로드한 파일에 따라 ", /*#__PURE__*/React.createElement("b", null, "롯데택배 / CJ대한통운"), "으로 알아서 들어갑니다. (수정 즉시 저장됨)")), /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "cardtitle"
-  }, "데이터 백업 · 복원 ", /*#__PURE__*/React.createElement("span", {
+  }, "복사 결과 미리보기 ", /*#__PURE__*/React.createElement("span", {
     className: "sub"
-  }, "상단 「엑셀 저장 / 불러오기」 버튼 사용")), /*#__PURE__*/React.createElement("div", {
-    className: "hint"
-  }, "화면 맨 위의 ", /*#__PURE__*/React.createElement("b", null, "「엑셀 저장」"), " 파일에는 복원용 데이터가 함께 담깁니다. 그 파일을 ", /*#__PURE__*/React.createElement("b", null, "「불러오기」"), "하면 다른 PC·사람도 그 날짜 데이터로 이어서 작업할 수 있고, 지난 방송의 엑셀을 올리면 그날 데이터가 그대로 복원됩니다. (롯데 업로드·인쇄에는 영향 없는 숨김 시트로 저장)"))), /*#__PURE__*/React.createElement("input", {
+  }, "택배사별 예시")), /*#__PURE__*/React.createElement("pre", {
+    className: "msg"
+  }, `${trackHeader}\n\n[운송장 정보]\n롯데택배 268335582631`), /*#__PURE__*/React.createElement("pre", {
+    className: "msg",
+    style: {
+      marginTop: 10
+    }
+  }, `${trackHeader}\n\n[운송장 정보]\nCJ대한통운 661234567890`)))), /*#__PURE__*/React.createElement("input", {
     ref: fileRef,
     type: "file",
     accept: ".xlsx",
@@ -3069,6 +3204,14 @@ const CSS = `
 .card.paidcard { border-color: #b6e2d3; background: #f4fbf8; }
 .card.keepcard { border-color: #f0a8ac; background: #fff2f3; }
 .chip.keep.on { background: #d81f26; border-color: #d81f26; color: #fff; }
+.chip.pickup.on { background: #7c3aed; border-color: #7c3aed; color: #fff; }
+/* 픽업수령 카드 · 배지 (택배 출고 대상에서 제외됨) */
+.card.pickupcard { border-color: #ddd0f5; background: #f9f6ff; }
+.pickupbadge {
+  display: inline-block; margin-left: 8px; padding: 2px 9px; border-radius: 999px;
+  font-size: 12px; font-weight: 700; color: #6d28d9;
+  background: #f1e9fe; border: 1px solid #ddd0f5; vertical-align: middle;
+}
 .cardtitle { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
 .sub { font-size: 12px; font-weight: 500; color: #8a919c; }
 .in {
@@ -3271,6 +3414,20 @@ const CSS = `
 .filterbtn.f-unpaid.on { background: #f5a623; border-color: #f5a623; color: #16191f; }
 .filterbtn.f-paid.on { background: #0f766e; border-color: #0f766e; color: #fff; }
 .warnbadge { display: inline-block; margin-left: 8px; padding: 2px 8px; font-size: 12px; font-weight: 700; color: #fff; background: #d81f26; border-radius: 999px; vertical-align: middle; }
+/* 설정 탭: 항목 버튼 목록 (항목 늘어나도 그대로 쌓임) */
+.setlist { display: flex; flex-direction: column; gap: 8px; }
+.setrow {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; text-align: left; padding: 14px 16px; border-radius: 12px;
+  border: 1px solid #e2e5ea; background: #fff; cursor: pointer; font-family: inherit;
+}
+.setrow:hover { border-color: #16191f; background: #fafbfc; }
+.setinfo { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.setname { font-size: 15px; font-weight: 700; color: #1a1d21; }
+.setdesc { font-size: 12px; color: #8a919c; }
+.setright { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.setchanged { font-size: 11px; font-weight: 700; color: #0f766e; background: #e7f5f1; border: 1px solid #b6e2d3; border-radius: 999px; padding: 2px 8px; }
+.setarrow { font-size: 20px; color: #b0b7c0; line-height: 1; }
 /* 정산 카드: 배송지에 이름이 입력된 사람만 표시 */
 .shipname {
   display: inline-block; margin-left: 8px; padding: 2px 9px; border-radius: 999px;
@@ -3288,6 +3445,9 @@ const CSS = `
 .cinfo { display: flex; flex-direction: column; min-width: 0; }
 .cnick { font-size: 15px; font-weight: 700; }
 .cnum { font-size: 13px; color: #5b6470; font-variant-numeric: tabular-nums; word-break: break-all; }
+/* 영수증 탭 결제금액 */
+.camt { font-size: 15px; font-weight: 800; color: #e8334a; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.camtsub { font-size: 12px; font-weight: 500; color: #8a919c; }
 .cashbtn { padding: 9px 16px; border-radius: 10px; border: 1px solid #e8334a; background: #fff; color: #e8334a; font-size: 14px; font-weight: 700; cursor: pointer; white-space: nowrap; font-family: inherit; }
 .cashbtn.on { background: #0f766e; border-color: #0f766e; color: #fff; }
 
