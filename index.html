@@ -2835,8 +2835,21 @@ const CSS = `
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
 @media (prefers-reduced-motion: reduce) { .livedot { animation: none; } }
 .livetxt { font-size: 12px; font-weight: 800; letter-spacing: .12em; color: #ff8fa0; }
-.topsum { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.topsum { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .topright { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* 좁은 폰(아이폰 계열 ~430px): 상단바 2줄 재배치 — 날짜칸 잘림 방지 + 헤더 높이 절감
+   1줄 = 금액·내역 / 2줄 = LIVE점·날짜·엑셀저장·불러오기 */
+@media (max-width: 430px) {
+  .topbar { flex-wrap: wrap; gap: 10px; padding: 10px 14px; }
+  .topsum { flex: 1 1 100%; }
+  .topamts { gap: 12px; flex-wrap: nowrap; }
+  .topamt .tval { font-size: 18px; }
+  .livewrap { order: 2; padding: 6px; }
+  .livetxt { display: none; }          /* 붉은 점만 남김 (공간 절약) */
+  .topright { order: 3; flex: 1 1 auto; flex-wrap: nowrap; gap: 6px; }
+  .datein { flex: 1 1 auto; min-width: 0; }
+  .topright .btn { flex: 0 0 auto; padding: 9px 12px; }
+}
 .datein {
   padding: 7px 10px; border-radius: 10px; border: 1px solid #3a3f48; background: #22262d;
   color: #fff; font-size: 13px; font-family: inherit; color-scheme: dark;
@@ -2910,6 +2923,9 @@ const CSS = `
 .draghandle:active { cursor: grabbing; color: #0f766e; }
 .prow.dragging { background: #f4fbf8; box-shadow: 0 2px 10px rgba(15,118,110,.18); border-radius: 8px; }
 .nrow { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #f0f2f5; }
+/* 닉네임 행 버튼 터치 타깃 확대 (오탭 방지) */
+.nrow .btn.sm { min-height: 40px; padding: 8px 12px; }
+.nrow .nickeditbtn { min-width: 40px; padding: 8px 10px; font-size: 15px; }
 .nsum { flex: 1; text-align: right; font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
 .nsum.zero { color: #b0b7c0; text-decoration: line-through; }
 .nickeditbtn { flex: 0 0 auto; padding: 5px 9px; color: #8a919c; }
