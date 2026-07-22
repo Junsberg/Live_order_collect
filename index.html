@@ -956,6 +956,22 @@ function App() {
   const cashList = useMemo(() => nickList.filter(n => (cust(n).cashReceipt || "").trim()), [nickList, customers]);
   const cashIssuedCount = cashList.filter(n => cust(n).cashIssued).length;
 
+  // 출고 라인을 「받는분 이름」 가나다순으로 정렬.
+  // 같은 사람의 상품 행들은 흩어지지 않게 묶어서 이동(그룹 내부는 입력 순서 유지).
+  const sortLinesByName = lines => {
+    const groups = new Map();
+    lines.forEach(o => {
+      if (!groups.has(o.nick)) groups.set(o.nick, []);
+      groups.get(o.nick).push(o);
+    });
+    return [...groups.entries()].sort((a, b) => {
+      const an = (cust(a[0]).name || a[0]).trim();
+      const bn = (cust(b[0]).name || b[0]).trim();
+      const r = an.localeCompare(bn, "ko");
+      return r !== 0 ? r : a[0].localeCompare(b[0], "ko"); // 동명이인은 닉네임으로 구분
+    }).flatMap(([, arr]) => arr);
+  };
+
   // 4. 송장출력_복사용(롯데) 시트 생성 — 원본 양식 그대로(A~R), 빈 컬럼도 헤더 유지, 수식 없이 값만
   const buildShipSheet = lines => {
     // 업로드 탭에서 반영된 송장번호(닉네임 → 송장번호)
@@ -964,7 +980,7 @@ function App() {
       if (d.tracking) trackByNick[d.nick] = d.tracking;
     });
     const rows = [["이름", "전화번호", "휴대폰번호", "우편번호", "주소", "상품명", "옵션명", "추가구성", "수량", "주문번호", "운임구분", "배송시요구사항", "송장번호", "주문처", "보내는분", "전화번호", "운임", "송장번호"]];
-    lines.forEach(o => {
+    sortLinesByName(lines).forEach(o => {
       const c = cust(o.nick);
       const trk = trackByNick[o.nick] || c.tracking || "";
       rows.push([c.name || o.nick,
@@ -1059,8 +1075,8 @@ function App() {
   // CJ대한통운 출고 시트 — 입금완료자별 1행(합포장이라 수량 무관 대표 1개)
   const buildCjSheet = lines => {
     const rows = [["보내는분성명", "보내는분전화번호", "보내는분주소(전체, 분할)", "품목명", "내품수량", "박스타입", "받는분성명", "받는분전화번호", "받는분주소(전체, 분할)", "배송메세지1", "고객주문번호"]];
-    lines.forEach(o => {
-      // 롯데처럼 상품별 1행
+    sortLinesByName(lines).forEach(o => {
+      // 롯데처럼 상품별 1행 · 이름 가나다순
       const c = cust(o.nick);
       const req = (c.req || "").trim();
       const msg = req ? `${o.nick}//${req}` : o.nick; // 요청 없으면 닉네임만, 있으면 닉네임//요청
