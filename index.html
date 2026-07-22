@@ -2367,7 +2367,10 @@ function App() {
       setEditNickVal(s.nick);
       setDelNickArm(null);
     }
-  }, "✎"), /*#__PURE__*/React.createElement("span", {
+  }, "✎"), cust(s.nick).paid && (cust(s.nick).name || "").trim() && /*#__PURE__*/React.createElement("span", {
+    className: "oname",
+    title: cust(s.nick).name.trim()
+  }, cust(s.nick).name.trim()), /*#__PURE__*/React.createElement("span", {
     className: "nsum" + (s.active === 0 ? " zero" : "")
   }, won(s.total), "원"), /*#__PURE__*/React.createElement("button", {
     className: "btn ghost sm" + (delNickArm === s.nick ? " danger" : ""),
@@ -3247,6 +3250,12 @@ const CSS = `
 /* 닉네임 행 버튼 터치 타깃 확대 (오탭 방지) */
 .nrow .btn.sm { min-height: 40px; padding: 8px 12px; }
 .nrow .nickeditbtn { min-width: 40px; padding: 8px 10px; font-size: 15px; }
+/* 전체주문: 입금 + 배송지 이름 입력된 사람만 이름 표시 */
+.oname {
+  flex-shrink: 0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 700;
+  color: #0f766e; background: #e7f5f1; border: 1px solid #b6e2d3;
+}
 .nsum { flex: 1; text-align: right; font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
 .nsum.zero { color: #b0b7c0; text-decoration: line-through; }
 .nickeditbtn { flex: 0 0 auto; padding: 5px 9px; color: #8a919c; }
