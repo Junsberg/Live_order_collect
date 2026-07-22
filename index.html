@@ -1308,10 +1308,115 @@ function App() {
     return Object.values(map);
   };
 
+  // 롯데 택배사에서 직접 받은 운송장 파일 파싱 (시트명 Sheet0 등, 헤더로 열 자동 인식)
+  // 매칭 기준: 「주문번호」열의 닉네임. 검증: 「수하인명」열 ↔ 앱에 저장된 배송지 이름
+  // 반환: { data, skipped, mismatch, unknown }
+  const parseLotteCourierUpload = wb => {
+    const clean = s => s === "#N/A" || s === "#REF!" || s === "0" ? "" : s;
+    const norm = s => String(s == null ? "" : s).replace(/\s+/g, "").trim();
+    // 헤더에 「운송장번호」+「주문번호」가 있는 시트를 찾음 (시트명이 바뀌어도 동작)
+    let ws = null,
+      col = null;
+    for (const sn of wb.SheetNames) {
+      const s = wb.Sheets[sn];
+      if (!s || !s["!ref"]) continue;
+      const head = (XLSX.utils.sheet_to_json(s, {
+        header: 1,
+        defval: "",
+        range: 0
+      })[0] || []).map(norm);
+      const find = (...names) => head.findIndex(h => names.some(n => h === n));
+      const cTrk = find("운송장번호");
+      const cOrd = find("주문번호");
+      if (cTrk < 0 || cOrd < 0) continue;
+      ws = s;
+      col = {
+        trk: cTrk,
+        ord: cOrd,
+        rcv: find("수하인명", "받는분성명", "수하인성명"),
+        prod: find("상품명")
+      };
+      break;
+    }
+    if (!ws) return null;
+    const V = (r, c) => {
+      if (c < 0) return "";
+      const x = ws[XLSX.utils.encode_cell({
+        r,
+        c
+      })];
+      return x == null ? "" : String(x.v == null ? "" : x.v).trim();
+    };
+    const ref = XLSX.utils.decode_range(ws["!ref"]);
+    const map = {};
+    let skipped = 0; // 주문번호 비어있는 행 (다른 발송 건)
+    const mismatch = [],
+      unknown = [];
+    for (let r = 1; r <= ref.e.r; r++) {
+      const nick = clean(V(r, col.ord));
+      if (!nick || nick.startsWith("#")) {
+        if (V(r, col.trk)) skipped++;
+        continue;
+      }
+      const tracking = clean(V(r, col.trk));
+      const rcvName = clean(V(r, col.rcv)); // 파일의 수하인명
+      const c = customers[nick]; // 앱에 등록된 고객
+      if (!c) {
+        if (!unknown.some(u => u.nick === nick)) unknown.push({
+          nick,
+          rcvName,
+          tracking
+        });
+        continue;
+      }
+      const appName = String(c.name || "").trim();
+      // 검증: 앱 배송지 이름과 파일 수하인명이 다르면 반영하지 않음
+      if (appName && rcvName && norm(appName) !== norm(rcvName)) {
+        if (!mismatch.some(m => m.nick === nick)) mismatch.push({
+          nick,
+          appName,
+          rcvName,
+          tracking
+        });
+        continue;
+      }
+      if (!map[nick]) {
+        map[nick] = {
+          nick,
+          name: appName || rcvName || nick,
+          phone: c.phone || "",
+          addr: c.addr || "",
+          tracking,
+          carrier: tracking ? "롯데택배" : ""
+        };
+      } else if (tracking && !map[nick].tracking) {
+        map[nick].tracking = tracking;
+        map[nick].carrier = "롯데택배";
+      }
+    }
+    return {
+      data: Object.values(map),
+      skipped,
+      mismatch,
+      unknown
+    };
+  };
+
   // 조회 목록 누적 병합 (롯데·CJ 공통)
   const mergeShipData = (data, label) => {
+    // 집계는 현재 상태 기준으로 미리 계산 (setState 갱신 함수는 나중에 실행되므로 그 안에서 세면 0이 됨)
+    const cur = {};
+    shipData.forEach(d => {
+      cur[d.nick] = true;
+    });
     let added = 0,
       updated = 0;
+    data.forEach(d => {
+      if (cur[d.nick]) updated++;else {
+        cur[d.nick] = true;
+        added++;
+      }
+    });
     setShipData(prev => {
       const idx = {};
       prev.forEach((d, i) => {
@@ -1321,16 +1426,26 @@ function App() {
       data.forEach(d => {
         if (idx[d.nick] != null) {
           next[idx[d.nick]] = d;
-          updated++;
         } else {
           next.push(d);
           idx[d.nick] = next.length - 1;
-          added++;
         }
       });
       return next;
     });
     showToast(`✓ ${label} 반영 · 추가 ${added}명 · 갱신 ${updated}명`);
+    // 정작 중요한 것: 출고 대상인데 아직 송장이 안 붙은 사람
+    const done = new Set();
+    shipData.forEach(d => {
+      if (d.tracking) done.add(d.nick);
+    });
+    data.forEach(d => {
+      if (d.tracking) done.add(d.nick);
+    });
+    const left = paidNicks.filter(n => !done.has(n));
+    if (left.length) {
+      showToast(`ℹ 아직 송장 없는 출고대상 ${left.length}명: ` + left.slice(0, 6).join(", ") + (left.length > 6 ? " 외" : ""));
+    }
   };
   const onLotteFilePick = async e => {
     const file = e.target.files && e.target.files[0];
@@ -1340,16 +1455,32 @@ function App() {
       const wb = XLSX.read(await file.arrayBuffer(), {
         type: "array"
       });
-      const data = parseShipUpload(wb);
-      if (!data) {
-        showToast("롯데 출고 파일이 아닙니다 (4.송장출력_복사용 시트 없음).");
+      // ① 앱이 만든 출고 파일에 송장만 채운 경우
+      const own = parseShipUpload(wb);
+      if (own && own.length > 0) {
+        mergeShipData(own, "롯데");
         return;
       }
-      if (data.length === 0) {
-        showToast("조회할 데이터가 없습니다.");
+      // ② 롯데 택배사에서 직접 받은 운송장 파일 (Sheet0 등)
+      const res = parseLotteCourierUpload(wb);
+      if (!res) {
+        showToast("롯데 운송장 파일이 아닙니다 (운송장번호·주문번호 열을 찾을 수 없음).");
         return;
       }
-      mergeShipData(data, "롯데");
+      const {
+        data,
+        mismatch
+      } = res;
+      if (data.length === 0 && mismatch.length === 0) {
+        showToast("이 파일에서 우리 출고 건을 찾지 못했습니다. 앱에서 만든 출고 파일로 접수했는지 확인해주세요.");
+        return;
+      }
+      // 우리 출고 건과 무관한 행(주문번호 없음·앱에 없는 닉네임)은 조용히 무시
+      if (data.length > 0) mergeShipData(data, "롯데");
+      // 이름이 다른 건은 사고 위험이 있어 반영하지 않고 알림
+      if (mismatch.length) {
+        showToast(`⚠ 배송지 이름 불일치 ${mismatch.length}건 반영 안 함: ` + mismatch.slice(0, 3).map(m => `${m.nick}(앱 ${m.appName}/파일 ${m.rcvName})`).join(", ") + (mismatch.length > 3 ? " 외" : ""));
+      }
     } catch (e) {
       showToast("업로드 실패: " + (e.message || "파일을 읽을 수 없습니다."));
     }
