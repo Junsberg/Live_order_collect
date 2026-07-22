@@ -877,6 +877,12 @@ function App() {
   };
 
   /* ---------- 출고 ---------- */
+
+  // 운송장 안내 문구 (업로드 탭 · 고객에게 보낼 내용). 택배사는 조회된 값 그대로 사용.
+  const trackMsg = d => {
+    const carrier = (d.carrier || "").trim() || "택배";
+    return ["안녕하세요! 사자창고입니다.", "주문하신 상품 잘 포장해서 출고되었습니다.", "오늘도 즐거운 하루 되세요!", "감사합니다.", "", "[운송장 정보]", `${carrier} ${d.tracking}`].join("\n");
+  };
   const pivot = useMemo(() => {
     const m = {};
     activeOrders.forEach(o => {
@@ -2695,14 +2701,18 @@ function App() {
       className: "tblwrap"
     }, /*#__PURE__*/React.createElement("table", {
       className: "tbl"
-    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "닉네임"), /*#__PURE__*/React.createElement("th", null, "이름"), /*#__PURE__*/React.createElement("th", null, "연락처"), /*#__PURE__*/React.createElement("th", null, "주소"), /*#__PURE__*/React.createElement("th", null, "택배사"), /*#__PURE__*/React.createElement("th", null, "운송장번호"))), /*#__PURE__*/React.createElement("tbody", null, filtered.map((d, i) => /*#__PURE__*/React.createElement("tr", {
+    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "닉네임"), /*#__PURE__*/React.createElement("th", null, "이름"), /*#__PURE__*/React.createElement("th", null, "연락처"), /*#__PURE__*/React.createElement("th", null, "주소"), /*#__PURE__*/React.createElement("th", null, "택배사"), /*#__PURE__*/React.createElement("th", null, "운송장번호"), /*#__PURE__*/React.createElement("th", null, "안내"))), /*#__PURE__*/React.createElement("tbody", null, filtered.map((d, i) => /*#__PURE__*/React.createElement("tr", {
       key: i,
       className: d.tracking ? "" : "rowwarn"
     }, /*#__PURE__*/React.createElement("td", {
       className: "whname"
     }, d.nick), /*#__PURE__*/React.createElement("td", null, d.name || "-"), /*#__PURE__*/React.createElement("td", null, d.phone || "-"), /*#__PURE__*/React.createElement("td", null, d.addr || "-"), /*#__PURE__*/React.createElement("td", null, d.carrier || "-"), /*#__PURE__*/React.createElement("td", {
       className: "trackcell"
-    }, d.tracking || "미입력")))))));
+    }, d.tracking || "미입력"), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("button", {
+      className: "btn sm primary",
+      disabled: !d.tracking,
+      onClick: () => copyText(trackMsg(d), "trk-" + d.nick)
+    }, copiedId === "trk-" + d.nick ? "복사됨 ✓" : "운송장 복사"))))))));
   })()), tab === "warehouse" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
   }, /*#__PURE__*/React.createElement("div", {
