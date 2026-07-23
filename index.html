@@ -142,6 +142,9 @@ const expandProduct = p => {
 const APPDATA_SHEET = "_appdata";
 const APPDATA_MAGIC = "SAJA_APPDATA_V1";
 const APPDATA_CHUNK = 30000;
+// 상품목록 전용 파일 (방송 장소마다 상품이 달라서 따로 저장·불러오기)
+const PRODLIST_SHEET = "_products";
+const PRODLIST_MAGIC = "SAJA_PRODUCTS_V1";
 const todayISO = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -1747,6 +1750,115 @@ function App() {
     showToast("조회 목록을 비웠습니다.");
   };
 
+  /* ---------- 상품목록 파일 (방송 장소별 세팅) ---------- */
+  const prodFileRef = useRef(null);
+  const [prodImport, setProdImport] = useState(null); // {name, list} — 교체/추가 선택 대기
+
+  // 상품목록만 별도 엑셀로 저장. 눈으로 보는 시트 + 복원용 숨김 시트(옵션·조합재고 포함)
+  const exportProductsXlsx = () => {
+    if (products.length === 0) {
+      showToast("저장할 상품이 없습니다.");
+      return;
+    }
+    const rows = [["상품명", "금액", "수량", "옵션"]];
+    products.forEach(p => {
+      const opt = (p.options || []).map(g => `${g.label || "옵션"}: ${(g.values || []).map(v => v.name + (v.price ? `(+${v.price})` : "")).join(" / ")}`).join(" | ");
+      rows.push([p.name, p.price || 0, p.stock === null || p.stock === undefined ? "무제한" : p.stock, opt]);
+    });
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws["!cols"] = [{
+      wch: 34
+    }, {
+      wch: 10
+    }, {
+      wch: 10
+    }, {
+      wch: 60
+    }];
+    for (let r = 2; r <= rows.length; r++) {
+      const c = ws["B" + r];
+      if (c) c.z = "#,##0";
+    }
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "상품목록");
+    // 복원용 숨김 시트 — 옵션·조합재고까지 원본 그대로
+    const payload = JSON.stringify({
+      v: 1,
+      products
+    }); // 옵션·조합재고(p.stocks)는 products 안에 이미 포함
+    const hid = [[PRODLIST_MAGIC]];
+    for (let i = 0; i < payload.length; i += APPDATA_CHUNK) hid.push([payload.slice(i, i + APPDATA_CHUNK)]);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(hid), PRODLIST_SHEET);
+    const idx = wb.SheetNames.indexOf(PRODLIST_SHEET);
+    if (idx >= 0) {
+      wb.Workbook = wb.Workbook || {};
+      wb.Workbook.Sheets = wb.Workbook.Sheets || [];
+      wb.Workbook.Sheets[idx] = {
+        Hidden: 1
+      };
+    }
+    XLSX.writeFile(wb, `상품목록_사자창고_${dateCode}.xlsx`);
+    showToast(`✓ 상품 ${products.length}종을 저장했습니다.`);
+  };
+
+  // 파일을 읽어서 교체/추가 선택 화면을 띄운다 (바로 반영하지 않음)
+  const onProdFilePick = async e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const wb = XLSX.read(await file.arrayBuffer(), {
+        type: "array"
+      });
+      const ws = wb.Sheets[PRODLIST_SHEET];
+      if (!ws) {
+        showToast("이 앱에서 「상품목록 저장」으로 만든 파일만 불러올 수 있습니다.");
+        return;
+      }
+      const aoa = XLSX.utils.sheet_to_json(ws, {
+        header: 1
+      });
+      if (!(aoa.length && aoa[0][0] === PRODLIST_MAGIC)) {
+        showToast("상품목록 파일이 아닙니다.");
+        return;
+      }
+      const d = JSON.parse(aoa.slice(1).map(r => r && r[0] || "").join(""));
+      const list = (d.products || []).filter(p => p && p.name);
+      if (list.length === 0) {
+        showToast("파일에 상품이 없습니다.");
+        return;
+      }
+      setProdImport({
+        name: file.name || "상품목록",
+        list
+      });
+    } catch (err) {
+      showToast("불러오기 실패: " + (err.message || "파일을 읽을 수 없습니다."));
+    }
+  };
+
+  // 교체: 기존 목록을 버리고 새 목록으로 / 추가: 이름+금액이 같으면 건너뛰고 나머지만 추가
+  const applyProdImport = mode => {
+    if (!prodImport) return;
+    const incoming = prodImport.list.map(p => ({
+      ...p,
+      id: p.id || uid()
+    }));
+    if (mode === "replace") {
+      setProducts(incoming);
+      showToast(`✓ 상품 ${incoming.length}종으로 교체했습니다.`);
+    } else {
+      const seen = new Set(products.map(p => `${p.name}|${p.price}`));
+      const add = incoming.filter(p => !seen.has(`${p.name}|${p.price}`)).map(p => ({
+        ...p,
+        id: uid()
+      }));
+      setProducts(prev => [...prev, ...add]);
+      showToast(add.length ? `✓ ${add.length}종 추가했습니다. (중복 ${incoming.length - add.length}종 제외)` : "추가할 새 상품이 없습니다. (전부 중복)");
+    }
+    setProdImport(null);
+  };
+
   // 택배사별 조회 건수 (다운로드 버튼 활성화 판단용)
   const lotteShipCount = useMemo(() => shipData.filter(d => (d.carrier || "").includes("롯데")).length, [shipData]);
   const cjShipCount = useMemo(() => shipData.filter(d => (d.carrier || "").includes("CJ")).length, [shipData]);
@@ -2112,10 +2224,50 @@ function App() {
   }, /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "cardtitle"
+    className: "rowbetween"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
   }, "오늘 판매 상품 목록 ", /*#__PURE__*/React.createElement("span", {
     className: "sub"
   }, "방송마다 새로 세팅 · 수량 비우면 무제한")), /*#__PURE__*/React.createElement("div", {
+    className: "rowgap"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    disabled: products.length === 0,
+    onClick: exportProductsXlsx,
+    title: `상품목록_사자창고_${dateCode}.xlsx`
+  }, "⬇ 목록 저장"), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    onClick: () => prodFileRef.current && prodFileRef.current.click()
+  }, "⬆ 목록 불러오기"), /*#__PURE__*/React.createElement("input", {
+    ref: prodFileRef,
+    type: "file",
+    accept: ".xlsx,.xls",
+    style: {
+      display: "none"
+    },
+    onChange: onProdFilePick
+  }))), prodImport && /*#__PURE__*/React.createElement("div", {
+    className: "prodimport"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "pimsg"
+  }, /*#__PURE__*/React.createElement("b", null, "「", prodImport.name, "」"), " 상품 ", /*#__PURE__*/React.createElement("b", null, prodImport.list.length, "종"), "을 읽었습니다. 어떻게 할까요?", activeOrders.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "piwarn"
+  }, "⚠ 이미 주문이 ", /*#__PURE__*/React.createElement("b", null, activeOrders.length, "건"), " 있습니다. 교체해도 주문은 지워지지 않지만, 재고 계산은 새 목록 기준이 됩니다.")), /*#__PURE__*/React.createElement("div", {
+    className: "rowgap"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn danger",
+    onClick: () => applyProdImport("replace")
+  }, "교체 (기존 ", products.length, "종 지우고 새로)"), /*#__PURE__*/React.createElement("button", {
+    className: "btn primary",
+    onClick: () => applyProdImport("append")
+  }, "추가 (기존에 더하기)"), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost",
+    onClick: () => setProdImport(null)
+  }, "취소"))), /*#__PURE__*/React.createElement("div", {
     className: "addrow"
   }, /*#__PURE__*/React.createElement("input", {
     className: "in grow",
@@ -3693,6 +3845,14 @@ const CSS = `
 .filterbtn.f-unpaid.on { background: #f5a623; border-color: #f5a623; color: #16191f; }
 .filterbtn.f-paid.on { background: #0f766e; border-color: #0f766e; color: #fff; }
 .warnbadge { display: inline-block; margin-left: 8px; padding: 2px 8px; font-size: 12px; font-weight: 700; color: #fff; background: #d81f26; border-radius: 999px; vertical-align: middle; }
+/* 상품목록 불러오기 — 교체/추가 선택 */
+.prodimport {
+  margin: 10px 0 4px; padding: 12px 14px; border-radius: 12px;
+  background: #fff8e8; border: 1px solid #f0d9a0;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.pimsg { font-size: 14px; color: #6b5518; line-height: 1.5; }
+.piwarn { margin-top: 6px; font-size: 13px; color: #b03a2e; }
 /* 설정 탭: 항목 버튼 목록 (항목 늘어나도 그대로 쌓임) */
 .setlist { display: flex; flex-direction: column; gap: 8px; }
 .setrow {
