@@ -1188,16 +1188,19 @@ function App() {
   };
 
   // 4. 송장출력_복사용(롯데) 시트 생성 — 원본 양식 그대로(A~R), 빈 컬럼도 헤더 유지, 수식 없이 값만
-  const buildShipSheet = lines => {
+  // withTracking=false 면 송장번호 칸을 비운다.
+  // 출고탭 다운로드는 「접수용」이라 운송장이 들어가면 안 되고,
+  // 전체저장의 보관용 시트만 true 로 호출한다.
+  const buildShipSheet = (lines, withTracking) => {
     // 업로드 탭에서 반영된 송장번호(닉네임 → 송장번호)
     const trackByNick = {};
-    shipData.forEach(d => {
+    if (withTracking) shipData.forEach(d => {
       if (d.tracking) trackByNick[d.nick] = d.tracking;
     });
     const rows = [["이름", "전화번호", "휴대폰번호", "우편번호", "주소", "상품명", "옵션명", "추가구성", "수량", "주문번호", "운임구분", "배송시요구사항", "송장번호", "주문처", "보내는분", "전화번호", "운임", "송장번호"]];
     sortLinesByName(lines).forEach(o => {
       const c = cust(o.nick);
-      const trk = trackByNick[o.nick] || c.tracking || "";
+      const trk = withTracking ? trackByNick[o.nick] || c.tracking || "" : "";
       rows.push([c.name || o.nick,
       // A 이름
       c.phone || "",
@@ -1283,19 +1286,28 @@ function App() {
       return;
     }
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, buildShipSheet(shipLines), "4. 송장출력_복사용(롯데)");
+    XLSX.utils.book_append_sheet(wb, buildShipSheet(shipLines, false), "4. 송장출력_복사용(롯데)"); // 접수용 — 운송장 비움
     XLSX.writeFile(wb, `롯데_사자창고_출고_${dateCode}.xlsx`);
   };
 
   // CJ대한통운 출고 시트 — 입금완료자별 1행(합포장이라 수량 무관 대표 1개)
-  const buildCjSheet = lines => {
-    const rows = [["보내는분성명", "보내는분전화번호", "보내는분주소(전체, 분할)", "품목명", "내품수량", "박스타입", "받는분성명", "받는분전화번호", "받는분주소(전체, 분할)", "배송메세지1", "고객주문번호"]];
+  // withTracking=true 일 때만 맨 뒤(L열)에 송장번호를 붙인다.
+  // CJ 접수용 다운로드 파일은 양식이 깨지면 안 되므로 false(A~K 원본 그대로),
+  // 전체저장의 보관용 시트만 true 로 호출한다.
+  const buildCjSheet = (lines, withTracking) => {
+    const trackByNick = {};
+    shipData.forEach(d => {
+      if (d.tracking) trackByNick[d.nick] = d.tracking;
+    });
+    const head = ["보내는분성명", "보내는분전화번호", "보내는분주소(전체, 분할)", "품목명", "내품수량", "박스타입", "받는분성명", "받는분전화번호", "받는분주소(전체, 분할)", "배송메세지1", "고객주문번호"];
+    if (withTracking) head.push("송장번호");
+    const rows = [head];
     sortLinesByName(lines).forEach(o => {
       // 롯데처럼 상품별 1행 · 이름 가나다순
       const c = cust(o.nick);
       const req = (c.req || "").trim();
       const msg = req ? `${o.nick}//${req}` : o.nick; // 요청 없으면 닉네임만, 있으면 닉네임//요청
-      rows.push(["사자창고",
+      const row = ["사자창고",
       // A 보내는분성명 — 고정
       "02-561-7000",
       // B 보내는분전화번호 — 고정
@@ -1316,7 +1328,9 @@ function App() {
       msg,
       // J 배송메세지1 — 닉네임(//요청)
       o.nick // K 고객주문번호 — 닉네임
-      ]);
+      ];
+      if (withTracking) row.push(trackByNick[o.nick] || c.tracking || ""); // L 송장번호
+      rows.push(row);
     });
     const ws = XLSX.utils.aoa_to_sheet(rows);
     ws["!cols"] = [{
@@ -1342,6 +1356,9 @@ function App() {
     }, {
       wch: 12
     }];
+    if (withTracking) ws["!cols"].push({
+      wch: 18
+    });
     return ws;
   };
   const exportCjXlsx = () => {
@@ -1350,7 +1367,7 @@ function App() {
       return;
     }
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, buildCjSheet(shipLines), "Sheet1");
+    XLSX.utils.book_append_sheet(wb, buildCjSheet(shipLines, false), "Sheet1"); // 접수용 — 양식 그대로
     XLSX.writeFile(wb, `CJ_사자창고_출고_${dateCode}.xlsx`);
   };
 
@@ -1730,6 +1747,47 @@ function App() {
     showToast("조회 목록을 비웠습니다.");
   };
 
+  // 택배사별 조회 건수 (다운로드 버튼 활성화 판단용)
+  const lotteShipCount = useMemo(() => shipData.filter(d => (d.carrier || "").includes("롯데")).length, [shipData]);
+  const cjShipCount = useMemo(() => shipData.filter(d => (d.carrier || "").includes("CJ")).length, [shipData]);
+
+  // 업로드 탭 — 조회된 운송장을 택배사별로 엑셀 저장 (출고 접수 파일과 분리)
+  const exportTrackXlsx = which => {
+    const isLotte = which === "롯데";
+    const list = shipData.filter(d => (d.carrier || "").includes(isLotte ? "롯데" : "CJ"));
+    if (list.length === 0) {
+      showToast(`${which} 운송장 조회 결과가 없습니다.`);
+      return;
+    }
+    const rows = [["이름", "닉네임", "택배사", "송장번호", "연락처", "주소", "배송요청"]];
+    [...list].sort((a, b) => String(a.name || a.nick).localeCompare(String(b.name || b.nick), "ko")).forEach(d => {
+      const c = cust(d.nick);
+      rows.push([d.name || c.name || d.nick, d.nick, d.carrier || "", d.tracking || "", d.phone || c.phone || "", d.addr || c.addr || "", c.req || ""]);
+    });
+    const withTrk = list.filter(d => d.tracking).length;
+    rows.push(["합계", `${list.length}명`, "", `송장 ${withTrk}건 · 미입력 ${list.length - withTrk}건`, "", "", ""]);
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws["!cols"] = [{
+      wch: 12
+    }, {
+      wch: 16
+    }, {
+      wch: 13
+    }, {
+      wch: 18
+    }, {
+      wch: 15
+    }, {
+      wch: 40
+    }, {
+      wch: 24
+    }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "운송장");
+    XLSX.writeFile(wb, `운송장_${isLotte ? "롯데" : "CJ"}_사자창고_${dateCode}.xlsx`);
+    showToast(`✓ ${which} 운송장 ${list.length}명 저장했습니다.`);
+  };
+
   /* ---------- 엑셀 저장 (원본 양식 시트 구조) ---------- */
   const exportXlsx = () => {
     const wb = XLSX.utils.book_new();
@@ -1903,10 +1961,36 @@ function App() {
     XLSX.utils.book_append_sheet(wb, ws3, "3. 택배_출고_발주서");
 
     // 4. 송장출력_복사용(롯데) — 공통 빌더 사용 (전체 백업)
-    XLSX.utils.book_append_sheet(wb, buildShipSheet(paidLines), "4. 송장출력_복사용(롯데)");
+    XLSX.utils.book_append_sheet(wb, buildShipSheet(paidLines, true), "4. 송장출력_복사용(롯데)");
 
     // 5. 송장출력_복사용(CJ대한통운) — 공통 빌더 사용 (전체 백업)
-    XLSX.utils.book_append_sheet(wb, buildCjSheet(paidLines), "5. 송장출력_복사용(CJ대한통운)");
+    XLSX.utils.book_append_sheet(wb, buildCjSheet(paidLines, true), "5. 송장출력_복사용(CJ대한통운)");
+
+    // 6. 운송장_조회 — 업로드 탭에서 조회된 송장번호 (롯데·CJ 통합 · 이름 가나다순)
+    if (shipData.length > 0) {
+      const s6 = [["이름", "닉네임", "택배사", "송장번호", "연락처", "주소"]];
+      [...shipData].sort((a, b) => String(a.name || a.nick).localeCompare(String(b.name || b.nick), "ko")).forEach(d => {
+        const c = cust(d.nick);
+        s6.push([d.name || c.name || d.nick, d.nick, d.carrier || "", d.tracking || "", d.phone || c.phone || "", d.addr || c.addr || ""]);
+      });
+      const withTrk = shipData.filter(d => d.tracking).length;
+      s6.push(["합계", `${shipData.length}명`, "", `송장 ${withTrk}건 · 미입력 ${shipData.length - withTrk}건`, "", ""]);
+      const ws6 = XLSX.utils.aoa_to_sheet(s6);
+      ws6["!cols"] = [{
+        wch: 12
+      }, {
+        wch: 16
+      }, {
+        wch: 13
+      }, {
+        wch: 18
+      }, {
+        wch: 15
+      }, {
+        wch: 40
+      }];
+      XLSX.utils.book_append_sheet(wb, ws6, "6. 운송장_조회");
+    }
 
     // 복원용 숨김 시트 (불러오기 시 사용)
     appendAppData(wb);
@@ -2906,7 +2990,22 @@ function App() {
   }, "롯데 운송장 업로드"), /*#__PURE__*/React.createElement("button", {
     className: "btn cj",
     onClick: () => cjFileRef.current && cjFileRef.current.click()
-  }, "CJ 운송장 업로드")), shipData.length > 0 && /*#__PURE__*/React.createElement("input", {
+  }, "CJ 운송장 업로드")), /*#__PURE__*/React.createElement("div", {
+    className: "uprow",
+    style: {
+      marginTop: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn",
+    disabled: lotteShipCount === 0,
+    onClick: () => exportTrackXlsx("롯데"),
+    title: `운송장_롯데_사자창고_${dateCode}.xlsx`
+  }, "⬇ 롯데 업로드 엑셀 다운", lotteShipCount > 0 ? ` (${lotteShipCount}명)` : ""), /*#__PURE__*/React.createElement("button", {
+    className: "btn",
+    disabled: cjShipCount === 0,
+    onClick: () => exportTrackXlsx("CJ"),
+    title: `운송장_CJ_사자창고_${dateCode}.xlsx`
+  }, "⬇ CJ 업로드 엑셀 다운", cjShipCount > 0 ? ` (${cjShipCount}명)` : "")), shipData.length > 0 && /*#__PURE__*/React.createElement("input", {
     className: "in search",
     style: {
       marginTop: 12
