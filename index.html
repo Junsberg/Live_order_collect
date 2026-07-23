@@ -2093,7 +2093,10 @@ function App() {
   };
 
   /* ---------- 렌더 ---------- */
-  const tabs = [["product", "① 상품", products.length], ["order", "② 주문", activeOrders.length], ["settle", "③ 정산", nickList.length - paidCount], ["ship", "④ 출고", paidLines.length], ["upload", "⑤ 업로드", shipData.length], ["warehouse", "📦 창고", totalPickupQty], ["extras", "🧾 영수증", cashList.length], ["settings", "⚙️ 설정", 0]];
+  const cashPending = cashList.length - cashIssuedCount; // 현금영수증 미발행 건수
+  const tabs = [["product", "① 상품", products.length], ["order", "② 주문", activeOrders.length], ["settle", "③ 정산", nickList.length - paidCount], ["ship", "④ 출고", paidLines.length], ["upload", "⑤ 업로드", shipData.length], ["warehouse", "📦 창고", totalPickupQty], ["extras", "🧾 영수증", cashList.length, cashPending > 0],
+  // 4번째 = 깜빡임 여부
+  ["settings", "⚙️ 설정", 0]];
   return /*#__PURE__*/React.createElement("div", {
     className: "app"
   }, /*#__PURE__*/React.createElement("style", null, CSS), intro && /*#__PURE__*/React.createElement("div", {
@@ -2213,12 +2216,13 @@ function App() {
     onClick: () => fileRef.current && fileRef.current.click()
   }, "불러오기"))), /*#__PURE__*/React.createElement("div", {
     className: "tabs"
-  }, tabs.map(([k, label, badge]) => /*#__PURE__*/React.createElement("button", {
+  }, tabs.map(([k, label, badge, blink]) => /*#__PURE__*/React.createElement("button", {
     key: k,
     className: "tab" + (tab === k ? " on" : ""),
-    onClick: () => setTab(k)
+    onClick: () => setTab(k),
+    title: blink ? `현금영수증 미발행 ${cashPending}건` : undefined
   }, label, badge > 0 && /*#__PURE__*/React.createElement("span", {
-    className: "badge"
+    className: "badge" + (blink ? " blink" : "")
   }, badge)))), tab === "product" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
   }, /*#__PURE__*/React.createElement("div", {
@@ -3254,7 +3258,11 @@ function App() {
     className: "cardtitle"
   }, "현금영수증 발행 ", /*#__PURE__*/React.createElement("span", {
     className: "sub"
-  }, "번호를 입력한 ", cashList.length, "명 · 발행 ", cashIssuedCount, "명")), cashList.length === 0 ? /*#__PURE__*/React.createElement("div", {
+  }, "번호를 입력한 ", cashList.length, "명 · 발행 ", cashIssuedCount, "명")), cashPending > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "cashalert"
+  }, "⚠ 아직 ", /*#__PURE__*/React.createElement("b", null, cashPending, "명"), " 미발행입니다."), cashList.length > 0 && cashPending === 0 && /*#__PURE__*/React.createElement("div", {
+    className: "cashdone"
+  }, "✓ ", cashList.length, "명 모두 발행 완료"), cashList.length === 0 ? /*#__PURE__*/React.createElement("div", {
     className: "empty"
   }, "현금영수증 번호를 입력한 주문자가 없습니다.", /*#__PURE__*/React.createElement("br", null), "③ 정산 탭의 「현금영수증」 버튼에서 번호를 입력하세요.") : /*#__PURE__*/React.createElement("div", {
     className: "cashlist"
@@ -3889,6 +3897,25 @@ const CSS = `
 .camtsub { font-size: 12px; font-weight: 500; color: #8a919c; }
 .cashbtn { padding: 9px 16px; border-radius: 10px; border: 1px solid #e8334a; background: #fff; color: #e8334a; font-size: 14px; font-weight: 700; cursor: pointer; white-space: nowrap; font-family: inherit; }
 .cashbtn.on { background: #0f766e; border-color: #0f766e; color: #fff; }
+/* 현금영수증 미발행 알림 — 깜빡임 */
+@keyframes sajablink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+.badge.blink { animation: sajablink 1s ease-in-out infinite; }
+.cashrow:not(.issued) .cashbtn { animation: sajablink 1s ease-in-out infinite; }
+.cashalert {
+  margin: 8px 0 4px; padding: 9px 13px; border-radius: 10px;
+  font-size: 14px; font-weight: 700; color: #b03a2e;
+  background: #fdecea; border: 1px solid #f5c6c0;
+  animation: sajablink 1s ease-in-out infinite;
+}
+.cashdone {
+  margin: 8px 0 4px; padding: 9px 13px; border-radius: 10px;
+  font-size: 14px; font-weight: 700; color: #0f766e;
+  background: #e7f5f1; border: 1px solid #b6e2d3;
+}
+/* 깜빡임을 불편해하는 설정이면 정지 (색상은 유지) */
+@media (prefers-reduced-motion: reduce) {
+  .badge.blink, .cashrow:not(.issued) .cashbtn, .cashalert { animation: none; }
+}
 
 /* 좁은 폰(아이폰 계열 ~430px): 상단바 2줄 재배치 — 날짜칸 잘림 방지 + 헤더 높이 절감
    1줄 = 금액·내역 / 2줄 = LIVE점·날짜·엑셀저장·불러오기 */
