@@ -1751,41 +1751,24 @@ function App() {
   const lotteShipCount = useMemo(() => shipData.filter(d => (d.carrier || "").includes("롯데")).length, [shipData]);
   const cjShipCount = useMemo(() => shipData.filter(d => (d.carrier || "").includes("CJ")).length, [shipData]);
 
-  // 업로드 탭 — 조회된 운송장을 택배사별로 엑셀 저장 (출고 접수 파일과 분리)
+  // 업로드 탭 — 조회된 운송장을 택배사별로 엑셀 저장
+  // 양식은 ④ 출고탭 다운로드와 동일하게 하되, 송장번호만 채워서 내보낸다. (합계 행 없음)
   const exportTrackXlsx = which => {
     const isLotte = which === "롯데";
-    const list = shipData.filter(d => (d.carrier || "").includes(isLotte ? "롯데" : "CJ"));
-    if (list.length === 0) {
+    const nicks = new Set(shipData.filter(d => (d.carrier || "").includes(isLotte ? "롯데" : "CJ")).map(d => d.nick));
+    if (nicks.size === 0) {
       showToast(`${which} 운송장 조회 결과가 없습니다.`);
       return;
     }
-    const rows = [["이름", "닉네임", "택배사", "송장번호", "연락처", "주소", "배송요청"]];
-    [...list].sort((a, b) => String(a.name || a.nick).localeCompare(String(b.name || b.nick), "ko")).forEach(d => {
-      const c = cust(d.nick);
-      rows.push([d.name || c.name || d.nick, d.nick, d.carrier || "", d.tracking || "", d.phone || c.phone || "", d.addr || c.addr || "", c.req || ""]);
-    });
-    const withTrk = list.filter(d => d.tracking).length;
-    rows.push(["합계", `${list.length}명`, "", `송장 ${withTrk}건 · 미입력 ${list.length - withTrk}건`, "", "", ""]);
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-    ws["!cols"] = [{
-      wch: 12
-    }, {
-      wch: 16
-    }, {
-      wch: 13
-    }, {
-      wch: 18
-    }, {
-      wch: 15
-    }, {
-      wch: 40
-    }, {
-      wch: 24
-    }];
+    const lines = activeOrders.filter(o => nicks.has(o.nick));
+    if (lines.length === 0) {
+      showToast("해당하는 주문을 찾지 못했습니다.");
+      return;
+    }
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "운송장");
+    if (isLotte) XLSX.utils.book_append_sheet(wb, buildShipSheet(lines, true), "4. 송장출력_복사용(롯데)");else XLSX.utils.book_append_sheet(wb, buildCjSheet(lines, true), "Sheet1");
     XLSX.writeFile(wb, `운송장_${isLotte ? "롯데" : "CJ"}_사자창고_${dateCode}.xlsx`);
-    showToast(`✓ ${which} 운송장 ${list.length}명 저장했습니다.`);
+    showToast(`✓ ${which} 운송장 ${nicks.size}명 저장했습니다.`);
   };
 
   /* ---------- 엑셀 저장 (원본 양식 시트 구조) ---------- */
