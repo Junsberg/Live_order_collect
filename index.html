@@ -1859,9 +1859,11 @@ function App() {
     setProdImport(null);
   };
 
-  // 택배사별 조회 건수 (다운로드 버튼 활성화 판단용)
-  const lotteShipCount = useMemo(() => shipData.filter(d => (d.carrier || "").includes("롯데")).length, [shipData]);
-  const cjShipCount = useMemo(() => shipData.filter(d => (d.carrier || "").includes("CJ")).length, [shipData]);
+  // 주문서가 살아있는 닉네임 (주문 삭제된 송장 기록 구분용)
+  const activeNickSet = useMemo(() => new Set(activeOrders.map(o => o.nick)), [activeOrders]);
+  // 택배사별 조회 건수 — 실제 다운로드 파일에 담길 인원 기준 (주문 삭제된 사람 제외)
+  const lotteShipCount = useMemo(() => shipData.filter(d => (d.carrier || "").includes("롯데") && activeNickSet.has(d.nick)).length, [shipData, activeNickSet]);
+  const cjShipCount = useMemo(() => shipData.filter(d => (d.carrier || "").includes("CJ") && activeNickSet.has(d.nick)).length, [shipData, activeNickSet]);
 
   // 업로드 탭 — 조회된 운송장을 택배사별로 엑셀 저장
   // 양식은 ④ 출고탭 다운로드와 동일하게 하되, 송장번호만 채워서 내보낸다. (합계 행 없음)
@@ -1874,13 +1876,15 @@ function App() {
     }
     const lines = activeOrders.filter(o => nicks.has(o.nick));
     if (lines.length === 0) {
-      showToast("해당하는 주문을 찾지 못했습니다.");
+      showToast("송장은 있지만 주문서가 없는 사람뿐이라 저장할 내용이 없습니다. (주문 삭제됨)");
       return;
     }
+    const saved = new Set(lines.map(o => o.nick));
+    const skipped = [...nicks].filter(n => !saved.has(n));
     const wb = XLSX.utils.book_new();
     if (isLotte) XLSX.utils.book_append_sheet(wb, buildShipSheet(lines, true), "4. 송장출력_복사용(롯데)");else XLSX.utils.book_append_sheet(wb, buildCjSheet(lines, true), "Sheet1");
     XLSX.writeFile(wb, `운송장_${isLotte ? "롯데" : "CJ"}_사자창고_${dateCode}.xlsx`);
-    showToast(`✓ ${which} 운송장 ${nicks.size}명 저장했습니다.`);
+    showToast(`✓ ${which} 운송장 ${saved.size}명 저장했습니다.` + (skipped.length ? ` (주문서 없는 ${skipped.length}명 제외: ${skipped.slice(0, 3).join(", ")}${skipped.length > 3 ? " 외" : ""})` : ""));
   };
 
   /* ---------- 엑셀 저장 (원본 양식 시트 구조) ---------- */
@@ -2562,8 +2566,16 @@ function App() {
   }, "닉네임을 먼저 입력하면 상품 버튼·직접입력이 활성화됩니다.")), nick.trim() && (byNick[nick.trim()] || []).length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "card focus"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "cardtitle"
-  }, "「", nick.trim(), "」 현재 주문 · 합계 ", won((byNick[nick.trim()] || []).reduce((s, o) => s + o.price * o.qty, 0)), "원"), orders.filter(o => o.nick === nick.trim()).map(o => /*#__PURE__*/React.createElement(OrderRow, {
+    className: "rowbetween"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
+  }, "「", nick.trim(), "」 현재 주문 · 합계 ", won((byNick[nick.trim()] || []).reduce((s, o) => s + o.price * o.qty, 0)), "원"), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm delordbtn" + (delNickArm === nick.trim() ? " armed" : ""),
+    onClick: () => delNickOrders(nick.trim())
+  }, delNickArm === nick.trim() ? "한 번 더 누르면 삭제!" : "주문서 삭제")), orders.filter(o => o.nick === nick.trim()).map(o => /*#__PURE__*/React.createElement(OrderRow, {
     key: o.id,
     o: o,
     chgQty: chgQty,
@@ -3096,7 +3108,7 @@ function App() {
     className: "tblwrap"
   }, /*#__PURE__*/React.createElement("table", {
     className: "tbl"
-  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "닉네임"), /*#__PURE__*/React.createElement("th", null, "택배 상품명"), /*#__PURE__*/React.createElement("th", null, "이름"), /*#__PURE__*/React.createElement("th", null, "연락처"), /*#__PURE__*/React.createElement("th", null, "주소"))), /*#__PURE__*/React.createElement("tbody", null, paidLines.map(o => {
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "닉네임"), /*#__PURE__*/React.createElement("th", null, "택배 상품명"), /*#__PURE__*/React.createElement("th", null, "이름"), /*#__PURE__*/React.createElement("th", null, "연락처"), /*#__PURE__*/React.createElement("th", null, "주소"))), /*#__PURE__*/React.createElement("tbody", null, sortLinesByName(paidLines).map(o => {
     const c = cust(o.nick);
     const missing = !c.addr || !c.phone;
     return /*#__PURE__*/React.createElement("tr", {
@@ -3167,18 +3179,23 @@ function App() {
       className: "tblwrap"
     }, /*#__PURE__*/React.createElement("table", {
       className: "tbl"
-    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "닉네임"), /*#__PURE__*/React.createElement("th", null, "이름"), /*#__PURE__*/React.createElement("th", null, "연락처"), /*#__PURE__*/React.createElement("th", null, "주소"), /*#__PURE__*/React.createElement("th", null, "택배사"), /*#__PURE__*/React.createElement("th", null, "운송장번호"), /*#__PURE__*/React.createElement("th", null, "안내"))), /*#__PURE__*/React.createElement("tbody", null, filtered.map((d, i) => /*#__PURE__*/React.createElement("tr", {
-      key: i,
-      className: d.tracking ? "" : "rowwarn"
-    }, /*#__PURE__*/React.createElement("td", {
-      className: "whname"
-    }, d.nick), /*#__PURE__*/React.createElement("td", null, d.name || "-"), /*#__PURE__*/React.createElement("td", null, d.phone || "-"), /*#__PURE__*/React.createElement("td", null, d.addr || "-"), /*#__PURE__*/React.createElement("td", null, d.carrier || "-"), /*#__PURE__*/React.createElement("td", {
-      className: "trackcell"
-    }, d.tracking || "미입력"), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("button", {
-      className: "btn sm primary",
-      disabled: !d.tracking,
-      onClick: () => copyText(trackMsg(d), "trk-" + d.nick)
-    }, copiedId === "trk-" + d.nick ? "복사됨 ✓" : "운송장 복사"))))))));
+    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "닉네임"), /*#__PURE__*/React.createElement("th", null, "이름"), /*#__PURE__*/React.createElement("th", null, "연락처"), /*#__PURE__*/React.createElement("th", null, "주소"), /*#__PURE__*/React.createElement("th", null, "택배사"), /*#__PURE__*/React.createElement("th", null, "운송장번호"), /*#__PURE__*/React.createElement("th", null, "안내"))), /*#__PURE__*/React.createElement("tbody", null, filtered.map((d, i) => {
+      const orphan = !activeNickSet.has(d.nick); // 주문서가 삭제된 송장 기록
+      return /*#__PURE__*/React.createElement("tr", {
+        key: i,
+        className: orphan ? "roworphan" : d.tracking ? "" : "rowwarn"
+      }, /*#__PURE__*/React.createElement("td", {
+        className: "whname"
+      }, d.nick, orphan && /*#__PURE__*/React.createElement("span", {
+        className: "orphanbadge"
+      }, "주문 삭제됨")), /*#__PURE__*/React.createElement("td", null, d.name || "-"), /*#__PURE__*/React.createElement("td", null, d.phone || "-"), /*#__PURE__*/React.createElement("td", null, d.addr || "-"), /*#__PURE__*/React.createElement("td", null, d.carrier || "-"), /*#__PURE__*/React.createElement("td", {
+        className: "trackcell"
+      }, d.tracking || "미입력"), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("button", {
+        className: "btn sm primary",
+        disabled: !d.tracking,
+        onClick: () => copyText(trackMsg(d), "trk-" + d.nick)
+      }, copiedId === "trk-" + d.nick ? "복사됨 ✓" : "운송장 복사")));
+    })))));
   })()), tab === "warehouse" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
   }, /*#__PURE__*/React.createElement("div", {
@@ -3790,6 +3807,13 @@ const CSS = `
 .tbl .ok { color: #0f766e; font-weight: 700; }
 .tbl .warn { color: #e8334a; font-weight: 700; }
 .rowwarn td { background: #fff6f7; }
+/* 주문서가 삭제된 송장 기록 — 연빨강으로 구분 (발송 사실 기록용으로만 남음) */
+.roworphan td { background: #fbe0e0; color: #8a5a5a; }
+.orphanbadge {
+  display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; color: #b03a2e;
+  background: #fff; border: 1px solid #e8a9a3; vertical-align: middle; white-space: nowrap;
+}
 .foot { text-align: center; font-size: 12px; color: #a7aeb8; padding: 24px 0 8px; }
 .shipdl { border-color: #0f766e; }
 .shipcj { border-color: #d81f26; }
@@ -3897,6 +3921,10 @@ const CSS = `
 .camtsub { font-size: 12px; font-weight: 500; color: #8a919c; }
 .cashbtn { padding: 9px 16px; border-radius: 10px; border: 1px solid #e8334a; background: #fff; color: #e8334a; font-size: 14px; font-weight: 700; cursor: pointer; white-space: nowrap; font-family: inherit; }
 .cashbtn.on { background: #0f766e; border-color: #0f766e; color: #fff; }
+/* 현재 주문 카드 — 주문서 전체 삭제 (2단 확인) */
+.delordbtn { flex-shrink: 0; color: #d81f26; border-color: #f0b9bb; background: #fff; font-weight: 700; }
+.delordbtn:hover { background: #fdf2f2; }
+.delordbtn.armed { color: #fff; background: #d81f26; border-color: #d81f26; animation: sajablink 1s ease-in-out infinite; }
 /* 현금영수증 미발행 알림 — 깜빡임 */
 @keyframes sajablink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 /* 탭 전체가 흰색 ↔ 빨강으로 깜빡 (미처리 확실히 알림) */
