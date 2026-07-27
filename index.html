@@ -2382,6 +2382,17 @@ function App() {
     value: normTrk(d.tracking),
     carrier: d.carrier || ""
   });
+
+  /* 위탁출고 표시 — 파일에는 구분이 없으므로 손으로 체크한다.
+     ⚠ 표시 전용이다. 택배사·다운로드·엑셀 어디에도 영향을 주지 않는다.
+     (우리가 직접 접수한 건은 운송장 조회·배송흐름이 보이지만, 위탁은 번호만 받아서 넣기 때문에 구분이 필요) */
+  const toggleConsign = nick => {
+    setShipData(prev => prev.map(d => d.nick === nick ? {
+      ...d,
+      consign: !d.consign
+    } : d));
+  };
+  const consignCount = shipData.filter(d => d.consign).length;
   const saveTrkEdit = () => {
     if (!trkEdit) return;
     const {
@@ -2566,6 +2577,174 @@ function App() {
   /* ---------- 상품목록 파일 (방송 장소별 세팅) ---------- */
   const prodFileRef = useRef(null);
   const [prodImport, setProdImport] = useState(null); // {name, list} — 교체/추가 선택 대기
+
+  /* ---------- 마감 점검 (0-13) ----------
+     방송이 끝났을 때 빠뜨린 게 없는지 한 화면에서 확인한다.
+     ⚠ 검사 항목을 배열로 만든다. 나중에 「지난 방송 미발행」·「요약본 지문 대조」를
+        끼워 넣을 때 통째로 다시 짜지 않도록. (설계안 5-13 · 0단계 버전과 서버 버전이 다름) */
+  const [closeOpen, setCloseOpen] = useState(false);
+  const [lastExcelAt, setLastExcelAt] = useState(0); // 엑셀 저장 시각 (그 날짜 기준)
+  useEffect(() => {
+    setLastExcelAt(0);
+  }, [bdate]); // 날짜를 바꾸면 그 날짜 기준으로 다시 센다
+
+  const closeChecks = useMemo(() => {
+    const list = [];
+    const push = o => list.push(o);
+    const nk = arr => arr.slice(0, 4).join(", ") + (arr.length > 4 ? ` 외 ${arr.length - 4}명` : "");
+
+    // 1) 안내 발송
+    const notified = nickList.filter(x => cust(x).notified);
+    push({
+      key: "notify",
+      ok: nickList.length > 0 && notified.length === nickList.length,
+      label: "안내 발송",
+      detail: `${notified.length} / ${nickList.length}`,
+      names: nickList.filter(x => !cust(x).notified),
+      tab: "settle"
+    });
+
+    // 2) 배송지 미입력 — 택배로 나가는 사람만 (픽업은 주소가 필요 없다)
+    const needAddr = paidNicks.filter(x => {
+      const c = cust(x);
+      return !c.pickup && (!String(c.addr || "").trim() || !String(c.name || "").trim());
+    });
+    push({
+      key: "addr",
+      ok: needAddr.length === 0,
+      label: "배송지 미입력",
+      detail: needAddr.length ? `${needAddr.length}명` : "없음",
+      names: needAddr,
+      tab: "settle"
+    });
+
+    // 3) 운송장 미업로드 — 출고 대상인데 송장이 없는 사람
+    const trkMap = {};
+    shipData.forEach(d => {
+      if (normTrk(d.tracking)) trkMap[d.nick] = normTrk(d.tracking);
+    });
+    const shipTargets = [...new Set(paidLines.map(o => o.nick))]; // 택배로 나갈 사람
+    const noTrk = shipTargets.filter(x => !trkMap[x]);
+    push({
+      key: "trk",
+      ok: noTrk.length === 0,
+      label: "운송장 미업로드",
+      detail: noTrk.length ? `${noTrk.length}명` : `${shipTargets.length}명 완료`,
+      names: noTrk,
+      tab: "upload"
+    });
+
+    // 4) 현금영수증 미발행
+    const noCash = cashList.filter(x => !cust(x).cashIssued);
+    push({
+      key: "cash",
+      ok: noCash.length === 0,
+      label: "현금영수증 미발행",
+      detail: noCash.length ? `${noCash.length}명` : cashList.length ? `${cashList.length}명 발행완료` : "신청 없음",
+      names: noCash,
+      tab: "extras"
+    });
+
+    // 5) 재안내 필요 — 안내 후 운송장이 바뀐 사람
+    const renotify = shipData.filter(d => d.renotify).map(d => d.nick);
+    push({
+      key: "renotify",
+      ok: renotify.length === 0,
+      label: "재안내 필요",
+      detail: renotify.length ? `${renotify.length}명` : "없음",
+      names: renotify,
+      tab: "upload"
+    });
+
+    // 6) 창고 체크
+    const whTotal = Object.keys(pivot).length;
+    const whDone = Object.keys(pivot).filter(x => pickState[x]).length;
+    push({
+      key: "wh",
+      ok: whTotal === 0 || whDone === whTotal,
+      label: "창고 체크",
+      detail: `${whDone} / ${whTotal}종`,
+      names: [],
+      tab: "warehouse"
+    });
+
+    // 7) 엑셀 저장
+    const savedToday = lastExcelAt > 0;
+    push({
+      key: "excel",
+      ok: savedToday,
+      label: "엑셀 저장",
+      detail: savedToday ? `완료 (${new Date(lastExcelAt).toLocaleTimeString("ko-KR", {
+        hour: "2-digit",
+        minute: "2-digit"
+      })})` : "아직 안 함",
+      names: [],
+      tab: null
+    });
+
+    // --- 데이터 자가 점검 (5-14) — 조용히 틀린 것을 잡는다 ---
+    // 운송장은 있는데 주문이 없음 = 환불 처리를 안 했거나 주문서를 지움
+    const aliveNicks = new Set(activeOrders.map(o => o.nick));
+    const orphan = shipData.filter(d => normTrk(d.tracking) && !aliveNicks.has(d.nick)).map(d => d.nick);
+    push({
+      key: "orphan",
+      ok: orphan.length === 0,
+      label: "운송장은 있는데 주문 없음",
+      detail: orphan.length ? `${orphan.length}명` : "없음",
+      names: orphan,
+      tab: "upload",
+      warn: true
+    });
+
+    // 운송장 번호 중복 = 파일을 두 번 올렸거나 잘못 입력
+    const seen = {},
+      dupTrk = [];
+    shipData.forEach(d => {
+      const t = normTrk(d.tracking);
+      if (!t) return;
+      if (seen[t] && !dupTrk.includes(seen[t])) dupTrk.push(`${seen[t]}·${d.nick}`);
+      seen[t] = d.nick;
+    });
+    push({
+      key: "duptrk",
+      ok: dupTrk.length === 0,
+      label: "운송장 번호 중복",
+      detail: dupTrk.length ? `${dupTrk.length}건` : "없음",
+      names: dupTrk,
+      tab: "upload",
+      warn: true
+    });
+
+    // 재고 음수 = 세팅한 것보다 많이 팔림
+    const overSold = [];
+    products.forEach(p => {
+      if (p.options && p.options.length) {
+        expandProduct(p).forEach(c => {
+          if (p.stocks && p.stocks[c.key] != null) {
+            const sold = activeOrders.filter(o => o.name === c.name).reduce((t, o) => t + o.qty, 0);
+            if (sold > p.stocks[c.key]) overSold.push(`${c.name}(${sold}/${p.stocks[c.key]})`);
+          }
+        });
+      } else if (p.stock != null) {
+        const sold = activeOrders.filter(o => o.name === p.name).reduce((t, o) => t + o.qty, 0);
+        if (sold > p.stock) overSold.push(`${p.name}(${sold}/${p.stock})`);
+      }
+    });
+    push({
+      key: "stock",
+      ok: overSold.length === 0,
+      label: "재고보다 많이 팔림",
+      detail: overSold.length ? `${overSold.length}종` : "없음",
+      names: overSold,
+      tab: "product",
+      warn: true
+    });
+    return list.map(x => ({
+      ...x,
+      nkText: nk(x.names || [])
+    }));
+  }, [nickList, customers, paidNicks, paidLines, shipData, cashList, pivot, pickState, lastExcelAt, products, activeOrders]);
+  const closeLeft = closeChecks.filter(c => !c.ok).length;
 
   /* ---------- 단골 배송지 사전 (L-1) ----------
      같은 손님이 다시 주문할 때 배송지를 매번 새로 받지 않도록 쌓아두는 사전.
@@ -3135,10 +3314,10 @@ function App() {
 
     // 6. 운송장_조회 — 업로드 탭에서 조회된 송장번호 (롯데·CJ 통합 · 이름 가나다순)
     if (shipData.length > 0) {
-      const s6 = [["이름", "닉네임", "택배사", "송장번호", "연락처", "주소"]];
+      const s6 = [["이름", "닉네임", "택배사", "위탁", "송장번호", "연락처", "주소"]];
       [...shipData].sort((a, b) => String(a.name || a.nick).localeCompare(String(b.name || b.nick), "ko")).forEach(d => {
         const c = cust(d.nick);
-        s6.push([d.name || c.name || d.nick, d.nick, d.carrier || "", normTrk(d.tracking), d.phone || c.phone || "", d.addr || c.addr || ""]);
+        s6.push([d.name || c.name || d.nick, d.nick, d.carrier || "", d.consign ? "위탁" : "", normTrk(d.tracking), d.phone || c.phone || "", d.addr || c.addr || ""]);
       });
       const withTrk = shipData.filter(d => d.tracking).length;
       s6.push(["합계", `${shipData.length}명`, "", `송장 ${withTrk}건 · 미입력 ${shipData.length - withTrk}건`, "", ""]);
@@ -3149,6 +3328,8 @@ function App() {
         wch: 16
       }, {
         wch: 13
+      }, {
+        wch: 6
       }, {
         wch: 18
       }, {
@@ -3162,6 +3343,7 @@ function App() {
     // 복원용 숨김 시트 (불러오기 시 사용)
     appendAppData(wb);
     XLSX.writeFile(wb, `${dateCode}_사자창고_라이브.xlsx`);
+    setLastExcelAt(Date.now()); // 마감 점검에서 「엑셀 저장 완료」 판정에 쓴다
   };
 
   /* ---------- 렌더 ---------- */
@@ -3241,7 +3423,56 @@ function App() {
   }, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("b", null, "⚠ 자동 저장이 안 되고 있습니다."), " ", saveState.quota ? "저장 공간이 꽉 찼습니다. 지금 바로 「엑셀 저장」으로 파일을 남겨주세요." : "지금 바로 「엑셀 저장」으로 파일을 남겨주세요. 새로고침하면 입력한 내용이 사라질 수 있습니다."), /*#__PURE__*/React.createElement("button", {
     className: "btn sm",
     onClick: exportXlsx
-  }, "엑셀 저장")), printMode && (() => {
+  }, "엑셀 저장")), closeOpen && /*#__PURE__*/React.createElement("div", {
+    className: "closewrap",
+    onClick: e => {
+      if (e.target === e.currentTarget) setCloseOpen(false);
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closecard"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closehead"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "closetitle"
+  }, "📋 마감 점검"), /*#__PURE__*/React.createElement("div", {
+    className: "sub"
+  }, bdate, " · 주문 ", activeOrders.length, "건 · 주문자 ", nickList.length, "명")), /*#__PURE__*/React.createElement("button", {
+    className: "btn",
+    onClick: () => setCloseOpen(false)
+  }, "닫기")), closeLeft === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "closedone"
+  }, "✅ 마감 완료 — 빠진 것이 없습니다") : /*#__PURE__*/React.createElement("div", {
+    className: "closeleft"
+  }, "확인이 필요한 항목 ", /*#__PURE__*/React.createElement("b", null, closeLeft), "건"), /*#__PURE__*/React.createElement("div", {
+    className: "closelist"
+  }, closeChecks.map(c => /*#__PURE__*/React.createElement("div", {
+    className: "closerow" + (c.ok ? " ok" : c.warn ? " warn" : " todo"),
+    key: c.key
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "closeicon"
+  }, c.ok ? "✅" : c.warn ? "❗" : "⚠️"), /*#__PURE__*/React.createElement("span", {
+    className: "closelabel"
+  }, c.label), /*#__PURE__*/React.createElement("span", {
+    className: "closedetail"
+  }, c.detail), /*#__PURE__*/React.createElement("span", {
+    className: "closenames"
+  }, c.ok ? "" : c.nkText), !c.ok && c.tab && /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    onClick: () => {
+      setTab(c.tab);
+      setCloseOpen(false);
+    }
+  }, "이동"), !c.ok && c.key === "excel" && /*#__PURE__*/React.createElement("button", {
+    className: "btn sm primary",
+    onClick: () => {
+      exportXlsx();
+    }
+  }, "엑셀 저장")))), /*#__PURE__*/React.createElement("div", {
+    className: "hint",
+    style: {
+      marginTop: 10
+    }
+  }, "❗ 표시는 데이터가 어긋난 것입니다 — 그냥 두면 나중에 원인을 찾기 어렵습니다."))), printMode && (() => {
     const grouped = {};
     shipLines.forEach(o => {
       (grouped[o.nick] = grouped[o.nick] || []).push(o);
@@ -3317,7 +3548,13 @@ function App() {
   }, "엑셀 저장"), /*#__PURE__*/React.createElement("button", {
     className: "btn upbtn",
     onClick: () => fileRef.current && fileRef.current.click()
-  }, "불러오기"))), /*#__PURE__*/React.createElement("div", {
+  }, "불러오기"), /*#__PURE__*/React.createElement("button", {
+    className: "btn closebtn" + (closeLeft === 0 ? " done" : ""),
+    onClick: () => setCloseOpen(true),
+    disabled: activeOrders.length === 0
+  }, "📋 마감", closeLeft > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "closebadge"
+  }, closeLeft)))), /*#__PURE__*/React.createElement("div", {
     className: "tabs"
   }, tabs.map(([k, label, badge, blink]) => /*#__PURE__*/React.createElement("button", {
     key: k,
@@ -4414,7 +4651,7 @@ function App() {
     className: "sub"
   }, "누적 ", shipData.length, "명 · 송장 ", shipData.filter(d => d.tracking).length, "명")), /*#__PURE__*/React.createElement("div", {
     className: "sub"
-  }, "택배사별 운송장 파일을 올리면 고객별 송장번호가 조회됩니다 (롯데·CJ 섞어서 누적 가능) · 운송장번호는 ✎ 로 직접 고칠 수 있습니다")), shipData.length > 0 && /*#__PURE__*/React.createElement("button", {
+  }, "택배사별 운송장 파일을 올리면 고객별 송장번호가 조회됩니다 (롯데·CJ 섞어서 누적 가능) · 운송장번호는 ✎ 로 직접 고칠 수 있습니다", " · ", /*#__PURE__*/React.createElement("b", null, "위탁출고"), "로 나간 건은 「위탁」에 체크해두세요", consignCount > 0 ? ` (${consignCount}건)` : "")), shipData.length > 0 && /*#__PURE__*/React.createElement("button", {
     className: "btn ghost",
     onClick: clearShipData
   }, "초기화")), /*#__PURE__*/React.createElement("div", {
@@ -4499,7 +4736,10 @@ function App() {
       className: "tblwrap"
     }, /*#__PURE__*/React.createElement("table", {
       className: "tbl"
-    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "닉네임"), /*#__PURE__*/React.createElement("th", null, "이름"), /*#__PURE__*/React.createElement("th", null, "연락처"), /*#__PURE__*/React.createElement("th", null, "주소"), /*#__PURE__*/React.createElement("th", null, "택배사"), /*#__PURE__*/React.createElement("th", null, "운송장번호"), /*#__PURE__*/React.createElement("th", null, "안내"))), /*#__PURE__*/React.createElement("tbody", null, filtered.map((d, i) => {
+    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "닉네임"), /*#__PURE__*/React.createElement("th", null, "이름"), /*#__PURE__*/React.createElement("th", null, "연락처"), /*#__PURE__*/React.createElement("th", null, "주소"), /*#__PURE__*/React.createElement("th", null, "택배사"), /*#__PURE__*/React.createElement("th", {
+      className: "consigncol",
+      title: "위탁출고로 나간 건에 체크하세요"
+    }, "위탁"), /*#__PURE__*/React.createElement("th", null, "운송장번호"), /*#__PURE__*/React.createElement("th", null, "안내"))), /*#__PURE__*/React.createElement("tbody", null, filtered.map((d, i) => {
       const orphan = !activeNickSet.has(d.nick); // 주문서가 삭제된 송장 기록
       return /*#__PURE__*/React.createElement("tr", {
         key: i,
@@ -4513,7 +4753,18 @@ function App() {
       }, "재안내 필요"), d.tracking && !d.verified && /*#__PURE__*/React.createElement("span", {
         className: "unverifiedbadge",
         title: "배송지 이름과 대조하지 못했습니다"
-      }, "미검증")), /*#__PURE__*/React.createElement("td", null, d.name || "-"), /*#__PURE__*/React.createElement("td", null, d.phone || "-"), /*#__PURE__*/React.createElement("td", null, d.addr || "-"), /*#__PURE__*/React.createElement("td", null, d.carrier || "-"), /*#__PURE__*/React.createElement("td", {
+      }, "미검증"), d.consign && /*#__PURE__*/React.createElement("span", {
+        className: "consignbadge"
+      }, "위탁")), /*#__PURE__*/React.createElement("td", null, d.name || "-"), /*#__PURE__*/React.createElement("td", null, d.phone || "-"), /*#__PURE__*/React.createElement("td", null, d.addr || "-"), /*#__PURE__*/React.createElement("td", null, d.carrier || "-"), /*#__PURE__*/React.createElement("td", {
+        className: "consigncol"
+      }, /*#__PURE__*/React.createElement("label", {
+        className: "consignbox",
+        title: d.consign ? "위탁출고 — 클릭하면 해제" : "위탁출고면 체크하세요"
+      }, /*#__PURE__*/React.createElement("input", {
+        type: "checkbox",
+        checked: !!d.consign,
+        onChange: () => toggleConsign(d.nick)
+      }))), /*#__PURE__*/React.createElement("td", {
         className: "trackcell"
       }, trkEdit && trkEdit.nick === d.nick ? /*#__PURE__*/React.createElement("div", {
         className: "trkedit"
@@ -5340,6 +5591,39 @@ const CSS = `
 .filterbtn.f-unpaid.on { background: #f5a623; border-color: #f5a623; color: #16191f; }
 .filterbtn.f-paid.on { background: #0f766e; border-color: #0f766e; color: #fff; }
 .warnbadge { display: inline-block; margin-left: 8px; padding: 2px 8px; font-size: 12px; font-weight: 700; color: #fff; background: #d81f26; border-radius: 999px; vertical-align: middle; }
+/* 위탁출고 표시 — 파일에 구분이 없어 손으로 체크 */
+.consigncol { width: 46px; text-align: center; }
+.consignbox { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; padding: 4px; }
+.consignbox input { width: 17px; height: 17px; accent-color: #7c3aed; cursor: pointer; }
+.consignbadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+  font-weight: 800; color: #fff; background: #7c3aed; white-space: nowrap; }
+
+/* 마감 점검 (0-13) */
+.btn.closebtn { position: relative; background: #16191f; border-color: #16191f; color: #fff; font-weight: 700; }
+.btn.closebtn.done { background: #0f766e; border-color: #0f766e; }
+.btn.closebtn:disabled { background: #cfd4db; border-color: #cfd4db; color: #fff; }
+.closebadge { display: inline-block; margin-left: 6px; min-width: 18px; padding: 0 5px; border-radius: 999px;
+  background: #e8334a; color: #fff; font-size: 11px; font-weight: 800; line-height: 18px; text-align: center; }
+.closewrap { position: fixed; inset: 0; z-index: 220; background: rgba(0,0,0,.45); display: flex;
+  align-items: flex-start; justify-content: center; padding: 40px 16px; overflow: auto; }
+.closecard { width: min(760px, 100%); background: #fff; border-radius: 16px; padding: 20px 22px; box-shadow: 0 20px 60px rgba(0,0,0,.35); }
+.closehead { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.closetitle { font-size: 19px; font-weight: 800; }
+.closedone { padding: 12px 14px; border-radius: 10px; background: #e3f6e9; color: #14713a; font-weight: 800; margin-bottom: 12px; }
+.closeleft { padding: 12px 14px; border-radius: 10px; background: #fff3cd; color: #7a5c00; font-weight: 800; margin-bottom: 12px; }
+.closelist { display: flex; flex-direction: column; gap: 6px; }
+.closerow { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid #e6e9ee; background: #fff; }
+.closerow.todo { border-color: #ffe08a; background: #fffdf5; }
+.closerow.warn { border-color: #e0a6a0; background: #fdf6f5; }
+.closeicon { width: 20px; text-align: center; }
+.closelabel { font-weight: 700; white-space: nowrap; }
+.closedetail { color: #4a515c; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.closenames { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8a919c; font-size: 13px; }
+@media (max-width: 640px) {
+  .closerow { flex-wrap: wrap; }
+  .closenames { flex-basis: 100%; }
+}
+
 /* 단골 배송지 (L-1) */
 .regbox { padding: 10px 12px; border: 1px solid #cfe0f7; border-radius: 10px; background: #f6faff; margin-bottom: 10px; }
 .regtop { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
