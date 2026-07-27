@@ -47,9 +47,22 @@ if (!window.storage) {
       }
     },
     set: async (k, v) => {
+      // ⚠ 실패를 삼키지 않는다. 예전에는 catch 후 성공한 것처럼 반환해서
+      //    용량이 꽉 차도 앱이 모르고 「자동 저장됨」을 계속 표시했다.
+      // 원자적 쓰기: 임시 키에 온전히 쓴 뒤 본 키로 옮긴다.
+      //    저장 도중 브라우저가 죽어도 본 키에는 이전 값이 그대로 남는다.
+      const tmp = "~tmp~" + k;
       try {
+        localStorage.setItem(tmp, v);
+        if (localStorage.getItem(tmp) !== v) throw new Error("VerifyFailed");
         localStorage.setItem(k, v);
-      } catch (e) {}
+        localStorage.removeItem(tmp);
+      } catch (e) {
+        try { localStorage.removeItem(tmp); } catch (e2) {}
+        const err = new Error(e && e.name === "QuotaExceededError" ? "QuotaExceeded" : (e && e.message) || "SaveFailed");
+        err.quota = !!(e && (e.name === "QuotaExceededError" || e.code === 22 || e.code === 1014));
+        throw err;
+      }
       return {
         key: k,
         value: v
@@ -193,6 +206,16 @@ const fmtTrk = s => {
   const n = normTrk(s);
   return n.length === 12 ? `${n.slice(0, 4)}-${n.slice(4, 8)}-${n.slice(8)}` : n;
 };
+// 운송장번호 자릿수 검증 — 국내 택배는 10~14자리.
+// ⚠ 셀이 밀려 엉뚱한 값(수량·우편번호·전화번호)이 운송장 칸으로 읽히는 것을 잡는다.
+//   숫자만 남기고 나서 검사하므로 하이픈 유무와 무관하다.
+const TRK_MIN = 10,
+  TRK_MAX = 14;
+const trkLenOk = s => {
+  const n = normTrk(s).length;
+  return n >= TRK_MIN && n <= TRK_MAX;
+};
+
 // 저장된 데이터 안의 운송장을 전부 숫자만으로 정리. 실제로 바뀐 게 있으면 changed>0.
 const migrateTrk = (shipData, customers) => {
   let changed = 0;
@@ -285,6 +308,15 @@ function App() {
   // 마지막으로 「불러오기」한 엑셀 파일명 {name, at}. 저장 payload와 무관한 별도 보관(schema 무변경)
   const [loadedFile, setLoadedFile] = useState(null);
   const [toasts, setToasts] = useState([]);
+  /* 저장 상태 — 「자동 저장됨」이 거짓말이 되지 않게 실제 결과를 담는다.
+     ok=정상 · fail=마지막 저장 실패 · quota=용량 초과 */
+  const [saveState, setSaveState] = useState({
+    ok: true,
+    at: 0,
+    quota: false,
+    msg: ""
+  });
+  const saveWarnRef = useRef(0);
   // 경고(⚠·❌)는 자동으로 사라지지 않고 닫기 버튼으로만 닫힘 — 중요한 알림을 놓치지 않도록
   // 일반 알림은 글자 수에 비례해 3~6초 유지
   const showToast = msg => {
@@ -302,6 +334,37 @@ function App() {
     }
   };
   const closeToast = id => setToasts(ts => ts.filter(t => t.id !== id));
+
+  /* 모든 저장은 이 함수를 지난다. 실패를 삼키지 않고 화면에 알린다.
+     ⚠ 방송 중 저장이 안 되고 있는 걸 모르면 그날 데이터가 통째로 날아간다.
+     같은 경고를 계속 띄우면 방해가 되므로 30초에 한 번만 알린다. */
+  const saveKey = async (key, value, label) => {
+    try {
+      const r = await window.storage.set(key, value);
+      if (r === null || r === undefined) throw new Error("SaveFailed");
+      setSaveState(p => p.ok ? p : {
+        ok: true,
+        at: Date.now(),
+        quota: false,
+        msg: ""
+      });
+      return true;
+    } catch (e) {
+      const quota = !!(e && e.quota);
+      setSaveState({
+        ok: false,
+        at: Date.now(),
+        quota,
+        msg: e && e.message || "SaveFailed"
+      });
+      const now = Date.now();
+      if (now - saveWarnRef.current > 30000) {
+        saveWarnRef.current = now;
+        showToast(quota ? `❌ 저장 공간이 꽉 찼습니다 — 지금 「엑셀 저장」을 눌러 파일로 남겨주세요 (${label || key})` : `❌ 자동 저장 실패 — 지금 「엑셀 저장」을 눌러 파일로 남겨주세요 (${label || key})`);
+      }
+      return false;
+    }
+  };
 
   // 엔터를 누르면 입력을 끝낸다 (모바일 키보드도 닫힘).
   // ⚠ 값은 그대로 남는다 — 주문탭 닉네임은 포커스가 풀려도 값이 있어야 상품을 이어서 누를 수 있다.
@@ -392,6 +455,11 @@ function App() {
   };
   const [memoOpen, setMemoOpen] = useState(false);
   const [memoText, setMemoText] = useState("");
+  const [memoSize, setMemoSize] = useState({
+    w: 360,
+    h: 420
+  });
+  const memoDrag = useRef(null);
   const memoLoaded = useRef(false);
 
   // 자유 메모는 방송 데이터와 무관한 「한 장」이라 별도 키에 따로 저장한다 (날짜를 바꿔도 그대로)
@@ -401,16 +469,62 @@ function App() {
         const r = await window.storage.get("saja:memo");
         if (r && r.value) setMemoText(r.value);
       } catch (e) {/* 없으면 빈 메모 */}
+      // 크기도 기억해둔다. 매번 다시 끌어 맞추면 번거롭다.
+      try {
+        const z = await window.storage.get("saja:memosize");
+        if (z && z.value) {
+          const v = JSON.parse(z.value);
+          if (v && v.w && v.h) setMemoSize(v);
+        }
+      } catch (e) {/* 없으면 기본 크기 */}
       memoLoaded.current = true;
     })();
   }, []);
   useEffect(() => {
     if (!memoLoaded.current) return; // 불러오기 전에 빈 값으로 덮어쓰지 않도록
     const t = setTimeout(() => {
-      window.storage.set("saja:memo", memoText).catch(() => {});
+      saveKey("saja:memo", memoText, "자유 메모");
     }, 400);
     return () => clearTimeout(t);
   }, [memoText]);
+
+  /* 크기 조절 손잡이 — 좌상단에 둔다.
+     패널이 화면 우하단에 붙어 있어 브라우저 기본 resize(우하단)는 화면 밖이라 잡기 어렵다.
+     오른쪽·아래가 고정이므로 왼쪽으로 끌면 넓어지고 위로 끌면 높아진다. */
+  const onMemoResizeStart = e => {
+    e.preventDefault();
+    const el = e.currentTarget;
+    try {
+      el.setPointerCapture(e.pointerId);
+    } catch (err) {}
+    memoDrag.current = {
+      x: e.clientX,
+      y: e.clientY,
+      w: memoSize.w,
+      h: memoSize.h
+    };
+  };
+  const onMemoResizeMove = e => {
+    const d = memoDrag.current;
+    if (!d) return;
+    const maxW = Math.max(240, window.innerWidth - 36);
+    const maxH = Math.max(180, window.innerHeight - 100);
+    const next = {
+      w: Math.min(maxW, Math.max(240, Math.round(d.w - (e.clientX - d.x)))),
+      // 왼쪽으로 끌면 +
+      h: Math.min(maxH, Math.max(180, Math.round(d.h - (e.clientY - d.y)))) // 위로 끌면 +
+    };
+    d.last = next; // ⚠ setState 는 즉시 반영되지 않는다. 저장할 값은 여기 담아둔다
+    setMemoSize(next);
+  };
+  const onMemoResizeEnd = e => {
+    const d = memoDrag.current;
+    if (d && d.last) saveKey("saja:memosize", JSON.stringify(d.last), "메모 크기");
+    memoDrag.current = null;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch (err) {}
+  };
   const saveMemoFile = () => {
     const blob = new Blob([memoText], {
       type: "text/plain;charset=utf-8"
@@ -482,7 +596,7 @@ function App() {
   useEffect(() => {
     if (!loaded) return;
     const t = setTimeout(() => {
-      window.storage.set("saja:session", JSON.stringify({
+      saveKey("saja:session", JSON.stringify({
         products,
         orders,
         customers,
@@ -492,7 +606,7 @@ function App() {
         settleHeader,
         trackHeader,
         shipData
-      })).catch(() => {});
+      }), "방송 데이터");
     }, 400);
     return () => clearTimeout(t);
   }, [products, orders, customers, shipFee, bdate, pickState, settleHeader, trackHeader, shipData, loaded]);
@@ -526,7 +640,8 @@ function App() {
   useEffect(() => {
     if (!loaded) return;
     try {
-      if (loadedFile) window.storage.set("saja:loadedFile", JSON.stringify(loadedFile)).catch(() => {});else window.storage.delete("saja:loadedFile").catch(() => {});
+      if (loadedFile) window.storage.set("saja:loadedFile", JSON.stringify(loadedFile)).catch(() => {}); // 표시용이라 실패해도 무해
+      else window.storage.delete("saja:loadedFile").catch(() => {});
     } catch (e) {}
   }, [loadedFile, loaded]);
 
@@ -1187,9 +1302,15 @@ function App() {
       ta.remove();
     }
     setCopiedId(id);
-    if (n) setCust(n, {
-      notified: true
-    });
+    if (n) {
+      setCust(n, {
+        notified: true
+      });
+      setShipData(prev => prev.map(d => d.nick === n && d.renotify ? {
+        ...d,
+        renotify: false
+      } : d));
+    }
     setTimeout(() => setCopiedId(null), 1500);
   };
 
@@ -1301,6 +1422,7 @@ function App() {
     const refundOrders = orders.filter(o => o.refund);
     const refundAmt = refundOrders.reduce((t, o) => t + o.price * o.qty, 0);
     const refundAllList = nickList.filter(n => cust(n).refundAll); // 전체환불자는 활성 주문이 0건이라 nicks 에 없음
+    const refundNickCount = new Set(refundOrders.map(o => o.nick)).size;
     const goods = activeOrders.reduce((s, o) => s + o.price * o.qty, 0);
     const feeSum = feeList.length * shipFee;
     const total = goods + feeSum;
@@ -1310,7 +1432,7 @@ function App() {
     const canceledCnt = orders.filter(o => o.canceled).length;
 
     // 1) 총괄 요약
-    const s1 = [[`사자창고 라이브 결산`, bdate], [], ["[매출]", ""], ["상품 매출", goods], ["배송비 수입", feeSum, `${feeList.length}명 × ${shipFee}원 (픽업 ${pickList.length}명 · 무료배송 ${freeList.length}명 제외)`], ["총 매출", total], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["미수금", total - paidTotal, `${nicks.length - paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0], ["입금률 (금액)", total ? Math.round(paidTotal / total * 100) / 100 : 0], [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", activeOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length], ["환불 건수", refundOrders.length], ["환불 금액", refundAmt, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 배송비 ${won(refundAllList.length * shipFee)}원 별도 환불` : ""], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(activeOrders.map(o => o.name)).size], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
+    const s1 = [[`사자창고 라이브 결산`, bdate], [], ["[매출]", ""], ["상품 매출", goods, "환불분 제외 · 실제로 판 것만"], ["배송비 수입", feeSum, `${feeList.length}명 × ${shipFee}원 (픽업 ${pickList.length}명 · 무료배송 ${freeList.length}명 · 전체환불 ${refundAllList.length}명 제외)`], ["총 매출", total], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["미수금", total - paidTotal, `${nicks.length - paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0], ["입금률 (금액)", total ? Math.round(paidTotal / total * 100) / 100 : 0], [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", activeOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length, "주문만 취소 (돈이 오가지 않음)"], [], ["[환불]", ""], ["환불 건수", refundOrders.length, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 부분환불 ${refundNickCount - refundAllList.length}명` : refundOrders.length ? `부분환불 ${refundNickCount}명` : ""], ["환불 상품금액", refundAmt], ["환불 배송비", refundAllList.length * shipFee, refundAllList.length ? `전체환불 ${refundAllList.length}명 × ${shipFee}원` : ""], ["환불 합계", refundAmt + refundAllList.length * shipFee, "실제로 돌려준 돈 · 위 매출에는 포함되어 있지 않음"], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(activeOrders.map(o => `${o.name}\u241f${o.price}`)).size, "같은 상품도 가격이 다르면 별개로 셈"], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
     const ws1 = XLSX.utils.aoa_to_sheet(s1);
     ws1["!cols"] = [{
       wch: 20
@@ -1319,22 +1441,26 @@ function App() {
     }, {
       wch: 40
     }];
-    ["D4", "D5", "D6", "D9", "D10", "D18"].forEach(() => {});
-    [4, 5, 6, 9, 10, 18].forEach(r => {
-      const c = ws1["B" + r];
-      if (c) c.z = "#,##0";
-    });
-    [11, 12].forEach(r => {
-      const c = ws1["B" + r];
-      if (c) c.z = "0%";
+    // ⚠ 행 번호를 박아두면 항목을 추가할 때마다 서식이 어긋난다. 라벨로 찾는다.
+    const MONEY = ["상품 매출", "배송비 수입", "총 매출", "입금 완료", "미수금", "객단가", "환불 상품금액", "환불 배송비", "환불 합계"];
+    const PCT = ["입금률 (인원)", "입금률 (금액)"];
+    s1.forEach((row, i) => {
+      const cell = ws1["B" + (i + 1)];
+      if (!cell) return;
+      if (MONEY.includes(row[0])) cell.z = "#,##0";else if (PCT.includes(row[0])) cell.z = "0%";
     });
     XLSX.utils.book_append_sheet(wb, ws1, "1. 총괄");
 
     // 2) 상품별 판매 실적 (매출순)
+    // ⚠ 집계 키는 「상품명 + 가격」. 상품명만으로 묶으면 막판 할인처럼 같은 상품을
+    //   다른 가격에 판 경우 단가·수량이 틀리게 나온다 (매출 합계는 맞아서 알아채기 어렵다).
+    //   환불된 주문은 activeOrders 에서 이미 빠져 있다 — 실제로 판 것만 집계한다.
     const pm = {};
     activeOrders.forEach(o => {
       const paid = cust(o.nick).paid;
-      pm[o.name] = pm[o.name] || {
+      const k = `${o.name}\u241f${o.price}`;
+      pm[k] = pm[k] || {
+        name: o.name,
         price: o.price,
         qty: 0,
         amt: 0,
@@ -1342,17 +1468,17 @@ function App() {
         unpaidQty: 0,
         buyers: new Set()
       };
-      pm[o.name].qty += o.qty;
-      pm[o.name].amt += o.price * o.qty;
-      pm[o.name][paid ? "paidQty" : "unpaidQty"] += o.qty;
-      pm[o.name].buyers.add(o.nick);
+      pm[k].qty += o.qty;
+      pm[k].amt += o.price * o.qty;
+      pm[k][paid ? "paidQty" : "unpaidQty"] += o.qty;
+      pm[k].buyers.add(o.nick);
     });
-    const plist = Object.entries(pm).sort((a, b) => b[1].amt - a[1].amt || a[0].localeCompare(b[0], "ko"));
+    const plist = Object.values(pm).sort((a, b) => b.amt - a.amt || a.name.localeCompare(b.name, "ko") || b.price - a.price);
     const s2 = [["순위", "상품명", "단가", "판매수량", "매출액", "매출비중", "구매자수", "입금수량", "미입금수량"]];
-    plist.forEach(([name, v], i) => {
-      s2.push([i + 1, name, v.price, v.qty, v.amt, goods ? Math.round(v.amt / goods * 10000) / 10000 : 0, v.buyers.size, v.paidQty, v.unpaidQty]);
+    plist.forEach((v, i) => {
+      s2.push([i + 1, v.name, v.price, v.qty, v.amt, goods ? Math.round(v.amt / goods * 10000) / 10000 : 0, v.buyers.size, v.paidQty, v.unpaidQty]);
     });
-    s2.push(["", "합계", "", totalQty, goods, 1, "", plist.reduce((s, x) => s + x[1].paidQty, 0), plist.reduce((s, x) => s + x[1].unpaidQty, 0)]);
+    s2.push(["", "합계", "", totalQty, goods, 1, "", plist.reduce((s, x) => s + x.paidQty, 0), plist.reduce((s, x) => s + x.unpaidQty, 0)]);
     const ws2 = XLSX.utils.aoa_to_sheet(s2);
     ws2["!cols"] = [{
       wch: 6
@@ -1384,16 +1510,21 @@ function App() {
     XLSX.utils.book_append_sheet(wb, ws2, "2. 상품별 실적");
 
     // 3) 고객별 정산 내역 (결제금액 큰 순)
-    const s3 = [["닉네임", "이름", "연락처", "상품금액", "배송비", "총 결제금액", "입금", "수령방식", "안내", "주문건수", "수량", "상품내역", "현금영수증", "특이사항"]];
-    const sortedNicks = [...nicks].sort((a, b) => sumOf(b) + feeOf(b) - (sumOf(a) + feeOf(a)) || a.localeCompare(b, "ko"));
+    // ⚠ 전체환불자는 활성 주문이 0건이라 nicks 에 없다. 환불 기록이 사라지지 않도록 따로 붙인다.
+    const s3nicks = [...nicks, ...refundAllList.filter(n => !nicks.includes(n))];
+    const s3 = [["닉네임", "이름", "연락처", "상품금액", "배송비", "총 결제금액", "입금", "환불", "수령방식", "안내", "주문건수", "수량", "상품내역", "현금영수증", "특이사항"]];
+    const sortedNicks = s3nicks.sort((a, b) => sumOf(b) + feeOf(b) - (sumOf(a) + feeOf(a)) || a.localeCompare(b, "ko"));
     sortedNicks.forEach(n => {
       const c = cust(n);
       const g = sumOf(n),
         f = feeOf(n);
-      const lines = activeOrders.filter(o => o.nick === n).map(o => `${o.name}${o.qty > 1 ? ` ${o.qty}개` : ""}`).join(", ");
-      s3.push([n, c.name || "", c.phone || "", g, f, g + f, c.paid ? "입금" : "미입금", c.pickup ? "픽업수령" : c.freeShip ? "택배(무료)" : "택배", c.notified ? "안내" : "", activeOrders.filter(o => o.nick === n).length, qtyOf(n), lines, c.cashReceipt || "", c.memo || ""]);
+      const rf = orders.filter(o => o.nick === n && o.refund);
+      const rfAmt = rf.reduce((t, o) => t + o.price * o.qty, 0);
+      const rs = c.refundAll ? `전체환불 ${won(rfAmt + shipFee)}` : rf.length ? `부분환불 ${won(rfAmt)}` : "";
+      const lines = activeOrders.filter(o => o.nick === n).map(o => `${o.name}${o.qty > 1 ? ` ${o.qty}개` : ""}`).join(", ") + (rf.length ? `${activeOrders.some(o => o.nick === n) ? " / " : ""}[환불] ` + rf.map(o => `${o.name}${o.qty > 1 ? ` ${o.qty}개` : ""}`).join(", ") : "");
+      s3.push([n, c.name || "", c.phone || "", g, f, g + f, c.paid ? "입금" : "미입금", rs, c.pickup ? "픽업수령" : c.freeShip ? "택배(무료)" : "택배", c.notified ? "안내" : "", activeOrders.filter(o => o.nick === n).length, qtyOf(n), lines, c.cashReceipt || "", c.memo || ""]);
     });
-    s3.push(["합계", "", "", goods, feeSum, total, `입금 ${paidList.length} / 미입금 ${nicks.length - paidList.length}`, "", "", activeOrders.length, totalQty, "", "", ""]);
+    s3.push(["합계", "", "", goods, feeSum, total, `입금 ${paidList.length} / 미입금 ${nicks.length - paidList.length}`, refundOrders.length ? `환불 ${won(refundAmt + refundAllList.length * shipFee)}` : "", "", "", activeOrders.length, totalQty, "", "", ""]);
     const ws3 = XLSX.utils.aoa_to_sheet(s3);
     ws3["!cols"] = [{
       wch: 14
@@ -1409,6 +1540,8 @@ function App() {
       wch: 13
     }, {
       wch: 8
+    }, {
+      wch: 16
     }, {
       wch: 10
     }, {
@@ -1787,20 +1920,31 @@ function App() {
     });
     const ref = XLSX.utils.decode_range(ws["!ref"]);
     const map = {},
-      dup = [];
+      dup = [],
+      badLen = [];
     for (let r = 1; r <= ref.e.r; r++) {
       const nick = resolveNick(V(cell(r, 9))); // J열 주문번호(닉네임) · 기존 닉네임으로 통일
       if (!nick || isXlErr(nick)) continue; // 빈행·엑셀오류행 제외 (#1번손님 같은 닉네임은 살린다)
       if (nick === "0" && !customers["0"]) continue; // 빈 셀이 0으로 읽힌 것 (닉네임이 실제 "0"이면 살린다)
-      const tracking = normTrk(clean(V(cell(r, 17)))); // R열 송장번호 (숫자만 저장)
+      let tracking = normTrk(clean(V(cell(r, 17)))); // R열 송장번호 (숫자만 저장)
+      if (tracking && !trkLenOk(tracking)) {
+        // 자릿수 이상 → 반영하지 않고 알린다
+        if (!badLen.some(b => b.nick === nick)) badLen.push({
+          nick,
+          tracking
+        });
+        tracking = "";
+      }
       if (!map[nick]) {
+        // verified:false — 앱이 만든 파일을 되받은 것이라 이름 대조를 하지 않았다 (5-15-2 ⑤)
         map[nick] = {
           nick,
           name: clean(V(cell(r, 0))),
           phone: clean(V(cell(r, 1))),
           addr: clean(V(cell(r, 4))),
           tracking,
-          carrier: tracking ? "롯데택배" : ""
+          carrier: tracking ? "롯데택배" : "",
+          verified: false
         };
       } else if (tracking && !map[nick].tracking) {
         map[nick].tracking = tracking;
@@ -1816,7 +1960,8 @@ function App() {
     }
     return {
       data: Object.values(map),
-      dup
+      dup,
+      badLen
     };
   };
 
@@ -1824,26 +1969,73 @@ function App() {
   // 닉네임: X열(배송메세지1)의 "닉네임//요청"에서 // 앞부분 우선, 없으면 P열(고객주문번호)
   // 운송장·택배사만 파일에서 가져오고, 이름·연락처·주소는 앱 출고 데이터 사용 (CJ 파일은 마스킹됨)
   const parseCjUpload = wb => {
-    const ws = wb.Sheets["Sheet1"];
-    if (!ws) return null;
     const clean = s => isXlErr(s) || s === "0" ? "" : s;
-    const V = c => {
-      const x = ws[c];
+    const norm = s => String(s == null ? "" : s).replace(/\s+/g, "").trim();
+    // 열 찾기: 헤더 글자 우선, 못 찾으면 기존 고정 위치로 폴백 (F·K·P·X)
+    // ⚠ CJ 고유 헤더(배송메세지1·고객주문번호)로 판별한다. 롯데 파일이 잘못 잡히면
+    //    CJ 송장에 「롯데택배」가 붙어 손님에게 틀린 택배사가 안내된다.
+    let ws = null,
+      col = null,
+      headRow = 0,
+      byHeader = false;
+    for (const sn of wb.SheetNames) {
+      const sh = wb.Sheets[sn];
+      if (!sh || !sh["!ref"]) continue;
+      const rows = XLSX.utils.sheet_to_json(sh, {
+        header: 1,
+        defval: ""
+      });
+      const limit = Math.min(rows.length, 12); // 위쪽 안내문 대비
+      for (let hr = 0; hr < limit; hr++) {
+        const head = (rows[hr] || []).map(norm);
+        const find = (...names) => head.findIndex(h => names.some(n => h === n));
+        const cTrk = find("운송장번호");
+        const cMsg = find("배송메세지1", "배송메시지1"); // CJ 고유
+        const cOrd = find("고객주문번호"); // CJ 고유
+        if (cTrk < 0 || cMsg < 0 && cOrd < 0) continue; // 둘 중 하나는 있어야 CJ
+        ws = sh;
+        headRow = hr;
+        byHeader = true;
+        col = {
+          trk: cTrk,
+          msg: cMsg,
+          ord: cOrd,
+          rcv: find("받는분명", "수하인명", "받는분성명")
+        };
+        break;
+      }
+      if (ws) break;
+    }
+    if (!ws) {
+      // 폴백 — 예전 고정 위치
+      ws = wb.Sheets["Sheet1"];
+      if (!ws || !ws["!ref"]) return null;
+      headRow = 0;
+      col = {
+        trk: 5,
+        msg: 23,
+        ord: 15,
+        rcv: 10
+      }; // F · X · P · K
+    }
+    const V = (r, c) => {
+      if (c == null || c < 0) return "";
+      const x = ws[XLSX.utils.encode_cell({
+        r,
+        c
+      })];
       return x == null ? "" : String(x.v == null ? "" : x.v).trim();
     };
-    const cell = (r, c) => XLSX.utils.encode_cell({
-      r,
-      c
-    });
     const ref = XLSX.utils.decode_range(ws["!ref"]);
-    // 닉네임 출처 두 곳: P열 고객주문번호(닉네임 원본) · X열 배송메세지1("닉네임//요청")
-    // ⚠ X열은 // 로 잘라야 해서 닉네임 자체에 // 가 있으면 잘못 잘린다. P열은 온전하다.
+
+    // 닉네임 출처 두 곳: 고객주문번호(원본) · 배송메세지1("닉네임//요청")
+    // ⚠ 배송메세지는 // 로 잘라야 해서 닉네임 자체에 // 가 있으면 잘못 잘린다. 고객주문번호는 온전하다.
     //    그래서 앱에 등록된 닉네임과 맞는 쪽을 먼저 채택한다.
     const nickOf = r => {
-      const p = V(cell(r, 15)); // P열 고객주문번호
-      const x = V(cell(r, 23)); // X열 배송메세지1
+      const p = clean(V(r, col.ord));
+      const x = clean(V(r, col.msg));
       const xn = x ? x.split("//")[0].trim() : "";
-      if (p && (customers[p] || nickKey(p) !== nickKey(xn))) {
+      if (p) {
         const rp = resolveNick(p);
         if (customers[rp]) return rp;
       }
@@ -1851,24 +2043,56 @@ function App() {
         const rx = resolveNick(xn);
         if (customers[rx]) return rx;
       }
-      return resolveNick(xn || p);
+      return resolveNick(p || xn);
     };
     const map = {},
-      dup = [];
-    for (let r = 1; r <= ref.e.r; r++) {
+      dup = [],
+      mismatch = [],
+      unknown = [],
+      badLen = [];
+    for (let r = headRow + 1; r <= ref.e.r; r++) {
       const nick = nickOf(r);
       if (!nick || isXlErr(nick)) continue;
       if (nick === "0" && !customers["0"]) continue;
-      const tracking = normTrk(clean(V(cell(r, 5)))); // F열 운송장번호 (CJ는 하이픈 포함 → 숫자만 저장)
+      let tracking = normTrk(clean(V(r, col.trk))); // CJ는 하이픈 포함 → 숫자만 저장
+      if (tracking && !trkLenOk(tracking)) {
+        if (!badLen.some(b => b.nick === nick)) badLen.push({
+          nick,
+          tracking
+        });
+        tracking = "";
+      }
+      const rcvName = clean(V(r, col.rcv)); // 받는분명 (마스킹 안 됨 — 대조에 쓸 수 있음)
+      const c = customers[nick];
+      if (!c) {
+        if (!unknown.some(u => u.nick === nick)) unknown.push({
+          nick,
+          rcvName,
+          tracking
+        });
+        continue;
+      }
+      const appName = String(c.name || "").trim();
+      // 검증: 앱 배송지 이름과 파일 받는분명이 다르면 반영하지 않음 (롯데와 동일)
+      if (appName && rcvName && norm(appName) !== norm(rcvName)) {
+        if (!mismatch.some(m => m.nick === nick)) mismatch.push({
+          nick,
+          appName,
+          rcvName,
+          tracking
+        });
+        continue;
+      }
       if (!map[nick]) {
-        const c = cust(nick); // 이름·연락처·주소는 앱 출고 데이터 (마스킹 회피)
+        // 이름·연락처·주소는 앱 데이터를 쓴다 (CJ는 전화번호가 마스킹되고 주소가 두 열로 쪼개져 옴)
         map[nick] = {
           nick,
-          name: c.name || nick,
+          name: appName || rcvName || nick,
           phone: c.phone || "",
           addr: c.addr || "",
           tracking,
-          carrier: tracking ? "CJ대한통운" : ""
+          carrier: tracking ? "CJ대한통운" : "",
+          verified: !!(appName && rcvName)
         };
       } else if (tracking && !map[nick].tracking) {
         map[nick].tracking = tracking;
@@ -1883,7 +2107,11 @@ function App() {
     }
     return {
       data: Object.values(map),
-      dup
+      dup,
+      mismatch,
+      unknown,
+      badLen,
+      byHeader
     };
   };
 
@@ -1940,14 +2168,22 @@ function App() {
     let skipped = 0; // 주문번호 비어있는 행 (다른 발송 건)
     const mismatch = [],
       unknown = [],
-      conflict = [];
+      conflict = [],
+      badLen = [];
     for (let r = headRow + 1; r <= ref.e.r; r++) {
       const nick = resolveNick(clean(V(r, col.ord)));
       if (!nick || isXlErr(nick)) {
         if (V(r, col.trk)) skipped++;
         continue;
       }
-      const tracking = normTrk(clean(V(r, col.trk))); // 숫자만 저장
+      let tracking = normTrk(clean(V(r, col.trk))); // 숫자만 저장
+      if (tracking && !trkLenOk(tracking)) {
+        if (!badLen.some(b => b.nick === nick)) badLen.push({
+          nick,
+          tracking
+        });
+        tracking = "";
+      }
       const rcvName = clean(V(r, col.rcv)); // 파일의 수하인명
       const c = customers[nick]; // 앱에 등록된 고객
       if (!c) {
@@ -1970,13 +2206,15 @@ function App() {
         continue;
       }
       if (!map[nick]) {
+        // verified — 배송지 이름을 실제로 대조했는지. 파일에 이름이 없으면 대조 자체를 못 했으므로 false
         map[nick] = {
           nick,
           name: appName || rcvName || nick,
           phone: c.phone || "",
           addr: c.addr || "",
           tracking,
-          carrier: tracking ? "롯데택배" : ""
+          carrier: tracking ? "롯데택배" : "",
+          verified: !!(appName && rcvName)
         };
       } else if (tracking && !map[nick].tracking) {
         map[nick].tracking = tracking;
@@ -1994,7 +2232,8 @@ function App() {
       skipped,
       mismatch,
       unknown,
-      dup: conflict
+      dup: conflict,
+      badLen
     };
   };
 
@@ -2005,6 +2244,12 @@ function App() {
     carrier: d.tracking ? d.carrier : prev.carrier || d.carrier || "",
     manual: d.tracking ? false : !!prev.manual // 파일 값이 들어오면 「직접 수정」 표식 해제
   });
+
+  // 자릿수가 이상한 운송장 알림. 셀이 밀렸을 때 엉뚱한 값이 운송장으로 들어오는 것을 잡는다.
+  const warnBadTrk = bad => {
+    if (!bad || !bad.length) return;
+    showToast(`⚠ 운송장 자릿수 이상 ${bad.length}건 반영 안 함 (${TRK_MIN}~${TRK_MAX}자리): ` + bad.slice(0, 3).map(x => `${x.nick}(${x.tracking})`).join(", ") + (bad.length > 3 ? " 외" : ""));
+  };
 
   // 한 사람에게 서로 다른 송장이 여러 개 온 경우 알림. 앞의 것만 반영되므로 사장님이 직접 확인해야 한다.
   const warnDupTrk = dup => {
@@ -2025,7 +2270,8 @@ function App() {
       changed = 0;
     const conflict = [],
       apply = [],
-      similar = [];
+      similar = [],
+      renotify = [];
     const ciKey = x => nickKey(x).toLowerCase();
     data.forEach(d => {
       const p = byNick[d.nick];
@@ -2064,7 +2310,18 @@ function App() {
         return;
       }
       changed++;
-      apply.push(mergeOne(p, d));
+      // ⚠ 이미 안내를 보낸 사람의 번호가 바뀌면 손님이 조회 안 되는 번호를 들고 있다 (5-15-3 ②)
+      const notified = customers[d.nick] && customers[d.nick].notified;
+      const merged = mergeOne(p, d);
+      if (notified && p.tracking) {
+        merged.renotify = true;
+        renotify.push({
+          nick: d.nick,
+          old: p.tracking,
+          next: d.tracking
+        });
+      }
+      apply.push(merged);
     });
     setShipData(prev => {
       const idx = {};
@@ -2083,6 +2340,12 @@ function App() {
       return next;
     });
     showToast(`✓ ${label} 반영 · 추가 ${added}명` + (changed ? ` · 변경 ${changed}명` : "") + ` · 동일 ${same}명`);
+    if (renotify.length) {
+      showToast(`⚠ 안내 보낸 뒤 운송장이 바뀐 사람 ${renotify.length}명 — 다시 안내해주세요: ` + renotify.slice(0, 3).map(x => x.nick).join(", ") + (renotify.length > 3 ? " 외" : ""));
+    }
+    if (renotify.length) {
+      showToast(`⚠ 이미 안내한 운송장이 바뀐 사람 ${renotify.length}명 — 다시 안내해주세요: ` + renotify.slice(0, 3).map(x => x.nick).join(", ") + (renotify.length > 3 ? " 외" : ""));
+    }
     if (similar.length) {
       showToast(`⚠ 대소문자만 다른 닉네임 ${similar.length}건 — 같은 분이면 닉네임을 맞춰주세요: ` + similar.slice(0, 3).map(z => `파일 ${z.file} / 앱 ${z.app}`).join(", ") + (similar.length > 3 ? " 외" : ""));
     }
@@ -2151,11 +2414,14 @@ function App() {
       });
       return;
     }
+    // 이미 안내한 사람의 번호를 바꾸면 재안내가 필요하다 (업로드와 같은 규칙)
+    const needRenotify = !!(before && val && cust(nick).notified);
     setShipData(prev => prev.map(d => d.nick === nick ? {
       ...d,
       tracking: val,
       carrier,
-      manual: !!val
+      manual: !!val,
+      renotify: needRenotify
     } : d));
     // ⚠ 고객정보에도 옛 운송장이 남아 있으면 출고 시트가 그 값으로 되살아난다 (buildShipSheet 의 c.tracking 폴백)
     if (normTrk(cust(nick).tracking) !== val) setCust(nick, {
@@ -2208,6 +2474,7 @@ function App() {
       if (own && own.data.length > 0) {
         mergeShipData(own.data, "롯데");
         warnDupTrk(own.dup);
+        warnBadTrk(own.badLen);
         return;
       }
       // ② 롯데 택배사에서 직접 받은 운송장 파일 (Sheet0 등)
@@ -2219,18 +2486,24 @@ function App() {
       const {
         data,
         mismatch,
-        dup
+        unknown,
+        dup,
+        badLen
       } = res;
-      if (data.length === 0 && mismatch.length === 0) {
+      // ⚠ unknown(앱에 없는 닉네임)만 있는 경우도 알려야 한다. 조기 return 하면 조용히 아무 일도 안 일어난다.
+      if (data.length === 0 && mismatch.length === 0 && unknown.length === 0 && badLen.length === 0) {
         showToast("❌ 이 파일에서 우리 출고 건을 찾지 못했습니다 — 앱에서 만든 출고 파일로 접수했는지 확인해주세요");
         return;
       }
-      // 우리 출고 건과 무관한 행(주문번호 없음·앱에 없는 닉네임)은 조용히 무시
       if (data.length > 0) mergeShipData(data, "롯데");
       warnDupTrk(dup);
+      warnBadTrk(badLen);
       // 이름이 다른 건은 사고 위험이 있어 반영하지 않고 알림
       if (mismatch.length) {
         showToast(`⚠ 배송지 이름 불일치 ${mismatch.length}건 반영 안 함: ` + mismatch.slice(0, 3).map(m => `${m.nick}(앱 ${m.appName}/파일 ${m.rcvName})`).join(", ") + (mismatch.length > 3 ? " 외" : ""));
+      }
+      if (unknown.length) {
+        showToast(`⚠ 앱에 없는 닉네임 ${unknown.length}건: ` + unknown.slice(0, 4).map(u => u.nick).join(", ") + (unknown.length > 4 ? " 외" : ""));
       }
     } catch (e) {
       showToast("❌ 업로드 실패: " + (e.message || "파일을 읽을 수 없습니다."));
@@ -2246,15 +2519,29 @@ function App() {
       });
       const res = parseCjUpload(wb);
       if (!res) {
-        showToast("❌ CJ 운송장 파일이 아닙니다 (Sheet1 없음)");
+        showToast("❌ CJ 운송장 파일이 아닙니다 (운송장번호·배송메세지1·고객주문번호 열을 찾을 수 없음)");
         return;
       }
-      if (res.data.length === 0) {
-        showToast("❌ 배송메세지1이나 고객주문번호에 닉네임이 없습니다 — 새 CJ 출고 파일로 출력했는지 확인해주세요");
+      const {
+        data,
+        mismatch,
+        unknown,
+        dup,
+        badLen
+      } = res;
+      if (data.length === 0 && mismatch.length === 0 && unknown.length === 0 && badLen.length === 0) {
+        showToast("❌ 이 파일에서 우리 출고 건을 찾지 못했습니다 — 앱에서 만든 CJ 출고 파일로 접수했는지 확인해주세요");
         return;
       }
-      mergeShipData(res.data, "CJ");
-      warnDupTrk(res.dup);
+      if (data.length > 0) mergeShipData(data, "CJ");
+      warnDupTrk(dup);
+      warnBadTrk(badLen);
+      if (mismatch.length) {
+        showToast(`⚠ 배송지 이름 불일치 ${mismatch.length}건 반영 안 함: ` + mismatch.slice(0, 3).map(m => `${m.nick}(앱 ${m.appName}/파일 ${m.rcvName})`).join(", ") + (mismatch.length > 3 ? " 외" : ""));
+      }
+      if (unknown.length) {
+        showToast(`⚠ 앱에 없는 닉네임 ${unknown.length}건: ` + unknown.slice(0, 4).map(u => u.nick).join(", ") + (unknown.length > 4 ? " 외" : ""));
+      }
     } catch (e) {
       showToast("❌ 업로드 실패: " + (e.message || "파일을 읽을 수 없습니다."));
     }
@@ -2279,6 +2566,127 @@ function App() {
   /* ---------- 상품목록 파일 (방송 장소별 세팅) ---------- */
   const prodFileRef = useRef(null);
   const [prodImport, setProdImport] = useState(null); // {name, list} — 교체/추가 선택 대기
+
+  /* ---------- 단골 배송지 사전 (L-1) ----------
+     같은 손님이 다시 주문할 때 배송지를 매번 새로 받지 않도록 쌓아두는 사전.
+     ⚠ 자동으로 채우지 않는다 — 동명이인일 수 있어 정보만 보여주고 판단은 사람이 한다.
+     ⚠ 지금은 브라우저에만 저장된다. 서버 10단계에서 `regulars` 테이블로 승격 (설계안 1-3-b). */
+  const [regulars, setRegulars] = useState({}); // { 닉네임: { addrs: [{ name, phone, addr, req, uses, last }] } }
+  const [regPick, setRegPick] = useState(null); // 배송지가 여러 개일 때 고르는 중인 닉네임
+  const regLoaded = useRef(false);
+  const REG_KEEP_DAYS = 365; // 마지막 사용일 기준 1년 보관
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get("saja:regulars");
+        if (r && r.value) {
+          const d = JSON.parse(r.value) || {};
+          // 1년 지난 배송지는 자동 삭제 (개인정보 보관 정책)
+          const cut = Date.now() - REG_KEEP_DAYS * 86400000;
+          const kept = {};
+          Object.entries(d).forEach(([k, v]) => {
+            const addrs = (v.addrs || []).filter(a => (a.last || 0) >= cut);
+            if (addrs.length) kept[k] = {
+              addrs
+            };
+          });
+          setRegulars(kept);
+        }
+      } catch (e) {/* 없으면 빈 사전 */}
+      regLoaded.current = true;
+    })();
+  }, []);
+  useEffect(() => {
+    if (!regLoaded.current) return;
+    const t = setTimeout(() => {
+      saveKey("saja:regulars", JSON.stringify(regulars), "단골 배송지");
+    }, 400);
+    return () => clearTimeout(t);
+  }, [regulars]);
+
+  // 적립 — 입금 완료 + 주소·연락처가 모두 있는 사람만.
+  // 반쯤 입력된 정보가 쌓이면 오히려 방해가 된다. 픽업은 주소가 없으므로 자연히 제외된다.
+  const addrKey = c => `${String(c.addr || "").replace(/\s+/g, " ").trim()}`;
+  useEffect(() => {
+    if (!regLoaded.current || !loaded) return;
+    const t = setTimeout(() => {
+      const now = Date.now();
+      let touched = false;
+      const next = {
+        ...regulars
+      };
+      nickList.forEach(nk => {
+        const c = customers[nk];
+        if (!c || !c.paid) return;
+        if (!String(c.addr || "").trim() || !String(c.phone || "").trim()) return;
+        const key = addrKey(c);
+        const entry = next[nk] ? {
+          addrs: [...(next[nk].addrs || [])]
+        } : {
+          addrs: []
+        };
+        const hit = entry.addrs.findIndex(a => addrKey(a) === key);
+        if (hit >= 0) {
+          const prev = entry.addrs[hit];
+          // 같은 주소면 최신 정보로 갱신하고 사용 횟수를 올린다 (하루 한 번만)
+          const sameDay = prev.lastDate === bdate;
+          entry.addrs[hit] = {
+            name: c.name || prev.name,
+            phone: c.phone,
+            addr: c.addr,
+            req: c.req || "",
+            uses: sameDay ? prev.uses : (prev.uses || 1) + 1,
+            last: now,
+            lastDate: bdate
+          };
+          if (!sameDay || prev.phone !== c.phone || prev.name !== c.name || prev.req !== (c.req || "")) touched = true;
+        } else {
+          entry.addrs.push({
+            name: c.name || "",
+            phone: c.phone,
+            addr: c.addr,
+            req: c.req || "",
+            uses: 1,
+            last: now,
+            lastDate: bdate
+          });
+          touched = true;
+        }
+        entry.addrs.sort((a, b) => (b.last || 0) - (a.last || 0));
+        next[nk] = entry;
+      });
+      if (touched) setRegulars(next);
+    }, 1200); // 입력 중에 계속 쌓이지 않게 넉넉히 기다린다
+    return () => clearTimeout(t);
+  }, [customers, nickList, loaded, bdate]);
+
+  // 그 닉네임의 지난 배송지 (오늘 것과 같은 주소는 제외 — 이미 채워져 있으니 보여줄 필요 없다)
+  const regularsFor = nk => {
+    const e = regulars[nk];
+    if (!e || !e.addrs || !e.addrs.length) return [];
+    const cur = addrKey(cust(nk));
+    return e.addrs.filter(a => addrKey(a) !== cur);
+  };
+  const applyRegular = (nk, a) => {
+    setCust(nk, {
+      name: a.name || "",
+      phone: a.phone || "",
+      addr: a.addr || "",
+      req: a.req || ""
+    });
+    setRegPick(null);
+    showToast(`✓ 「${nk}」 지난 배송지를 불러왔습니다 — 내용을 확인해주세요`);
+  };
+  const loadRegular = nk => {
+    const list = regularsFor(nk);
+    if (!list.length) return;
+    if (list.length === 1) {
+      applyRegular(nk, list[0]);
+      return;
+    }
+    setRegPick(regPick === nk ? null : nk); // 2개 이상이면 고르게 한다
+  };
 
   /* ---------- 상품목록 보관함 (0-4) ----------
      앱 안에 이름을 붙여 여러 개 보관한다. 방송 장소마다 파는 상품이 달라 목록이 여러 벌 필요하다.
@@ -2305,7 +2713,7 @@ function App() {
   useEffect(() => {
     if (!costLoaded.current) return;
     const t = setTimeout(() => {
-      window.storage.set("saja:costbook", JSON.stringify(costBook)).catch(() => {});
+      saveKey("saja:costbook", JSON.stringify(costBook), "원가 사전");
     }, 400);
     return () => clearTimeout(t);
   }, [costBook]);
@@ -2338,7 +2746,7 @@ function App() {
   useEffect(() => {
     if (!shelfLoaded.current) return; // 불러오기 전에 빈 값으로 덮어쓰지 않도록
     const t = setTimeout(() => {
-      window.storage.set("saja:shelf", JSON.stringify(shelf)).catch(() => {});
+      saveKey("saja:shelf", JSON.stringify(shelf), "상품목록 보관함");
     }, 400);
     return () => clearTimeout(t);
   }, [shelf]);
@@ -2797,8 +3205,19 @@ function App() {
     onClick: () => setMemoOpen(v => !v),
     title: "자유 메모"
   }, memoOpen ? "✕" : "📝"), memoOpen && /*#__PURE__*/React.createElement("div", {
-    className: "memo-panel"
+    className: "memo-panel",
+    style: {
+      width: memoSize.w,
+      height: memoSize.h
+    }
   }, /*#__PURE__*/React.createElement("div", {
+    className: "memo-grip",
+    title: "끌어서 크기 조절",
+    onPointerDown: onMemoResizeStart,
+    onPointerMove: onMemoResizeMove,
+    onPointerUp: onMemoResizeEnd,
+    onPointerCancel: onMemoResizeEnd
+  }), /*#__PURE__*/React.createElement("div", {
     className: "memo-head"
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     className: "memo-title"
@@ -2817,7 +3236,12 @@ function App() {
     className: "memo-foot"
   }, memoText.length > 0 ? `${memoText.length}자 · ${memoText.split("\n").length}줄` : "비어 있음", /*#__PURE__*/React.createElement("span", {
     className: "memo-hint"
-  }, "모서리를 끌어 크기를 바꿀 수 있습니다"))), printMode && (() => {
+  }, "↖ 왼쪽 위 모서리를 끌어 크기 조절"))), !saveState.ok && /*#__PURE__*/React.createElement("div", {
+    className: "savebar"
+  }, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("b", null, "⚠ 자동 저장이 안 되고 있습니다."), " ", saveState.quota ? "저장 공간이 꽉 찼습니다. 지금 바로 「엑셀 저장」으로 파일을 남겨주세요." : "지금 바로 「엑셀 저장」으로 파일을 남겨주세요. 새로고침하면 입력한 내용이 사라질 수 있습니다."), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    onClick: exportXlsx
+  }, "엑셀 저장")), printMode && (() => {
     const grouped = {};
     shipLines.forEach(o => {
       (grouped[o.nick] = grouped[o.nick] || []).push(o);
@@ -3779,43 +4203,73 @@ function App() {
       onKeyDown: endEdit
     }), /*#__PURE__*/React.createElement("div", {
       className: "hint"
-    }, "번호를 입력하면 「🧾 영수증」 탭에 나타나고, 거기서 발행 처리합니다.")), open && /*#__PURE__*/React.createElement("div", {
-      className: "custform"
-    }, /*#__PURE__*/React.createElement("div", {
-      className: "rowgap"
-    }, /*#__PURE__*/React.createElement("input", {
-      className: "in grow",
-      placeholder: "이름",
-      value: c.name,
-      onChange: e => setCust(n, {
-        name: e.target.value
-      }),
-      onKeyDown: endEdit
-    }), /*#__PURE__*/React.createElement("input", {
-      className: "in grow",
-      placeholder: "연락처 (010-)",
-      value: c.phone,
-      onChange: e => setCust(n, {
-        phone: e.target.value
-      }),
-      onKeyDown: endEdit
-    })), /*#__PURE__*/React.createElement("input", {
-      className: "in",
-      placeholder: "주소",
-      value: c.addr,
-      onChange: e => setCust(n, {
-        addr: e.target.value
-      }),
-      onKeyDown: endEdit
-    }), /*#__PURE__*/React.createElement("input", {
-      className: "in",
-      placeholder: "배송 요청사항",
-      value: c.req,
-      onChange: e => setCust(n, {
-        req: e.target.value
-      }),
-      onKeyDown: endEdit
-    })), c.memo && !openMemo[n] && /*#__PURE__*/React.createElement("div", {
+    }, "번호를 입력하면 「🧾 영수증」 탭에 나타나고, 거기서 발행 처리합니다.")), open && (() => {
+      const regs = regularsFor(n);
+      const picking = regPick === n && regs.length > 1;
+      return /*#__PURE__*/React.createElement("div", {
+        className: "custform"
+      }, regs.length > 0 && /*#__PURE__*/React.createElement("div", {
+        className: "regbox"
+      }, /*#__PURE__*/React.createElement("div", {
+        className: "regtop"
+      }, /*#__PURE__*/React.createElement("span", {
+        className: "regtxt"
+      }, "💡 ", /*#__PURE__*/React.createElement("b", null, "단골"), " · ", regs.reduce((t, a) => t + (a.uses || 1), 0), "회 참여 · 마지막 ", regs[0].lastDate || "-"), /*#__PURE__*/React.createElement("button", {
+        className: "btn sm primary",
+        onClick: () => loadRegular(n)
+      }, picking ? "접기" : `지난 배송지 불러오기${regs.length > 1 ? ` (${regs.length})` : ""}`)), picking && regs.map((a, i) => /*#__PURE__*/React.createElement("button", {
+        className: "regrow",
+        key: i,
+        onClick: () => applyRegular(n, a)
+      }, /*#__PURE__*/React.createElement("span", {
+        className: "regdate"
+      }, a.lastDate || "-"), /*#__PURE__*/React.createElement("span", {
+        className: "regname"
+      }, a.name || "-"), /*#__PURE__*/React.createElement("span", {
+        className: "regaddr"
+      }, a.addr), /*#__PURE__*/React.createElement("span", {
+        className: "reguses"
+      }, a.uses || 1, "회"))), /*#__PURE__*/React.createElement("div", {
+        className: "hint",
+        style: {
+          margin: "2px 0 0"
+        }
+      }, "같은 분인지 확인한 뒤 불러오세요 · 불러온 뒤에도 고칠 수 있습니다")), /*#__PURE__*/React.createElement("div", {
+        className: "rowgap"
+      }, /*#__PURE__*/React.createElement("input", {
+        className: "in grow",
+        placeholder: "이름",
+        value: c.name,
+        onChange: e => setCust(n, {
+          name: e.target.value
+        }),
+        onKeyDown: endEdit
+      }), /*#__PURE__*/React.createElement("input", {
+        className: "in grow",
+        placeholder: "연락처 (010-)",
+        value: c.phone,
+        onChange: e => setCust(n, {
+          phone: e.target.value
+        }),
+        onKeyDown: endEdit
+      })), /*#__PURE__*/React.createElement("input", {
+        className: "in",
+        placeholder: "주소",
+        value: c.addr,
+        onChange: e => setCust(n, {
+          addr: e.target.value
+        }),
+        onKeyDown: endEdit
+      }), /*#__PURE__*/React.createElement("input", {
+        className: "in",
+        placeholder: "배송 요청사항",
+        value: c.req,
+        onChange: e => setCust(n, {
+          req: e.target.value
+        }),
+        onKeyDown: endEdit
+      }));
+    })(), c.memo && !openMemo[n] && /*#__PURE__*/React.createElement("div", {
       className: "hint"
     }, "특이사항: ", c.memo));
   })), tab === "ship" && /*#__PURE__*/React.createElement("div", {
@@ -4054,7 +4508,12 @@ function App() {
         className: "whname"
       }, d.nick, orphan && /*#__PURE__*/React.createElement("span", {
         className: "orphanbadge"
-      }, orders.some(o => o.nick === d.nick && o.refund) ? "환불" : "주문 삭제됨")), /*#__PURE__*/React.createElement("td", null, d.name || "-"), /*#__PURE__*/React.createElement("td", null, d.phone || "-"), /*#__PURE__*/React.createElement("td", null, d.addr || "-"), /*#__PURE__*/React.createElement("td", null, d.carrier || "-"), /*#__PURE__*/React.createElement("td", {
+      }, orders.some(o => o.nick === d.nick && o.refund) ? "환불" : "주문 삭제됨"), d.renotify && /*#__PURE__*/React.createElement("span", {
+        className: "renotifybadge"
+      }, "재안내 필요"), d.tracking && !d.verified && /*#__PURE__*/React.createElement("span", {
+        className: "unverifiedbadge",
+        title: "배송지 이름과 대조하지 못했습니다"
+      }, "미검증")), /*#__PURE__*/React.createElement("td", null, d.name || "-"), /*#__PURE__*/React.createElement("td", null, d.phone || "-"), /*#__PURE__*/React.createElement("td", null, d.addr || "-"), /*#__PURE__*/React.createElement("td", null, d.carrier || "-"), /*#__PURE__*/React.createElement("td", {
         className: "trackcell"
       }, trkEdit && trkEdit.nick === d.nick ? /*#__PURE__*/React.createElement("div", {
         className: "trkedit"
@@ -4099,14 +4558,20 @@ function App() {
         className: d.tracking ? "" : "trkempty"
       }, fmtTrk(d.tracking) || "미입력"), d.tracking && d.manual && /*#__PURE__*/React.createElement("span", {
         className: "trkmanual"
-      }, "직접 수정"), /*#__PURE__*/React.createElement("button", {
+      }, "직접 수정"), d.tracking && d.renotify && /*#__PURE__*/React.createElement("span", {
+        className: "trkrenotify",
+        title: "안내 보낸 뒤 번호가 바뀌었습니다"
+      }, "재안내 필요"), d.tracking && d.verified === false && !d.manual && /*#__PURE__*/React.createElement("span", {
+        className: "trkunver",
+        title: "배송지 이름을 대조하지 못했습니다"
+      }, "미검증"), /*#__PURE__*/React.createElement("button", {
         className: "btn sm ghost trkeditbtn",
         title: "운송장번호 수정",
         onClick: () => openTrkEdit(d)
       }, "✎"))), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("button", {
         className: "btn sm primary",
         disabled: !d.tracking,
-        onClick: () => copyText(trackMsg(d), "trk-" + d.nick)
+        onClick: () => copyText(trackMsg(d), "trk-" + d.nick, d.nick)
       }, copiedId === "trk-" + d.nick ? "복사됨 ✓" : "운송장 복사")));
     })))));
   })()), tab === "warehouse" && /*#__PURE__*/React.createElement("div", {
@@ -4378,7 +4843,9 @@ function App() {
     onChange: onCjFilePick
   }), /*#__PURE__*/React.createElement("div", {
     className: "foot"
-  }, "사자창고 라이브 · 자동 저장됨 · 전체 저장 「", dateCode, "_사자창고_라이브.xlsx」 · 출고 「롯데/CJ_사자창고_출고_", dateCode, ".xlsx」"));
+  }, "사자창고 라이브 · ", saveState.ok ? "자동 저장됨" : /*#__PURE__*/React.createElement("b", {
+    className: "savefail"
+  }, "⚠ 자동 저장 안 됨"), " · 전체 저장 「", dateCode, "_사자창고_라이브.xlsx」 · 출고 「롯데/CJ_사자창고_출고_", dateCode, ".xlsx」"));
 }
 function OrderRow({
   o,
@@ -4444,6 +4911,18 @@ const CSS = `
   0% { opacity: 0; transform: translateY(12px); }
   100% { opacity: 1; transform: translateY(0); }
 }
+/* 저장 실패 경고 — 방송 중 놓치면 그날 데이터가 날아간다 */
+.savebar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 200;
+  display: flex; align-items: center; justify-content: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 18px; background: #e8334a; color: #fff; font-size: 14px; font-weight: 700;
+  box-shadow: 0 -4px 18px rgba(0,0,0,.25);
+}
+.savebar .btn { background: #fff; border-color: #fff; color: #b3162a; font-weight: 800; }
+.savebar .btn:hover { background: #ffe9ec; }
+.foot .savefail { color: #e8334a; }
+@media print { .savebar { display: none !important; } }
+
 .memo-fab {
   position: fixed; right: 18px; bottom: 18px; z-index: 160;
   width: 52px; height: 52px; border-radius: 50%; border: none; cursor: pointer;
@@ -4453,15 +4932,26 @@ const CSS = `
 .memo-fab:hover { background: #2a2f38; }
 .memo-panel {
   position: fixed; right: 18px; bottom: 82px; z-index: 160;
-  width: min(360px, calc(100vw - 36px)); height: 420px;
   min-width: 240px; min-height: 180px;
   max-width: calc(100vw - 36px); max-height: calc(100vh - 100px);
-  resize: both; overflow: hidden;
+  overflow: hidden;
   background: #fff; border-radius: 14px;
   box-shadow: 0 10px 40px rgba(0,0,0,.3); border: 1px solid #e6e9ee;
   display: flex; flex-direction: column;
 }
-.memo-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; background: #f6f7f9; border-bottom: 1px solid #e6e9ee; }
+/* 좌상단 크기 손잡이 — 브라우저 기본 resize 는 우하단 고정이라 직접 만든다 */
+.memo-grip {
+  position: absolute; left: 0; top: 0; width: 34px; height: 34px;
+  cursor: nwse-resize; z-index: 3; border-top-left-radius: 14px; touch-action: none;
+}
+.memo-grip::before {
+  content: ""; position: absolute; left: 9px; top: 9px; width: 14px; height: 14px;
+  border-left: 3px solid #8a919c; border-top: 3px solid #8a919c; border-top-left-radius: 4px;
+}
+.memo-grip:hover { background: #eceff3; }
+.memo-grip:hover::before { border-color: #16191f; }
+.memo-grip:active::before { border-color: #0f766e; }
+.memo-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px 12px 38px; background: #f6f7f9; border-bottom: 1px solid #e6e9ee; }
 .memo-title { font-size: 14px; font-weight: 700; color: #16191f; }
 .memo-sub { font-size: 11px; color: #e8334a; margin-top: 1px; }
 .memo-copy { padding: 7px 12px; font-size: 13px; font-weight: 700; border: 1px solid #0f766e; background: #0f766e; color: #fff; border-radius: 8px; cursor: pointer; white-space: nowrap; }
@@ -4753,6 +5243,8 @@ const CSS = `
 .nrow.refundrow { background: #fbe0e0; }
 .card.refundcard { border-color: #e0a6a0; background: #fdf0ef; }
 .onick.struck { text-decoration: line-through; color: #8a5a5a; }
+.renotifybadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 800; color: #fff; background: #e8334a; white-space: nowrap; }
+.unverifiedbadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 700; color: #7a6a3a; background: #fdf3d8; border: 1px solid #e6d08a; white-space: nowrap; cursor: help; }
 .refundbadge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 800; color: #fff; background: #c0392b; white-space: nowrap; }
 .refundbadge.part { background: #fff; color: #c0392b; border: 1px solid #e0a6a0; }
 .btn.refundbtn { color: #c0392b; border-color: #e0a6a0; }
@@ -4806,6 +5298,8 @@ const CSS = `
 /* 운송장번호 직접 수정 — 이 칸에서만 편집. 이름·연락처·주소는 읽기 전용 그대로 */
 .trkview { display: flex; align-items: center; gap: 6px; }
 .trkempty { color: #b04a52; }
+.trkrenotify { font-size: 11px; font-weight: 800; color: #fff; background: #e8334a; border-radius: 6px; padding: 1px 6px; white-space: nowrap; }
+.trkunver { font-size: 11px; font-weight: 700; color: #7a6a4a; background: #f6efe0; border: 1px solid #ded0ae; border-radius: 6px; padding: 1px 6px; white-space: nowrap; }
 .trkmanual { font-size: 11px; font-weight: 700; color: #7a5c00; background: #fff3cd; border: 1px solid #ffe08a; border-radius: 6px; padding: 1px 6px; white-space: nowrap; }
 .btn.trkeditbtn { padding: 2px 7px; font-size: 13px; color: #8a919c; }
 .btn.trkeditbtn:hover { color: #16191f; }
@@ -4846,6 +5340,18 @@ const CSS = `
 .filterbtn.f-unpaid.on { background: #f5a623; border-color: #f5a623; color: #16191f; }
 .filterbtn.f-paid.on { background: #0f766e; border-color: #0f766e; color: #fff; }
 .warnbadge { display: inline-block; margin-left: 8px; padding: 2px 8px; font-size: 12px; font-weight: 700; color: #fff; background: #d81f26; border-radius: 999px; vertical-align: middle; }
+/* 단골 배송지 (L-1) */
+.regbox { padding: 10px 12px; border: 1px solid #cfe0f7; border-radius: 10px; background: #f6faff; margin-bottom: 10px; }
+.regtop { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.regtxt { font-size: 13px; color: #14508f; }
+.regrow { display: flex; align-items: center; gap: 10px; width: 100%; margin-top: 6px; padding: 8px 10px;
+  border: 1px solid #cfe0f7; border-radius: 8px; background: #fff; cursor: pointer; text-align: left; font-size: 13px; font-family: inherit; }
+.regrow:hover { background: #eaf3ff; border-color: #1d6fd6; }
+.regdate { color: #8a919c; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.regname { font-weight: 700; white-space: nowrap; }
+.regaddr { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #4a515c; }
+.reguses { color: #1d6fd6; font-weight: 700; white-space: nowrap; }
+
 /* 상품목록 보관함 (0-4) */
 .shelf { margin-top: 12px; padding: 12px 14px; border: 1px solid #cfe0f7; border-radius: 12px; background: #f6faff; }
 .shelfsave { display: flex; gap: 8px; flex-wrap: wrap; }
