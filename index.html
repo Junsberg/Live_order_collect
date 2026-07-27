@@ -21,6 +21,13 @@
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<!-- Supabase 로그인용. ⚠ CDN 한 곳이 죽으면 로그인 자체가 불가능해지므로 대체 주소를 둔다. -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script>
+if (!window.supabase || !window.supabase.createClient) {
+  document.write('<script src="https://unpkg.com/@supabase/supabase-js@2/dist/umd/supabase.js"><\/script>');
+}
+</script>
 </head>
 <body>
 <div id="root"><div id="loading"><div class="dot"></div><div>불러오는 중…</div></div></div>
@@ -165,6 +172,36 @@ const todayISO = () => {
 
 // ⚠ keep(킵)은 UI에서 제거했지만 필드는 남겨둡니다. 지우면 구버전 엑셀 호환이 깨집니다.
 //   freeShip = 이벤트성 배송비 면제. 상품은 택배로 나가므로 출고 목록에는 포함됩니다.
+/* ---------- Supabase 로그인 (서버 3단계) ----------
+   ⚠ 이 키는 공개돼도 되는 값이다. GitHub Pages 에 그대로 올라간다.
+      실제 방어는 RLS 가 한다 — 로그인하지 않으면 어떤 테이블도 읽을 수 없음을 서버에서 검증했다.
+   ⚠ 지금 단계에서는 로그인만 붙인다. 데이터는 여전히 브라우저에 저장된다.
+      로그인에 문제가 생겨도 방송이 멈추지 않게 하기 위해서다. (서버 저장은 4단계) */
+const SB_URL = "https://ctddjfwnvpspagmduwjy.supabase.co";
+const SB_KEY = "sb_publishable_XLBVTzoHy4IG7KFXuZdMcg_n1cqhPVA";
+const SESSION_HOURS = 3; // 설계안 1-5 — 3시간 뒤 자동 로그아웃
+
+// 매니저는 @saja.local 형식이라 실제 메일함이 없다. 화면에서는 아이디만 입력받는다.
+const ID_DOMAIN = "@saja.local";
+const toEmail = id => {
+  const v = String(id || "").trim();
+  if (!v) return "";
+  return v.includes("@") ? v : v + ID_DOMAIN; // 사장님은 실제 이메일, 매니저는 아이디
+};
+let _sb = null;
+const sb = () => {
+  if (_sb) return _sb;
+  const lib = window.supabase;
+  if (!lib || !lib.createClient) return null; // CDN 이 안 떴을 때
+  _sb = lib.createClient(SB_URL, SB_KEY, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      storageKey: "saja:auth"
+    }
+  });
+  return _sb;
+};
 const EMPTY_CUST = {
   paid: false,
   notified: false,
@@ -267,6 +304,16 @@ function App() {
   const [tab, setTab] = useState("order");
   const [loaded, setLoaded] = useState(false);
   const [intro, setIntro] = useState(true);
+
+  /* ---------- 로그인 (서버 3단계) ----------
+     auth = null 확인 전 · false 로그아웃 상태 · { email, label, isOwner } 로그인됨 */
+  const [auth, setAuth] = useState(null);
+  const [loginId, setLoginId] = useState("");
+  const [loginPw, setLoginPw] = useState("");
+  const [loginKeep, setLoginKeep] = useState(true);
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginErr, setLoginErr] = useState("");
+  const [sbDown, setSbDown] = useState(false); // 서버에 못 닿는 상태
   const [introOut, setIntroOut] = useState(false);
   const [products, setProducts] = useState([]);
   const [orders, setOrders] = useState([]);
@@ -372,6 +419,119 @@ function App() {
     } catch (e) {
       return fallback;
     }
+  };
+
+  /* ---------- 로그인 처리 ---------- */
+  // 로그인한 사람이 사장인지 매니저인지 알아온다 (app_accounts)
+  const fetchProfile = async user => {
+    const c = sb();
+    if (!c || !user) return null;
+    try {
+      const {
+        data
+      } = await c.from("app_accounts").select("label,is_owner").eq("account", user.id).maybeSingle();
+      return {
+        email: user.email,
+        label: data && data.label || user.email,
+        isOwner: !!(data && data.is_owner)
+      };
+    } catch (e) {
+      // ⚠ 등록 안 된 계정도 로그인 자체는 된다. 그때는 데이터를 못 읽으므로 화면에서 막는다.
+      return {
+        email: user.email,
+        label: user.email,
+        isOwner: false,
+        unregistered: true
+      };
+    }
+  };
+  useEffect(() => {
+    // 자동 검증용 우회 (실제 브라우저에서는 절대 설정되지 않는 값)
+    if (typeof window !== "undefined" && window.__TEST_AUTH) {
+      setAuth(window.__TEST_AUTH);
+      return;
+    }
+    const c = sb();
+    if (!c) {
+      setSbDown(true);
+      setAuth(false);
+      return;
+    } // CDN 실패 — 로그인 화면에서 안내
+    let alive = true;
+    (async () => {
+      try {
+        const {
+          data
+        } = await c.auth.getSession();
+        const user = data && data.session && data.session.user;
+        if (!alive) return;
+        if (!user) {
+          setAuth(false);
+          return;
+        }
+        // ⚠ 3시간이 지났으면 세션이 남아 있어도 내보낸다 (설계안 1-5)
+        const at = Number(localStorage.getItem("saja:auth:at") || 0);
+        if (at && Date.now() - at > SESSION_HOURS * 3600000) {
+          await c.auth.signOut();
+          setAuth(false);
+          return;
+        }
+        const p = await fetchProfile(user);
+        if (alive) setAuth(p || false);
+      } catch (e) {
+        if (alive) {
+          setSbDown(true);
+          setAuth(false);
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const doLogin = async () => {
+    const c = sb();
+    if (!c) {
+      setLoginErr("서버에 연결할 수 없습니다. 인터넷을 확인해주세요.");
+      return;
+    }
+    const email = toEmail(loginId);
+    if (!email || !loginPw) {
+      setLoginErr("아이디와 비밀번호를 입력해주세요.");
+      return;
+    }
+    setLoginBusy(true);
+    setLoginErr("");
+    try {
+      const {
+        data,
+        error
+      } = await c.auth.signInWithPassword({
+        email,
+        password: loginPw
+      });
+      if (error) {
+        setLoginErr(/Invalid login/i.test(error.message || "") ? "아이디 또는 비밀번호가 맞지 않습니다." : "로그인 실패 — " + (error.message || ""));
+        return;
+      }
+      localStorage.setItem("saja:auth:at", String(Date.now()));
+      if (!loginKeep) sessionStorage.setItem("saja:auth:once", "1");
+      const p = await fetchProfile(data.user);
+      setAuth(p || false);
+      setLoginPw("");
+    } catch (e) {
+      setLoginErr("로그인 중 문제가 생겼습니다 — " + (e && e.message || ""));
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+  const doLogout = async () => {
+    const c = sb();
+    try {
+      if (c) await c.auth.signOut();
+    } catch (e) {}
+    localStorage.removeItem("saja:auth:at");
+    setAuth(false);
   };
 
   /* 모든 저장은 이 함수를 지난다. 실패를 삼키지 않고 화면에 알린다.
@@ -3493,6 +3653,104 @@ function App() {
   const tabs = [["product", "① 상품", products.length], ["order", "② 주문", activeOrders.length], ["settle", "③ 정산", nickList.length - paidCount], ["ship", "④ 출고", paidLines.length], ["upload", "⑤ 업로드", shipData.length], ["warehouse", "📦 창고", totalPickupQty], ["extras", "🧾 영수증", cashList.length, cashPending > 0],
   // 4번째 = 깜빡임 여부
   ["settings", "⚙️ 설정", 0]];
+
+  // ⚠ 로그인 화면 — 확인 전에는 아무것도 보여주지 않는다.
+  //    로그인 안 됐는데 앱을 먼저 띄우면 「되는 줄 알고」 입력하게 된다.
+  if (auth === null) {
+    return /*#__PURE__*/React.createElement("div", {
+      className: "app"
+    }, /*#__PURE__*/React.createElement("style", null, CSS), /*#__PURE__*/React.createElement("div", {
+      className: "loginwrap"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "logincard"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "loginwait"
+    }, "확인 중…"))));
+  }
+  if (auth === false) {
+    return /*#__PURE__*/React.createElement("div", {
+      className: "app"
+    }, /*#__PURE__*/React.createElement("style", null, CSS), /*#__PURE__*/React.createElement("div", {
+      className: "loginwrap"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "logincard"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "loginhead"
+    }, /*#__PURE__*/React.createElement("img", {
+      className: "loginlion",
+      src: typeof window !== "undefined" ? window.__LION_INTRO : "",
+      alt: ""
+    }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      className: "logintitle"
+    }, "사자창고 라이브"), /*#__PURE__*/React.createElement("div", {
+      className: "loginsub"
+    }, "로그인이 필요합니다"))), sbDown && /*#__PURE__*/React.createElement("div", {
+      className: "loginwarn"
+    }, "⚠ 서버에 연결할 수 없습니다. 인터넷을 확인하고 새로고침해주세요."), /*#__PURE__*/React.createElement("input", {
+      className: "in",
+      placeholder: "아이디 또는 이메일",
+      value: loginId,
+      autoFocus: true,
+      onChange: e => {
+        setLoginId(e.target.value);
+        setLoginErr("");
+      },
+      onKeyDown: e => {
+        if (e.key === "Enter") doLogin();
+      }
+    }), /*#__PURE__*/React.createElement("input", {
+      className: "in",
+      type: "password",
+      placeholder: "비밀번호",
+      value: loginPw,
+      onChange: e => {
+        setLoginPw(e.target.value);
+        setLoginErr("");
+      },
+      onKeyDown: e => {
+        if (e.key === "Enter") doLogin();
+      }
+    }), /*#__PURE__*/React.createElement("label", {
+      className: "loginkeep"
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked: loginKeep,
+      onChange: e => setLoginKeep(e.target.checked)
+    }), /*#__PURE__*/React.createElement("span", null, "로그인 상태 유지 (", SESSION_HOURS, "시간)")), loginErr && /*#__PURE__*/React.createElement("div", {
+      className: "loginerr"
+    }, loginErr), /*#__PURE__*/React.createElement("button", {
+      className: "btn primary big",
+      disabled: loginBusy,
+      onClick: doLogin
+    }, loginBusy ? "로그인 중…" : "로그인"), /*#__PURE__*/React.createElement("div", {
+      className: "hint",
+      style: {
+        marginTop: 10
+      }
+    }, "매니저는 ", /*#__PURE__*/React.createElement("b", null, "아이디만"), " 입력하면 됩니다 (예: saja). 사장님은 이메일 전체를 입력하세요."))));
+  }
+  if (auth.unregistered) {
+    return /*#__PURE__*/React.createElement("div", {
+      className: "app"
+    }, /*#__PURE__*/React.createElement("style", null, CSS), /*#__PURE__*/React.createElement("div", {
+      className: "loginwrap"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "logincard"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "logintitle"
+    }, "접근 권한이 없습니다"), /*#__PURE__*/React.createElement("div", {
+      className: "loginsub",
+      style: {
+        marginTop: 8
+      }
+    }, /*#__PURE__*/React.createElement("b", null, auth.email), " 계정은 이 앱에 등록되어 있지 않습니다.", /*#__PURE__*/React.createElement("br", null), "사장님께 문의해주세요."), /*#__PURE__*/React.createElement("button", {
+      className: "btn",
+      style: {
+        marginTop: 14
+      },
+      onClick: doLogout
+    }, "다른 계정으로 로그인"))));
+  }
   return /*#__PURE__*/React.createElement("div", {
     className: "app"
   }, /*#__PURE__*/React.createElement("style", null, CSS), intro && /*#__PURE__*/React.createElement("div", {
@@ -3736,7 +3994,12 @@ function App() {
   }, "엑셀 저장"), /*#__PURE__*/React.createElement("button", {
     className: "btn upbtn",
     onClick: () => fileRef.current && fileRef.current.click()
-  }, "불러오기"), /*#__PURE__*/React.createElement("button", {
+  }, "불러오기"), /*#__PURE__*/React.createElement("span", {
+    className: "whoami"
+  }, /*#__PURE__*/React.createElement("b", null, auth.label), /*#__PURE__*/React.createElement("button", {
+    className: "btn logoutbtn",
+    onClick: doLogout
+  }, "로그아웃")), /*#__PURE__*/React.createElement("button", {
     className: "btn undobtn",
     onClick: () => setUndoOpen(true),
     disabled: daySnaps.length === 0,
@@ -5887,6 +6150,24 @@ const CSS = `
 .consignbox input { width: 17px; height: 17px; accent-color: #7c3aed; cursor: pointer; }
 .consignbadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   font-weight: 800; color: #fff; background: #7c3aed; white-space: nowrap; }
+
+/* 로그인 (서버 3단계) */
+.loginwrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.logincard { width: min(400px, 100%); background: #fff; border: 1px solid #e6e9ee; border-radius: 16px;
+  padding: 28px 26px; box-shadow: 0 10px 40px rgba(0,0,0,.08); display: flex; flex-direction: column; gap: 10px; }
+.loginhead { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
+.loginlion { width: 52px; height: 52px; border-radius: 12px; object-fit: cover; }
+.logintitle { font-size: 20px; font-weight: 800; }
+.loginsub { font-size: 13px; color: #8a919c; margin-top: 2px; }
+.loginkeep { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #4a515c; cursor: pointer; padding: 2px 0; }
+.loginkeep input { width: 16px; height: 16px; accent-color: #0f766e; cursor: pointer; }
+.loginerr { padding: 9px 11px; border-radius: 9px; background: #fdecee; border: 1px solid #f3b8c0; color: #b3162a; font-size: 13px; font-weight: 700; }
+.loginwarn { padding: 9px 11px; border-radius: 9px; background: #fff3cd; border: 1px solid #ffe08a; color: #7a5c00; font-size: 13px; font-weight: 700; }
+.loginwait { text-align: center; color: #8a919c; padding: 30px 0; }
+.whoami { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #b8ece4; white-space: nowrap; }
+.whoami b { color: #fff; font-weight: 700; }
+.btn.logoutbtn { padding: 5px 9px; font-size: 12px; background: transparent; border-color: rgba(255,255,255,.3); color: #b8ece4; }
+.btn.logoutbtn:hover { background: rgba(255,255,255,.12); color: #fff; }
 
 /* 되돌리기 (L-2) */
 .btn.undobtn { background: #fff; border-color: #cfd4db; color: #16191f; font-weight: 700; white-space: nowrap; }
