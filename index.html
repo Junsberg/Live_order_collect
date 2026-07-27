@@ -202,10 +202,16 @@ const sb = () => {
   });
   return _sb;
 };
+
+// keep      = 킵(보류 주문) — 이번엔 안 보내고 다음에 합쳐서 보냄 (5-19)
+// shipPaid  = 배송비를 이미 받음 — 킵 입금에 배송비가 포함돼 있어 또 받으면 안 된다
+// keepPaid  = 킵 상태에서 받은 누적 금액 (상품값 + 배송비)
 const EMPTY_CUST = {
   paid: false,
   notified: false,
   keep: false,
+  shipPaid: false,
+  keepPaid: 0,
   freeShip: false,
   pickup: false,
   addrChecked: false,
@@ -904,7 +910,13 @@ function App() {
   }, [pick, products]);
 
   /* ---------- 파생 데이터 ---------- */
-  const activeOrders = useMemo(() => orders.filter(o => !o.canceled), [orders]);
+  // ⚠ 킵 주문건은 「아직 거래가 끝나지 않은 것」이라 집계에서 통째로 뺀다.
+  //    출고·창고·매출·마감점검이 전부 activeOrders 를 쓰므로 여기 한 곳만 막으면 따라온다. (5-19)
+  const isKeep = nick => !!(customers[nick] && customers[nick].keep);
+  const activeOrders = useMemo(() => orders.filter(o => !o.canceled && !(customers[o.nick] && customers[o.nick].keep)), [orders, customers]);
+  // 킵 주문건 (화면·목록용)
+  const keepOrders = useMemo(() => orders.filter(o => !o.canceled && customers[o.nick] && customers[o.nick].keep), [orders, customers]);
+  const keepNicks = useMemo(() => [...new Set(keepOrders.map(o => o.nick))], [keepOrders]);
   const totalSales = useMemo(() => activeOrders.reduce((s, o) => s + o.price * o.qty, 0), [activeOrders]);
   const paidSales = useMemo(() => activeOrders.reduce((s, o) => s + (customers[o.nick] && customers[o.nick].paid ? o.price * o.qty : 0), 0), [activeOrders, customers]);
   const orderNickCount = useMemo(() => new Set(activeOrders.map(o => o.nick)).size, [activeOrders]);
@@ -913,7 +925,8 @@ function App() {
   //   pickup    직접 방문 → 택배 안 보냄 → 출고 목록에서도 제외
   //   freeShip  이벤트성 면제 → 택배는 보냄 → 출고 목록에는 포함 ⭐
   //   refundAll 전체환불 → 배송비까지 돌려줌 (0-3에서 UI 추가 · 조건은 미리 넣어둠)
-  const noFee = c => !!(c && (c.pickup || c.freeShip || c.refundAll));
+  //   shipPaid  킵 때 배송비까지 미리 받음 → 발송할 때 또 받으면 안 됨 ⭐ 5-19
+  const noFee = c => !!(c && (c.pickup || c.freeShip || c.refundAll || c.shipPaid));
   const feeOf = nick => noFee(customers[nick]) ? 0 : shipFee;
   // 배송비를 실제로 내는 사람 수
   const shipPayNickCount = useMemo(() => new Set(activeOrders.filter(o => !noFee(customers[o.nick])).map(o => o.nick)).size, [activeOrders, customers]);
@@ -930,9 +943,11 @@ function App() {
     });
     return s;
   }, [orders]);
+  // ⚠ 정산서·주문 화면용이라 킵도 포함한다 (취소만 제외).
+  //    킵 고객도 정산서를 보내야 하고, 주문 목록에 보여야 한다.
   const byNick = useMemo(() => {
     const m = {};
-    activeOrders.forEach(o => {
+    orders.filter(o => !o.canceled).forEach(o => {
       (m[o.nick] = m[o.nick] || []).push(o);
     });
     return m;
@@ -1533,9 +1548,19 @@ function App() {
     const lines = list.map(o => `${o.name}_${o.qty}개*${o.price}원=${o.price * o.qty}원`);
     const fee = feeOf(n);
     const c = cust(n);
-    const why = c.pickup ? "픽업수령" : c.freeShip ? "무료배송" : "배송비 없음";
-    const total = fee > 0 ? `총 합계 금액은 ${won(sum)}원+합배송비 ${won(fee)}원 = ${won(sum + fee)}원 입니다.` : `총 합계 금액은 ${won(sum)}원 입니다. (${why} · 배송비 없음)`;
-    return `${settleHeader}\n\n${head}<정산서>\n주문하신 상품과 수량이 맞는지 확인 부탁드립니다.\n${lines.join("\n")}\n${total}`;
+    const why = c.pickup ? "픽업수령" : c.freeShip ? "무료배송" : c.shipPaid ? "배송비 기입금" : "배송비 없음";
+    // ⚠ 킵으로 이미 받은 금액이 있으면 빼고 「추가로 입금하실 금액」만 안내한다.
+    //    킵 입금에는 배송비가 포함돼 있어 배송비를 또 받으면 안 된다 (5-19).
+    const already = Math.max(0, Number(c.keepPaid) || 0);
+    let total;
+    if (already > 0) {
+      const rest = Math.max(0, sum + fee - already);
+      total = `\n상품 합계        ${won(sum)}원` + (fee > 0 ? `\n합배송비         ${won(fee)}원` : `\n합배송비         0원 (${why})`) + `\n이미 입금하신 금액 -${won(already)}원${c.shipPaid ? " (배송비 포함)" : ""}` + `\n──────────────` + (rest > 0 ? `\n추가로 입금하실 금액 ${won(rest)}원` : `\n추가로 입금하실 금액은 없습니다. 바로 발송해 드리겠습니다.`);
+    } else {
+      total = fee > 0 ? `총 합계 금액은 ${won(sum)}원+합배송비 ${won(fee)}원 = ${won(sum + fee)}원 입니다.` : `총 합계 금액은 ${won(sum)}원 입니다. (${why} · 배송비 없음)`;
+    }
+    const keepNote = c.keep ? "[킵 주문건입니다 — 발송 요청하실 때 알려주세요]\n\n" : "";
+    return `${settleHeader}\n\n${keepNote}${head}<정산서>\n주문하신 상품과 수량이 맞는지 확인 부탁드립니다.\n${lines.join("\n")}\n${total}`;
   };
   const copyText = async (text, id, n) => {
     try {
@@ -1569,11 +1594,24 @@ function App() {
     return `${trackHeader}\n\n[운송장 정보]\n${carrier} ${fmtTrk(d.tracking)}`;
   };
   // 창고 픽업 집계 — ③ 정산에서 「안내」를 보낸 주문만 카운팅 (아직 안내 전이면 확정 전으로 보고 제외)
+  /* ---------- 출고완료 판정 (7/27) ----------
+     운송장이 붙었다 = 이미 택배가 나갔다.
+     방송 시간이 아닐 때 받은 주문을 먼저 출고하는 경우가 있어, 저녁 방송 때 그 건이
+     출고 목록에 그대로 남아 있으면 「보낸 건지 아닌지」 헷갈리고 이중 발송으로 이어진다. */
+  const shippedNicks = useMemo(() => {
+    const s = new Set();
+    shipData.forEach(d => {
+      if (normTrk(d.tracking)) s.add(d.nick);
+    });
+    return s;
+  }, [shipData]);
+  const isShipped = nick => shippedNicks.has(nick);
   const pivot = useMemo(() => {
     const m = {};
     activeOrders.forEach(o => {
       const c = cust(o.nick);
       if (!c.notified) return;
+      if (isShipped(o.nick)) return; // 이미 나간 건은 포장할 필요가 없다
       m[o.name] = m[o.name] || {
         paid: 0,
         unpaid: 0
@@ -1581,7 +1619,10 @@ function App() {
       m[o.name][c.paid ? "paid" : "unpaid"] += o.qty;
     });
     return m;
-  }, [activeOrders, customers]);
+  }, [activeOrders, customers, shippedNicks]);
+
+  // 이미 나간 수량 — 총량 파악용으로 따로 보여준다
+  const shippedQty = useMemo(() => activeOrders.filter(o => cust(o.nick).notified && isShipped(o.nick)).reduce((t, o) => t + o.qty, 0), [activeOrders, customers, shippedNicks]);
 
   // 택배 출고 대상 = 입금 완료자. 단 픽업수령(직접 방문)은 택배를 안 보내므로 제외.
   const paidLines = useMemo(() => activeOrders.filter(o => {
@@ -1605,11 +1646,14 @@ function App() {
     return list;
   }, [paidLines]);
   // 실제 출고 파일에 담길 라인 (선택 모드면 체크된 닉네임만)
+  // ⚠ 기본(전체) 모드에서도 출고완료 건은 뺀다. 잘못 다운받으면 이중 발송이 된다.
+  //    필요하면 「선택」 모드에서 직접 체크해 넣을 수 있다.
   const shipLines = useMemo(() => {
-    if (!shipSelectMode) return paidLines;
+    if (!shipSelectMode) return paidLines.filter(o => !isShipped(o.nick));
     return paidLines.filter(o => shipSelected[o.nick]);
-  }, [paidLines, shipSelectMode, shipSelected]);
-  const shipNickCount = shipSelectMode ? paidNicks.filter(n => shipSelected[n]).length : paidNicks.length;
+  }, [paidLines, shipSelectMode, shipSelected, shippedNicks]);
+  const shipNickCount = shipSelectMode ? paidNicks.filter(n => shipSelected[n]).length : paidNicks.filter(n => !isShipped(n)).length;
+  const shippedNickCount = paidNicks.filter(n => isShipped(n)).length;
   const nickProductSummary = nick => paidLines.filter(o => o.nick === nick).map(o => `${o.name}${o.qty > 1 ? ` ${o.qty}개` : ""}`).join(", ");
 
   // 창고 픽업: 상품명 가나다순 정렬 + 총 픽업 수량
@@ -1679,7 +1723,7 @@ function App() {
     const canceledCnt = orders.filter(o => o.canceled).length;
 
     // 1) 총괄 요약
-    const s1 = [[`사자창고 라이브 결산`, bdate], [], ["[매출]", ""], ["상품 매출", goods, "환불분 제외 · 실제로 판 것만"], ["배송비 수입", feeSum, `${feeList.length}명 × ${shipFee}원 (픽업 ${pickList.length}명 · 무료배송 ${freeList.length}명 · 전체환불 ${refundAllList.length}명 제외)`], ["총 매출", total], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["미수금", total - paidTotal, `${nicks.length - paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0], ["입금률 (금액)", total ? Math.round(paidTotal / total * 100) / 100 : 0], [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", activeOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length, "주문만 취소 (돈이 오가지 않음)"], [], ["[환불]", ""], ["환불 건수", refundOrders.length, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 부분환불 ${refundNickCount - refundAllList.length}명` : refundOrders.length ? `부분환불 ${refundNickCount}명` : ""], ["환불 상품금액", refundAmt], ["환불 배송비", refundAllList.length * shipFee, refundAllList.length ? `전체환불 ${refundAllList.length}명 × ${shipFee}원` : ""], ["환불 합계", refundAmt + refundAllList.length * shipFee, "실제로 돌려준 돈 · 위 매출에는 포함되어 있지 않음"], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(activeOrders.map(o => `${o.name}\u241f${o.price}`)).size, "같은 상품도 가격이 다르면 별개로 셈"], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
+    const s1 = [[`사자창고 라이브 결산`, bdate], [], ["[매출]", ""], ["상품 매출", goods, "환불분 제외 · 실제로 판 것만"], ["배송비 수입", feeSum, `${feeList.length}명 × ${shipFee}원 (픽업 ${pickList.length}명 · 무료배송 ${freeList.length}명 · 전체환불 ${refundAllList.length}명 제외)`], ["총 매출", total], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["미수금", total - paidTotal, `${nicks.length - paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0], ["입금률 (금액)", total ? Math.round(paidTotal / total * 100) / 100 : 0], [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", activeOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length, "주문만 취소 (돈이 오가지 않음)"], [], ["[킵 보류]", "", "이번에 발송하지 않는 주문 — 위 매출에 포함되지 않음"], ["킵 인원", keepNicks.length], ["킵 건수", keepOrders.length], ["킵 상품금액", keepOrders.reduce((t, o) => t + o.price * o.qty, 0)], ["킵 입금액", keepNicks.reduce((t, nk) => t + (Number(cust(nk).keepPaid) || 0), 0), "받았지만 아직 매출이 아님 (배송비 포함)"], [], ["[환불]", ""], ["환불 건수", refundOrders.length, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 부분환불 ${refundNickCount - refundAllList.length}명` : refundOrders.length ? `부분환불 ${refundNickCount}명` : ""], ["환불 상품금액", refundAmt], ["환불 배송비", refundAllList.length * shipFee, refundAllList.length ? `전체환불 ${refundAllList.length}명 × ${shipFee}원` : ""], ["환불 합계", refundAmt + refundAllList.length * shipFee, "실제로 돌려준 돈 · 위 매출에는 포함되어 있지 않음"], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(activeOrders.map(o => `${o.name}\u241f${o.price}`)).size, "같은 상품도 가격이 다르면 별개로 셈"], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
     const ws1 = XLSX.utils.aoa_to_sheet(s1);
     ws1["!cols"] = [{
       wch: 20
@@ -1689,7 +1733,7 @@ function App() {
       wch: 40
     }];
     // ⚠ 행 번호를 박아두면 항목을 추가할 때마다 서식이 어긋난다. 라벨로 찾는다.
-    const MONEY = ["상품 매출", "배송비 수입", "총 매출", "입금 완료", "미수금", "객단가", "환불 상품금액", "환불 배송비", "환불 합계"];
+    const MONEY = ["상품 매출", "배송비 수입", "총 매출", "입금 완료", "미수금", "객단가", "환불 상품금액", "환불 배송비", "환불 합계", "킵 상품금액", "킵 입금액"];
     const PCT = ["입금률 (인원)", "입금률 (금액)"];
     s1.forEach((row, i) => {
       const cell = ws1["B" + (i + 1)];
@@ -3104,6 +3148,101 @@ function App() {
     }));
   }, [nickList, customers, paidNicks, paidLines, shipData, cashList, lastExcelAt, products, activeOrders]);
   const closeLeft = closeChecks.filter(c => !c.ok).length;
+
+  /* ---------- 킵 (보류 주문) 5-19 ----------
+     이번 방송에서 안 보내고 다음에 합쳐서 보내는 주문.
+     ⚠ 킵 체크 자체가 목록 소속을 결정한다 — 체크하면 목록에 있고, 풀면 빠진다.
+     ⚠ 방송 데이터와 분리해 저장한다. 날짜를 바꾸거나 「새 방송 시작」을 해도 남아야 한다. */
+  const [keeps, setKeeps] = useState({
+    orders: [],
+    customers: {}
+  });
+  const keepsLoaded = useRef(false);
+  useEffect(() => {
+    (async () => {
+      const k = await loadJson("saja:keeps", null);
+      if (k && (k.orders || k.customers)) setKeeps({
+        orders: k.orders || [],
+        customers: k.customers || {}
+      });
+      keepsLoaded.current = true;
+    })();
+  }, []);
+
+  // 화면의 킵 상태를 목록에 반영한다.
+  // ⚠ 오늘 방송에 없는 사람의 킵은 건드리지 않는다 (지난 방송에서 넘어온 것이 지워지면 안 됨).
+  useEffect(() => {
+    if (!keepsLoaded.current || !loaded) return;
+    const t = setTimeout(() => {
+      setKeeps(prev => {
+        const today = new Set(nickList);
+        // 오늘 화면에 있는 사람 중 킵이 아닌 사람은 목록에서 뺀다 (= 킵 해제)
+        const keptOrders = (prev.orders || []).filter(o => !today.has(o.nick) || isKeep(o.nick));
+        const keptCusts = {};
+        Object.entries(prev.customers || {}).forEach(([nk, c]) => {
+          if (!today.has(nk) || isKeep(nk)) keptCusts[nk] = c;
+        });
+        // 오늘 킵으로 체크된 것을 넣는다 (같은 주문 id 는 덮어씀)
+        const byId = {};
+        keptOrders.forEach(o => {
+          byId[o.id] = o;
+        });
+        keepOrders.forEach(o => {
+          byId[o.id] = o;
+        });
+        keepNicks.forEach(nk => {
+          keptCusts[nk] = {
+            ...(customers[nk] || {})
+          };
+        });
+        const next = {
+          orders: Object.values(byId),
+          customers: keptCusts
+        };
+        return JSON.stringify(next) === JSON.stringify(prev) ? prev : next;
+      });
+    }, 800);
+    return () => clearTimeout(t);
+  }, [keepOrders, keepNicks, customers, nickList, loaded]);
+  useEffect(() => {
+    if (!keepsLoaded.current) return;
+    const t = setTimeout(() => {
+      saveKey("saja:keeps", JSON.stringify(keeps), "킵 주문건");
+    }, 400);
+    return () => clearTimeout(t);
+  }, [keeps]);
+
+  // 오늘 화면에 아직 안 올라온 킵 (= 불러올 수 있는 것)
+  const keepPending = useMemo(() => {
+    const today = new Set(nickList);
+    return (keeps.orders || []).filter(o => !today.has(o.nick));
+  }, [keeps, nickList]);
+  const keepPendingNicks = useMemo(() => [...new Set(keepPending.map(o => o.nick))], [keepPending]);
+  const loadKeeps = () => {
+    if (!keepPending.length) {
+      showToast("불러올 킵 주문건이 없습니다.");
+      return;
+    }
+    const exist = new Set(orders.map(o => o.id));
+    const add = keepPending.filter(o => !exist.has(o.id));
+    setOrders(prev => [...prev, ...add]);
+    setCustomers(prev => {
+      const next = {
+        ...prev
+      };
+      keepPendingNicks.forEach(nk => {
+        const src = (keeps.customers || {})[nk];
+        if (src && !next[nk]) next[nk] = {
+          ...EMPTY_CUST,
+          ...src,
+          keep: true
+        };
+      });
+      return next;
+    });
+    const amt = add.reduce((t, o) => t + o.price * o.qty, 0);
+    showToast(`✓ 킵 주문건 ${keepPendingNicks.length}명 · ${add.length}건 (${won(amt)}원)을 불러왔습니다 — 보내실 분은 「킵」을 해제하세요`);
+  };
 
   /* ---------- 단골 배송지 사전 (L-1) ----------
      같은 손님이 다시 주문할 때 배송지를 매번 새로 받지 않도록 쌓아두는 사전.
@@ -4801,7 +4940,19 @@ function App() {
     }, "배송비는 받음"))));
   }))), tab === "settle" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
-  }, nickList.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, keepPending.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "card keepbar"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
+  }, "🔖 킵 주문건 ", keepPendingNicks.length, "명 · ", keepPending.length, "건"), /*#__PURE__*/React.createElement("div", {
+    className: "sub"
+  }, "지난 방송에서 보류한 주문입니다 · ", won(keepPending.reduce((t, o) => t + o.price * o.qty, 0)), "원", " · ", keepPendingNicks.slice(0, 4).join(", "), keepPendingNicks.length > 4 ? " 외" : "")), /*#__PURE__*/React.createElement("button", {
+    className: "btn keepload",
+    onClick: loadKeeps
+  }, "불러오기")), nickList.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "card summarycard"
   }, /*#__PURE__*/React.createElement("span", {
     className: "sm-item"
@@ -4813,7 +4964,11 @@ function App() {
     className: "sm-sep"
   }, "·"), /*#__PURE__*/React.createElement("span", {
     className: "sm-item unpaid"
-  }, "미입금 ", /*#__PURE__*/React.createElement("b", null, nickList.length - paidCount), "명"), /*#__PURE__*/React.createElement("button", {
+  }, "미입금 ", /*#__PURE__*/React.createElement("b", null, nickList.length - paidCount), "명"), keepNicks.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+    className: "sm-sep"
+  }, "·"), /*#__PURE__*/React.createElement("span", {
+    className: "sm-item keep"
+  }, "🔖 킵 ", /*#__PURE__*/React.createElement("b", null, keepNicks.length), "명")), /*#__PURE__*/React.createElement("button", {
     className: "btn closingbtn",
     disabled: activeOrders.length === 0,
     onClick: exportClosingXlsx,
@@ -4866,7 +5021,7 @@ function App() {
     const rs = refundStateOf(n);
     const open = !!openCust[n];
     return /*#__PURE__*/React.createElement("div", {
-      className: "card" + (rs === "all" ? " refundcard" : c.pickup ? " pickupcard" : c.freeShip ? " freecard" : c.paid ? " paidcard" : ""),
+      className: "card" + (c.keep ? " keepcard" : rs === "all" ? " refundcard" : c.pickup ? " pickupcard" : c.freeShip ? " freecard" : c.paid ? " paidcard" : ""),
       key: n
     }, /*#__PURE__*/React.createElement("div", {
       className: "rowbetween"
@@ -4878,7 +5033,9 @@ function App() {
       className: "sub"
     }, " (상품 ", won(sum), " + 배송 ", won(shipFee), ")") : /*#__PURE__*/React.createElement("span", {
       className: "sub"
-    }, " (상품 ", won(sum), " · 배송비 없음)"), rs === "all" && /*#__PURE__*/React.createElement("span", {
+    }, " (상품 ", won(sum), " · 배송비 없음)"), c.keep && /*#__PURE__*/React.createElement("span", {
+      className: "keepbadge"
+    }, "🔖 킵 · 이번 발송 제외"), rs === "all" && /*#__PURE__*/React.createElement("span", {
       className: "refundbadge"
     }, "환불 · 택배 제외"), (rs === "part" || rs === "allpart") && /*#__PURE__*/React.createElement("span", {
       className: "refundbadge part"
@@ -4899,10 +5056,40 @@ function App() {
       })
     }, "안내"), /*#__PURE__*/React.createElement("button", {
       className: "chip pay" + (c.paid ? " on" : ""),
+      onClick: () => {
+        const on = !c.paid;
+        // ⚠ 킵 상태에서 입금하면 상품값 + 배송비를 함께 받는다.
+        //    그 금액을 기록해둬야 다음에 배송비를 또 받지 않고, 추가분만 청구할 수 있다 (5-19).
+        if (on && c.keep) {
+          const got = sum + (noFee(c) ? 0 : shipFee);
+          setCust(n, {
+            paid: true,
+            keepPaid: (Number(c.keepPaid) || 0) + got,
+            shipPaid: true
+          });
+          showToast(`✓ 「${n}」 킵 입금 ${won(got)}원 기록 — 다음 발송 때 배송비는 받지 않습니다`);
+        } else if (!on && c.keep) {
+          // 입금을 취소하면 이번에 기록한 금액도 되돌린다
+          const got = sum + shipFee;
+          const left = Math.max(0, (Number(c.keepPaid) || 0) - got);
+          setCust(n, {
+            paid: false,
+            keepPaid: left,
+            shipPaid: left > 0
+          });
+        } else {
+          setCust(n, {
+            paid: on
+          });
+        }
+      }
+    }, "입금"), /*#__PURE__*/React.createElement("button", {
+      className: "chip keep" + (c.keep ? " on" : ""),
+      title: c.keep ? "킵 해제 — 이번 방송에 발송" : "킵 — 이번엔 보내지 않고 다음에 합쳐서 발송",
       onClick: () => setCust(n, {
-        paid: !c.paid
+        keep: !c.keep
       })
-    }, "입금"), rs === "all" && /*#__PURE__*/React.createElement("button", {
+    }, "킵"), rs === "all" && /*#__PURE__*/React.createElement("button", {
       className: "btn ghost sm refundbtn",
       onClick: () => undoRefund(n)
     }, "환불 취소"), (rs === "part" || rs === "allpart") && /*#__PURE__*/React.createElement("button", {
@@ -5063,7 +5250,9 @@ function App() {
     }
   }, "출고 대상"), /*#__PURE__*/React.createElement("div", {
     className: "sub"
-  }, shipSelectMode ? "체크한 사람만 출고 파일에 담깁니다" : "입금 완료자 전체가 담깁니다 (기본)")), /*#__PURE__*/React.createElement("div", {
+  }, shipSelectMode ? "체크한 사람만 출고 파일에 담깁니다" : "입금 완료자 전체가 담깁니다 (기본)", shippedNickCount > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, " · ", /*#__PURE__*/React.createElement("b", {
+    className: "shippednote"
+  }, "이미 출고된 ", shippedNickCount, "명은 자동으로 빠집니다"), !shipSelectMode && " (다시 보내려면 「선택」에서 체크)"))), /*#__PURE__*/React.createElement("div", {
     className: "modeswitch"
   }, /*#__PURE__*/React.createElement("button", {
     className: "modebtn" + (!shipSelectMode ? " on" : ""),
@@ -5082,16 +5271,17 @@ function App() {
     onClick: () => {
       const all = {};
       paidNicks.forEach(n => {
-        all[n] = true;
+        if (!isShipped(n)) all[n] = true;
       });
       setShipSelected(all);
     }
-  }, "전체 선택"), /*#__PURE__*/React.createElement("button", {
+  }, "전체 선택", shippedNickCount > 0 ? " (미출고만)" : ""), /*#__PURE__*/React.createElement("button", {
     className: "btn ghost sm",
     onClick: () => setShipSelected({})
   }, "전체 해제")), paidNicks.map(n => /*#__PURE__*/React.createElement("label", {
-    className: "shipsel-row" + (shipSelected[n] ? " on" : ""),
-    key: n
+    className: "shipsel-row" + (shipSelected[n] ? " on" : "") + (isShipped(n) ? " shipped" : ""),
+    key: n,
+    title: isShipped(n) ? "이미 운송장이 붙어 나간 건입니다. 다시 보내려면 체크하세요." : ""
   }, /*#__PURE__*/React.createElement("input", {
     type: "checkbox",
     checked: !!shipSelected[n],
@@ -5101,7 +5291,9 @@ function App() {
     }))
   }), /*#__PURE__*/React.createElement("span", {
     className: "ss-nick"
-  }, n), /*#__PURE__*/React.createElement("span", {
+  }, n), isShipped(n) && /*#__PURE__*/React.createElement("span", {
+    className: "shippedbadge"
+  }, "출고완료"), /*#__PURE__*/React.createElement("span", {
     className: "ss-prod"
   }, nickProductSummary(n))))))), /*#__PURE__*/React.createElement("div", {
     className: "dlrow"
@@ -5389,9 +5581,13 @@ function App() {
     className: "whmeta"
   }, /*#__PURE__*/React.createElement("div", null, "상품 종류 ", /*#__PURE__*/React.createElement("b", null, pickupList.length), "종"), /*#__PURE__*/React.createElement("div", null, "미입금 여분 포함 ", /*#__PURE__*/React.createElement("b", {
     className: "warn"
-  }, totalUnpaidQty), "개"), /*#__PURE__*/React.createElement("div", null, "담음 ", /*#__PURE__*/React.createElement("b", null, pickedKinds), " / ", pickupList.length, "종"))), /*#__PURE__*/React.createElement("div", {
+  }, totalUnpaidQty), "개"), /*#__PURE__*/React.createElement("div", null, "담음 ", /*#__PURE__*/React.createElement("b", null, pickedKinds), " / ", pickupList.length, "종"), shippedQty > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "whshipped"
+  }, "출고완료 ", /*#__PURE__*/React.createElement("b", null, shippedQty), "개 (이미 나감)"))), /*#__PURE__*/React.createElement("div", {
     className: "hint"
-  }, "③ 정산에서 ", /*#__PURE__*/React.createElement("b", null, "「안내」를 보낸 주문"), "만 집계합니다. 미입금분도 나중에 입금될 수 있어 ", /*#__PURE__*/React.createElement("b", null, "총합계 수량"), "만큼 챙기는 걸 기준으로 합니다. (취소분 제외)")), /*#__PURE__*/React.createElement("div", {
+  }, "③ 정산에서 ", /*#__PURE__*/React.createElement("b", null, "「안내」를 보낸 주문"), "만 집계합니다. 미입금분도 나중에 입금될 수 있어 ", /*#__PURE__*/React.createElement("b", null, "총합계 수량"), "만큼 챙기는 걸 기준으로 합니다. (취소분 제외)", shippedQty > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, " · ", /*#__PURE__*/React.createElement("b", {
+    className: "shippednote"
+  }, "이미 운송장이 붙어 나간 ", shippedQty, "개는 빠져 있습니다")))), /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "rowbetween"
@@ -6205,6 +6401,27 @@ const CSS = `
 .whtbl tfoot td { border-top: 2px solid #d9dde3; font-weight: 800; padding-top: 10px; }
 .settletop { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .summarycard { display: flex; align-items: center; gap: 10px; padding: 12px 16px; font-size: 15px; }
+/* 출고완료 (7/27) — 이미 운송장이 붙어 나간 건 */
+.shipsel-row.shipped { opacity: .55; background: #f6f7f9; }
+.shipsel-row.shipped.on { opacity: 1; background: #eaf3ff; }
+.shippedbadge { padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 800;
+  color: #4a515c; background: #e6e9ee; white-space: nowrap; }
+.shippednote { color: #0f766e; }
+.whshipped { color: #0f766e; }
+.whship { margin-left: auto; font-size: 13px; color: #8a919c; white-space: nowrap; }
+
+/* 킵 (5-19) */
+.sm-item.keep { color: #b06a00; }
+.card.keepbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  border-color: #f0b872; background: #fffaf2; }
+.btn.keepload { margin-left: auto; background: #fff3e0; border-color: #f0b872; color: #8a4b00; font-weight: 700; white-space: nowrap; }
+.btn.keepload:hover { background: #ffe8c9; }
+.card.keepcard { border-color: #f0b872; background: #fffaf2; }
+.chip.keep.on { background: #b06a00; border-color: #b06a00; color: #fff; }
+.keepbadge { display: inline-block; margin-left: 8px; padding: 2px 8px; border-radius: 999px; font-size: 12px;
+  font-weight: 700; color: #8a4b00; background: #fff3e0; border: 1px solid #f0b872; white-space: nowrap; }
+.closingbtn.nomargin { margin-left: 8px; }
+
 .closingbtn { margin-left: auto; background: #16191f; border-color: #16191f; color: #fff; white-space: nowrap; }
 .closingbtn:disabled { opacity: .4; cursor: default; }
 .sm-item { color: #5b6470; } .sm-item b { color: #16191f; font-size: 17px; }
