@@ -422,26 +422,48 @@ function App() {
   };
 
   /* ---------- 로그인 처리 ---------- */
+  // 로그인한 지 SESSION_HOURS 가 지났는가
+  const expired = () => {
+    const at = Number(localStorage.getItem("saja:auth:at") || 0);
+    return at > 0 && Date.now() - at > SESSION_HOURS * 3600000;
+  };
+
   // 로그인한 사람이 사장인지 매니저인지 알아온다 (app_accounts)
   const fetchProfile = async user => {
     const c = sb();
     if (!c || !user) return null;
     try {
       const {
-        data
+        data,
+        error
       } = await c.from("app_accounts").select("label,is_owner").eq("account", user.id).maybeSingle();
-      return {
+      // ⚠ 조회 자체가 실패한 것과 「등록이 안 된 것」은 다르다.
+      //    인터넷이 끊긴 걸 「권한 없음」으로 보여주면 원인을 오해한다.
+      if (error) return {
         email: user.email,
-        label: data && data.label || user.email,
-        isOwner: !!(data && data.is_owner)
+        label: user.email,
+        isOwner: false,
+        loadFailed: true
       };
-    } catch (e) {
-      // ⚠ 등록 안 된 계정도 로그인 자체는 된다. 그때는 데이터를 못 읽으므로 화면에서 막는다.
-      return {
+      // ⚠ maybeSingle 은 행이 없어도 예외를 던지지 않고 null 을 준다.
+      //    이걸 통과시키면 등록 안 된 계정이 앱 화면을 보게 된다 (데이터는 RLS 가 막지만 혼란스럽다).
+      if (!data) return {
         email: user.email,
         label: user.email,
         isOwner: false,
         unregistered: true
+      };
+      return {
+        email: user.email,
+        label: data.label || user.email,
+        isOwner: !!data.is_owner
+      };
+    } catch (e) {
+      return {
+        email: user.email,
+        label: user.email,
+        isOwner: false,
+        loadFailed: true
       };
     }
   };
@@ -466,13 +488,28 @@ function App() {
         const user = data && data.session && data.session.user;
         if (!alive) return;
         if (!user) {
+          // 세션은 없는데 만료 표식이 남아 있으면, 시간이 지나 끊긴 것이므로 사유를 알려준다
+          if (expired()) {
+            localStorage.removeItem("saja:auth:at");
+            setLoginErr(`로그인 후 ${SESSION_HOURS}시간이 지났습니다. 다시 로그인해주세요.`);
+          }
           setAuth(false);
           return;
         }
         // ⚠ 3시간이 지났으면 세션이 남아 있어도 내보낸다 (설계안 1-5)
-        const at = Number(localStorage.getItem("saja:auth:at") || 0);
-        if (at && Date.now() - at > SESSION_HOURS * 3600000) {
+        // ⚠ 「로그인 상태 유지」를 끄면 탭을 닫는 순간 끝난다.
+        //    sessionStorage 는 탭이 닫히면 사라지므로, 그 표식이 없으면 새 탭에서 다시 로그인해야 한다.
+        const once = localStorage.getItem("saja:auth:once") === "1";
+        if (once && sessionStorage.getItem("saja:auth:alive") !== "1") {
           await c.auth.signOut();
+          localStorage.removeItem("saja:auth:once");
+          setAuth(false);
+          return;
+        }
+        if (expired()) {
+          await c.auth.signOut();
+          localStorage.removeItem("saja:auth:at");
+          setLoginErr(`로그인 후 ${SESSION_HOURS}시간이 지났습니다. 다시 로그인해주세요.`);
           setAuth(false);
           return;
         }
@@ -489,6 +526,19 @@ function App() {
       alive = false;
     };
   }, []);
+
+  /* ⚠ 앱을 열 때만 검사하면 방송 중 계속 켜둔 화면은 6시간이 지나도 안 끊긴다.
+        1분마다 확인하고, 만료되면 그 자리에서 내보낸다. (설계안 1-5 자동 로그아웃) */
+  useEffect(() => {
+    if (!auth || auth === true) return;
+    const t = setInterval(() => {
+      if (expired()) {
+        doLogout();
+        setLoginErr(`로그인 후 ${SESSION_HOURS}시간이 지나 자동으로 로그아웃되었습니다. 다시 로그인해주세요.`);
+      }
+    }, 60000);
+    return () => clearInterval(t);
+  }, [auth]);
   const doLogin = async () => {
     const c = sb();
     if (!c) {
@@ -515,7 +565,10 @@ function App() {
         return;
       }
       localStorage.setItem("saja:auth:at", String(Date.now()));
-      if (!loginKeep) sessionStorage.setItem("saja:auth:once", "1");
+      if (loginKeep) localStorage.removeItem("saja:auth:once");else {
+        localStorage.setItem("saja:auth:once", "1");
+        sessionStorage.setItem("saja:auth:alive", "1");
+      }
       const p = await fetchProfile(data.user);
       setAuth(p || false);
       setLoginPw("");
@@ -531,6 +584,8 @@ function App() {
       if (c) await c.auth.signOut();
     } catch (e) {}
     localStorage.removeItem("saja:auth:at");
+    localStorage.removeItem("saja:auth:once");
+    sessionStorage.removeItem("saja:auth:alive");
     setAuth(false);
   };
 
@@ -3728,6 +3783,34 @@ function App() {
         marginTop: 10
       }
     }, "매니저는 ", /*#__PURE__*/React.createElement("b", null, "아이디만"), " 입력하면 됩니다 (예: saja). 사장님은 이메일 전체를 입력하세요."))));
+  }
+  if (auth.loadFailed) {
+    return /*#__PURE__*/React.createElement("div", {
+      className: "app"
+    }, /*#__PURE__*/React.createElement("style", null, CSS), /*#__PURE__*/React.createElement("div", {
+      className: "loginwrap"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "logincard"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "logintitle"
+    }, "계정 정보를 확인하지 못했습니다"), /*#__PURE__*/React.createElement("div", {
+      className: "loginsub",
+      style: {
+        marginTop: 8
+      }
+    }, "인터넷 연결을 확인하고 새로고침해주세요.", /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("b", null, auth.email), " 로 로그인은 되어 있습니다."), /*#__PURE__*/React.createElement("button", {
+      className: "btn primary",
+      style: {
+        marginTop: 14
+      },
+      onClick: () => window.location.reload()
+    }, "새로고침"), /*#__PURE__*/React.createElement("button", {
+      className: "btn",
+      style: {
+        marginTop: 8
+      },
+      onClick: doLogout
+    }, "로그아웃"))));
   }
   if (auth.unregistered) {
     return /*#__PURE__*/React.createElement("div", {
