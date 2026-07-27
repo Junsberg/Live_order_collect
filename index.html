@@ -252,6 +252,13 @@ const SETTLE_HEADER = `안녕하세요.
 - 필요하신 경우 현금현수증 발행 연락처도 같이 남겨주세요.`;
 
 // 운송장 안내 기본 문구 — 이 다음에 "[운송장 정보] 택배사 송장번호"가 자동으로 붙는다
+/* 배송조회 주소 — 운송장번호가 {번호} 자리에 들어간다.
+   ⚠ 택배사가 주소를 바꾸는 일이 잦다 (롯데는 과거에 여러 번 바뀜).
+      그래서 코드에 박지 않고 설정 탭에서 고칠 수 있게 한다. */
+const TRACE_URL_DEFAULT = {
+  lotte: "https://www.lotteglogis.com/home/reservation/tracking/linkView?InvNo={번호}",
+  cj: "https://trace.cjlogistics.com/next/tracking.html?wblNo={번호}"
+};
 const TRACK_HEADER = `안녕하세요! 사자창고입니다.
 주문하신 상품 잘 포장해서 출고되었습니다.
 오늘도 즐거운 하루 되세요!
@@ -295,6 +302,8 @@ function App() {
   const [paidOnly, setPaidOnly] = useState(false);
   const [settleHeader, setSettleHeader] = useState(SETTLE_HEADER);
   const [trackHeader, setTrackHeader] = useState(TRACK_HEADER);
+  const [traceUrl, setTraceUrl] = useState(TRACE_URL_DEFAULT); // 방송 데이터와 무관한 설정 (별도 키)
+  const traceLoaded = useRef(false);
   const [settingEdit, setSettingEdit] = useState(null); // null | "settle" | "track"
   const [openMsg, setOpenMsg] = useState({});
   const [openCash, setOpenCash] = useState({});
@@ -334,6 +343,36 @@ function App() {
     }
   };
   const closeToast = id => setToasts(ts => ts.filter(t => t.id !== id));
+
+  /* 모든 읽기는 이 함수를 지난다.
+     ⚠ 서버 연동(4단계) 때 이 함수 하나만 서버 호출로 바꾸면 전체가 따라온다.
+        읽기가 여기저기 흩어져 있으면 한 곳이라도 빠뜨렸을 때 그 데이터만 조용히 로컬을 본다.
+     ⚠ 「없음」과 「못 읽음」을 구분한다 — 설계안 1-3 「읽기 실패 ≠ 데이터 없음」.
+        서버 전환 후 읽기에 실패했는데 백지를 보여주면 그 위에 입력한 내용이 서버를 덮어쓴다. */
+  const loadKey = async key => {
+    try {
+      const r = await window.storage.get(key);
+      return {
+        ok: true,
+        value: r && r.value != null ? r.value : null
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        value: null,
+        err: e && e.message || "LoadFailed"
+      };
+    }
+  };
+  const loadJson = async (key, fallback) => {
+    const r = await loadKey(key);
+    if (!r.ok || r.value == null) return fallback;
+    try {
+      return JSON.parse(r.value);
+    } catch (e) {
+      return fallback;
+    }
+  };
 
   /* 모든 저장은 이 함수를 지난다. 실패를 삼키지 않고 화면에 알린다.
      ⚠ 방송 중 저장이 안 되고 있는 걸 모르면 그날 데이터가 통째로 날아간다.
@@ -465,18 +504,11 @@ function App() {
   // 자유 메모는 방송 데이터와 무관한 「한 장」이라 별도 키에 따로 저장한다 (날짜를 바꿔도 그대로)
   useEffect(() => {
     (async () => {
-      try {
-        const r = await window.storage.get("saja:memo");
-        if (r && r.value) setMemoText(r.value);
-      } catch (e) {/* 없으면 빈 메모 */}
+      const m = await loadKey("saja:memo");
+      if (m.value != null) setMemoText(m.value);
       // 크기도 기억해둔다. 매번 다시 끌어 맞추면 번거롭다.
-      try {
-        const z = await window.storage.get("saja:memosize");
-        if (z && z.value) {
-          const v = JSON.parse(z.value);
-          if (v && v.w && v.h) setMemoSize(v);
-        }
-      } catch (e) {/* 없으면 기본 크기 */}
+      const z = await loadJson("saja:memosize", null);
+      if (z && z.w && z.h) setMemoSize(z);
       memoLoaded.current = true;
     })();
   }, []);
@@ -543,8 +575,10 @@ function App() {
   useEffect(() => {
     (async () => {
       try {
-        const r = await window.storage.get("saja:session");
-        if (r && r.value) {
+        const r = await loadKey("saja:session");
+        // ⚠ 읽기 실패(r.ok === false)와 데이터 없음(value === null)은 다르다.
+        //    서버 연동 후에는 실패 시 백지를 보여주면 안 된다 (설계안 1-3).
+        if (r.value != null) {
           const d = JSON.parse(r.value);
           // 이미 저장돼 있던 운송장도 숫자만으로 정리 (하이픈 유무로 같은 송장이 두 개처럼 보이는 것 방지)
           const m = migrateTrk(d.shipData, d.customers);
@@ -560,10 +594,7 @@ function App() {
           // 최초 1회만 알린다 (그 뒤에는 조용히 정리)
           if (m.changed > 0) {
             let done = false;
-            try {
-              const f = await window.storage.get("saja:migrated:trk");
-              done = !!(f && f.value);
-            } catch (e) {/* 없으면 처음 */}
+            done = !!(await loadKey("saja:migrated:trk")).value;
             if (!done) {
               showToast(`✓ 운송장번호 ${m.changed}건을 숫자만 남기도록 정리했습니다 (화면에는 4-4-4로 표시)`);
               window.storage.set("saja:migrated:trk", "1").catch(() => {});
@@ -573,7 +604,7 @@ function App() {
       } catch (e) {/* 첫 실행 */}
       // 마지막 불러온 파일명 복원 (세션 데이터와 분리 보관)
       try {
-        const f = await window.storage.get("saja:loadedFile");
+        const f = await loadKey("saja:loadedFile");
         if (f && f.value) {
           const v = JSON.parse(f.value);
           if (v && v.name) setLoadedFile(v);
@@ -910,7 +941,7 @@ function App() {
   };
   const loadPrev = async () => {
     try {
-      const r = await window.storage.get("saja:lastProducts");
+      const r = await loadKey("saja:lastProducts");
       if (r && r.value) {
         const prev = JSON.parse(r.value);
         setProducts(p => {
@@ -1178,6 +1209,7 @@ function App() {
       setTimeout(() => setDelNickArm(c => c === n ? null : c), 3000);
       return;
     }
+    takeSnap(`「${n}」 주문서 삭제 직전`); // 화면에서 사라지는 작업 → 되돌릴 수 있게
     // 무엇을 지웠는지 남긴다 — 실수로 지웠을 때 이 정보로 다시 입력할 수 있어야 함
     const gone = orders.filter(o => o.nick === n && !o.canceled);
     const cnt = gone.length;
@@ -2558,6 +2590,7 @@ function App() {
     }
   };
   const clearShipData = () => {
+    takeSnap("운송장 조회 초기화 직전");
     setShipData([]);
     setShipSearch("");
     // 고객정보에 남은 운송장까지 지운다. 안 지우면 출고 시트가 그 값을 폴백으로 읽어 되살린다.
@@ -2577,6 +2610,126 @@ function App() {
   /* ---------- 상품목록 파일 (방송 장소별 세팅) ---------- */
   const prodFileRef = useRef(null);
   const [prodImport, setProdImport] = useState(null); // {name, list} — 교체/추가 선택 대기
+
+  /* ---------- 자동 스냅샷 · 되돌리기 (L-2) ----------
+     원칙: 「화면에서 사라지는 작업만 찍는다.」 (설계안 4장)
+     화면에 남아 있으면 스스로 되돌릴 수 있으므로 스냅샷이 필요 없다.
+     ⚠ 트리거를 늘리면 5개 한도가 금방 차서 정작 중요한 스냅샷이 밀려난다.
+     ⚠ 지금은 브라우저에만 저장된다. 서버 9단계에서는 로컬 것을 올리지 않고 그 시점부터 새로 쌓는다. */
+  const [snaps, setSnaps] = useState([]);
+  const [undoOpen, setUndoOpen] = useState(false);
+  const [undoArm, setUndoArm] = useState(null);
+  const snapLoaded = useRef(false);
+  const SNAP_MAX = 5; // 날짜당 최근 5개
+  const SNAP_KEEP_DAYS = 30;
+  useEffect(() => {
+    (async () => {
+      try {
+        const sp = await loadJson("saja:snaps", null);
+        if (sp) {
+          const cut = Date.now() - SNAP_KEEP_DAYS * 86400000;
+          setSnaps(sp.filter(x => (x.at || 0) >= cut));
+        }
+      } catch (e) {/* 형식이 깨졌으면 그대로 둔다 */}
+      snapLoaded.current = true;
+    })();
+  }, []);
+  useEffect(() => {
+    if (!snapLoaded.current) return;
+    const t = setTimeout(() => {
+      saveKey("saja:snaps", JSON.stringify(snaps), "되돌리기 기록");
+    }, 400);
+    return () => clearTimeout(t);
+  }, [snaps]);
+
+  // 지금 화면 상태를 통째로 담아둔다 (그 날짜 것만 5개 유지)
+  const takeSnap = reason => {
+    const snap = {
+      id: uid(),
+      at: Date.now(),
+      bdate,
+      reason,
+      orders: JSON.parse(JSON.stringify(orders)),
+      customers: JSON.parse(JSON.stringify(customers)),
+      shipData: JSON.parse(JSON.stringify(shipData)),
+      products: JSON.parse(JSON.stringify(products)),
+      pickState: JSON.parse(JSON.stringify(pickState)),
+      shipFee,
+      cnt: orders.filter(o => !o.canceled).length
+    };
+    setSnaps(prev => {
+      const mine = [snap, ...prev.filter(x => x.bdate === bdate)].slice(0, SNAP_MAX);
+      const others = prev.filter(x => x.bdate !== bdate);
+      return [...mine, ...others];
+    });
+  };
+  const restoreSnap = sp => {
+    if (undoArm !== sp.id) {
+      setUndoArm(sp.id);
+      setTimeout(() => setUndoArm(c => c === sp.id ? null : c), 4000);
+      return;
+    }
+    takeSnap("되돌리기 직전"); // 되돌린 것 자체도 되돌릴 수 있게
+    setOrders(sp.orders || []);
+    setCustomers(sp.customers || {});
+    setShipData(sp.shipData || []);
+    setProducts(sp.products || []);
+    setPickState(sp.pickState || {});
+    if (typeof sp.shipFee === "number") setShipFee(sp.shipFee);
+    setUndoArm(null);
+    setUndoOpen(false);
+    showToast(`✓ ${new Date(sp.at).toLocaleTimeString("ko-KR", {
+      hour: "2-digit",
+      minute: "2-digit"
+    })} 시점으로 되돌렸습니다 — 주문 ${sp.cnt}건`);
+  };
+  const daySnaps = snaps.filter(x => x.bdate === bdate);
+
+  /* ---------- 배송조회 (7/27) ----------
+     운송장 번호를 택배사 조회 페이지에 붙여 새 창으로 연다.
+     ⚠ 주소는 설정에서 고칠 수 있다 — 택배사가 바꾸면 앱을 다시 만들 필요 없이 한 줄만 고치면 된다. */
+  useEffect(() => {
+    (async () => {
+      try {
+        const v = await loadJson("saja:traceurl", null);
+        if (v) setTraceUrl({
+          ...TRACE_URL_DEFAULT,
+          ...v
+        });
+      } catch (e) {/* 없으면 기본값 */}
+      traceLoaded.current = true;
+    })();
+  }, []);
+  useEffect(() => {
+    if (!traceLoaded.current) return;
+    const t = setTimeout(() => {
+      saveKey("saja:traceurl", JSON.stringify(traceUrl), "배송조회 주소");
+    }, 400);
+    return () => clearTimeout(t);
+  }, [traceUrl]);
+
+  // 그 운송장으로 조회할 수 있는가 (택배사를 모르면 못 연다)
+  const traceKeyOf = carrier => {
+    const c = String(carrier || "");
+    if (c.includes("롯데")) return "lotte";
+    if (c.includes("CJ") || c.includes("대한통운")) return "cj";
+    return "";
+  };
+  const openTrace = d => {
+    const key = traceKeyOf(d.carrier);
+    const trk = normTrk(d.tracking);
+    if (!trk) {
+      showToast("운송장번호가 없습니다.");
+      return;
+    }
+    if (!key) {
+      showToast("⚠ 택배사를 알 수 없어 조회할 수 없습니다 — ✎ 로 택배사를 지정해주세요");
+      return;
+    }
+    const tpl = traceUrl && traceUrl[key] || TRACE_URL_DEFAULT[key];
+    const url = tpl.replace(/\{번호\}/g, trk).replace(/\{no\}/gi, trk);
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
 
   /* ---------- 마감 점검 (0-13) ----------
      방송이 끝났을 때 빠뜨린 게 없는지 한 화면에서 확인한다.
@@ -2656,17 +2809,8 @@ function App() {
       tab: "upload"
     });
 
-    // 6) 창고 체크
-    const whTotal = Object.keys(pivot).length;
-    const whDone = Object.keys(pivot).filter(x => pickState[x]).length;
-    push({
-      key: "wh",
-      ok: whTotal === 0 || whDone === whTotal,
-      label: "창고 체크",
-      detail: `${whDone} / ${whTotal}종`,
-      names: [],
-      tab: "warehouse"
-    });
+    // 창고 체크는 마감 점검에 넣지 않는다.
+    // 보통 엑셀로 내려받아 종이로 출력해 쓰기 때문에 앱 안의 체크 상태가 실제 작업과 다르다.
 
     // 7) 엑셀 저장
     const savedToday = lastExcelAt > 0;
@@ -2743,7 +2887,7 @@ function App() {
       ...x,
       nkText: nk(x.names || [])
     }));
-  }, [nickList, customers, paidNicks, paidLines, shipData, cashList, pivot, pickState, lastExcelAt, products, activeOrders]);
+  }, [nickList, customers, paidNicks, paidLines, shipData, cashList, lastExcelAt, products, activeOrders]);
   const closeLeft = closeChecks.filter(c => !c.ok).length;
 
   /* ---------- 단골 배송지 사전 (L-1) ----------
@@ -2758,9 +2902,8 @@ function App() {
   useEffect(() => {
     (async () => {
       try {
-        const r = await window.storage.get("saja:regulars");
-        if (r && r.value) {
-          const d = JSON.parse(r.value) || {};
+        const d = await loadJson("saja:regulars", null);
+        if (d) {
           // 1년 지난 배송지는 자동 삭제 (개인정보 보관 정책)
           const cut = Date.now() - REG_KEEP_DAYS * 86400000;
           const kept = {};
@@ -2882,10 +3025,10 @@ function App() {
   const costKey = (name, price) => `${String(name || "").trim()}|${Number(price) || 0}`;
   useEffect(() => {
     (async () => {
-      try {
-        const r = await window.storage.get("saja:costbook");
-        if (r && r.value) setCostBook(JSON.parse(r.value) || {});
-      } catch (e) {/* 없으면 빈 사전 */}
+      // ⚠ 값이 없으면 setState 를 하지 않는다. 빈 객체를 넣으면 저장 effect 가 깨어나
+      //    쓴 적 없는 키가 생기고, 서버 연동 후에는 불필요한 요청이 된다.
+      const cb = await loadJson("saja:costbook", null);
+      if (cb) setCostBook(cb);
       costLoaded.current = true;
     })();
   }, []);
@@ -2915,10 +3058,8 @@ function App() {
   const shelfLoaded = useRef(false);
   useEffect(() => {
     (async () => {
-      try {
-        const r = await window.storage.get("saja:shelf");
-        if (r && r.value) setShelf(JSON.parse(r.value) || []);
-      } catch (e) {/* 없으면 빈 보관함 */}
+      const sh = await loadJson("saja:shelf", null);
+      if (sh) setShelf(sh);
       shelfLoaded.current = true;
     })();
   }, []);
@@ -3084,6 +3225,7 @@ function App() {
       id: p.id || uid()
     }));
     if (mode === "replace") {
+      takeSnap("상품목록 교체 직전");
       setProducts(incoming);
       showToast(`⚠ 상품 ${incoming.length}종으로 교체 — 기존 상품 목록은 사라졌습니다`);
     } else {
@@ -3423,7 +3565,53 @@ function App() {
   }, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("b", null, "⚠ 자동 저장이 안 되고 있습니다."), " ", saveState.quota ? "저장 공간이 꽉 찼습니다. 지금 바로 「엑셀 저장」으로 파일을 남겨주세요." : "지금 바로 「엑셀 저장」으로 파일을 남겨주세요. 새로고침하면 입력한 내용이 사라질 수 있습니다."), /*#__PURE__*/React.createElement("button", {
     className: "btn sm",
     onClick: exportXlsx
-  }, "엑셀 저장")), closeOpen && /*#__PURE__*/React.createElement("div", {
+  }, "엑셀 저장")), undoOpen && /*#__PURE__*/React.createElement("div", {
+    className: "closewrap",
+    onClick: e => {
+      if (e.target === e.currentTarget) {
+        setUndoOpen(false);
+        setUndoArm(null);
+      }
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closecard"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closehead"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "closetitle"
+  }, "↩ 되돌리기"), /*#__PURE__*/React.createElement("div", {
+    className: "sub"
+  }, bdate, " · 지운 것을 그 시점으로 되살립니다")), /*#__PURE__*/React.createElement("button", {
+    className: "btn",
+    onClick: () => {
+      setUndoOpen(false);
+      setUndoArm(null);
+    }
+  }, "닫기")), daySnaps.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "empty"
+  }, "되돌릴 기록이 없습니다.") : /*#__PURE__*/React.createElement("div", {
+    className: "closelist"
+  }, daySnaps.map(sp => /*#__PURE__*/React.createElement("div", {
+    className: "snaprow",
+    key: sp.id
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "snaptime"
+  }, new Date(sp.at).toLocaleTimeString("ko-KR", {
+    hour: "2-digit",
+    minute: "2-digit"
+  })), /*#__PURE__*/React.createElement("span", {
+    className: "snapreason"
+  }, sp.reason), /*#__PURE__*/React.createElement("span", {
+    className: "snapcnt"
+  }, "주문 ", sp.cnt, "건"), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm" + (undoArm === sp.id ? " danger" : " primary"),
+    onClick: () => restoreSnap(sp)
+  }, undoArm === sp.id ? "한 번 더 누르면 되돌림" : "이 시점으로")))), /*#__PURE__*/React.createElement("div", {
+    className: "hint",
+    style: {
+      marginTop: 10
+    }
+  }, "되돌리면 ", /*#__PURE__*/React.createElement("b", null, "주문·고객정보·운송장·상품이 그 시점으로"), " 돌아갑니다. 되돌리기 직전 상태도 기록되므로 다시 되돌릴 수 있습니다. · 날짜별 최근 ", SNAP_MAX, "개 · 30일 보관"))), closeOpen && /*#__PURE__*/React.createElement("div", {
     className: "closewrap",
     onClick: e => {
       if (e.target === e.currentTarget) setCloseOpen(false);
@@ -3549,6 +3737,13 @@ function App() {
     className: "btn upbtn",
     onClick: () => fileRef.current && fileRef.current.click()
   }, "불러오기"), /*#__PURE__*/React.createElement("button", {
+    className: "btn undobtn",
+    onClick: () => setUndoOpen(true),
+    disabled: daySnaps.length === 0,
+    title: daySnaps.length ? `되돌릴 수 있는 시점 ${daySnaps.length}개` : "되돌릴 기록이 없습니다"
+  }, "↩ 되돌리기", daySnaps.length > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "undocount"
+  }, daySnaps.length)), /*#__PURE__*/React.createElement("button", {
     className: "btn closebtn" + (closeLeft === 0 ? " done" : ""),
     onClick: () => setCloseOpen(true),
     disabled: activeOrders.length === 0
@@ -4819,11 +5014,18 @@ function App() {
         className: "btn sm ghost trkeditbtn",
         title: "운송장번호 수정",
         onClick: () => openTrkEdit(d)
-      }, "✎"))), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("button", {
+      }, "✎"))), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("div", {
+        className: "trkbtns"
+      }, /*#__PURE__*/React.createElement("button", {
         className: "btn sm primary",
         disabled: !d.tracking,
         onClick: () => copyText(trackMsg(d), "trk-" + d.nick, d.nick)
-      }, copiedId === "trk-" + d.nick ? "복사됨 ✓" : "운송장 복사")));
+      }, copiedId === "trk-" + d.nick ? "복사됨 ✓" : "운송장 복사"), /*#__PURE__*/React.createElement("button", {
+        className: "btn sm tracebtn",
+        disabled: !d.tracking || !traceKeyOf(d.carrier),
+        title: traceKeyOf(d.carrier) ? "택배사 페이지에서 배송조회" : "택배사를 알 수 없어 조회할 수 없습니다",
+        onClick: () => openTrace(d)
+      }, "🔍 배송조회"))));
     })))));
   })()), tab === "warehouse" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
@@ -4975,6 +5177,21 @@ function App() {
     className: "setchanged"
   }, "수정됨"), /*#__PURE__*/React.createElement("span", {
     className: "setarrow"
+  }, "›"))), /*#__PURE__*/React.createElement("button", {
+    className: "setrow",
+    onClick: () => setSettingEdit("trace")
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "setinfo"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "setname"
+  }, "배송조회 주소"), /*#__PURE__*/React.createElement("span", {
+    className: "setdesc"
+  }, "⑤ 업로드 「🔍 배송조회」가 여는 페이지 · 택배사가 주소를 바꾸면 여기서 고칩니다")), /*#__PURE__*/React.createElement("span", {
+    className: "setright"
+  }, (traceUrl.lotte !== TRACE_URL_DEFAULT.lotte || traceUrl.cj !== TRACE_URL_DEFAULT.cj) && /*#__PURE__*/React.createElement("span", {
+    className: "setchanged"
+  }, "수정됨"), /*#__PURE__*/React.createElement("span", {
+    className: "setarrow"
   }, "›"))))), /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
@@ -5068,7 +5285,66 @@ function App() {
     style: {
       marginTop: 10
     }
-  }, `${trackHeader}\n\n[운송장 정보]\nCJ대한통운 661234567890`)))), /*#__PURE__*/React.createElement("input", {
+  }, `${trackHeader}\n\n[운송장 정보]\nCJ대한통운 661234567890`))), settingEdit === "trace" && (() => {
+    const SAMPLE = {
+      lotte: "268335665651",
+      cj: "596074758406"
+    };
+    const mk = k => (traceUrl[k] || "").replace(/\{번호\}/g, SAMPLE[k]).replace(/\{no\}/gi, SAMPLE[k]);
+    const row = (k, label) => /*#__PURE__*/React.createElement("div", {
+      className: "tracerow",
+      key: k
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "tracelabel"
+    }, label), /*#__PURE__*/React.createElement("input", {
+      className: "in",
+      value: traceUrl[k] || "",
+      placeholder: "https://... {번호}",
+      onChange: e => setTraceUrl(v => ({
+        ...v,
+        [k]: e.target.value
+      })),
+      onKeyDown: endEdit
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "tracefoot"
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "tracesample"
+    }, mk(k) || "-"), /*#__PURE__*/React.createElement("button", {
+      className: "btn sm",
+      disabled: !(traceUrl[k] || "").trim(),
+      onClick: () => window.open(mk(k), "_blank", "noopener,noreferrer")
+    }, "열어보기"), /*#__PURE__*/React.createElement("button", {
+      className: "btn sm ghost",
+      disabled: traceUrl[k] === TRACE_URL_DEFAULT[k],
+      onClick: () => setTraceUrl(v => ({
+        ...v,
+        [k]: TRACE_URL_DEFAULT[k]
+      }))
+    }, "기본값")));
+    return /*#__PURE__*/React.createElement("div", {
+      className: "card"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "rowbetween"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "cardtitle",
+      style: {
+        margin: 0
+      }
+    }, "배송조회 주소"), /*#__PURE__*/React.createElement("button", {
+      className: "btn ghost",
+      onClick: () => setSettingEdit(null)
+    }, "‹ 설정으로")), /*#__PURE__*/React.createElement("div", {
+      className: "hint",
+      style: {
+        marginTop: 8
+      }
+    }, /*#__PURE__*/React.createElement("b", null, "{번호}"), " 자리에 운송장번호가 들어갑니다. 「열어보기」로 실제 페이지가 뜨는지 확인할 수 있습니다."), row("lotte", "롯데택배"), row("cj", "CJ대한통운"), /*#__PURE__*/React.createElement("div", {
+      className: "hint",
+      style: {
+        marginTop: 10
+      }
+    }, "택배사가 조회 주소를 바꾸면 ", /*#__PURE__*/React.createElement("b", null, "버튼이 조용히 안 먹습니다."), " 그럴 때 여기서 새 주소로 고치면 됩니다. (수정 즉시 저장됨)"));
+  })()), /*#__PURE__*/React.createElement("input", {
     ref: fileRef,
     type: "file",
     accept: ".xlsx",
@@ -5265,7 +5541,11 @@ const CSS = `
 .toastx:hover { background: rgba(255,255,255,.3); }
 @keyframes toastin { from { opacity: 0; transform: translateX(-14px); } to { opacity: 1; transform: none; } }
 .app {
-  max-width: 880px; margin: 0 auto; padding: 0 12px 60px;
+  /* 본문 최대 폭 — 1120px 이 분기점이다.
+     1120 이상: 운송장 조회 표의 주소가 2줄 · 행 48px
+     1080 이하: 주소가 3줄로 늘어 행이 67px 로 두꺼워짐
+     기능이 더 늘어날 것을 감안해 1120 으로 둔다. */
+  max-width: 1120px; margin: 0 auto; padding: 0 12px 60px;
   font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Noto Sans KR", "Malgun Gothic", sans-serif;
   color: #16191f; background: #f6f7f9; min-height: 100vh;
   /* 글자 선명도 — 합성 굵게로 인한 번짐 방지 */
@@ -5372,7 +5652,8 @@ const CSS = `
 .draghandle { flex: 0 0 auto; cursor: grab; touch-action: none; user-select: none; color: #c0c6cf; font-size: 20px; line-height: 1; padding: 4px 6px; margin-left: -4px; }
 .draghandle:active { cursor: grabbing; color: #0f766e; }
 .prow.dragging { background: #f4fbf8; box-shadow: 0 2px 10px rgba(15,118,110,.18); border-radius: 8px; }
-.nrow { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #f0f2f5; }
+/* ⚠ 삭제 눌렀을 때 [삭제?][환불][환불취소] 가 늘어 좁은 화면에서 넘친다 → 줄바꿈 허용 */
+.nrow { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #f0f2f5; flex-wrap: wrap; }
 /* 닉네임 행 버튼 터치 타깃 확대 (오탭 방지) */
 .nrow .btn.sm { min-height: 40px; padding: 8px 12px; }
 .nrow .nickeditbtn { min-width: 40px; padding: 8px 10px; font-size: 15px; }
@@ -5591,12 +5872,33 @@ const CSS = `
 .filterbtn.f-unpaid.on { background: #f5a623; border-color: #f5a623; color: #16191f; }
 .filterbtn.f-paid.on { background: #0f766e; border-color: #0f766e; color: #fff; }
 .warnbadge { display: inline-block; margin-left: 8px; padding: 2px 8px; font-size: 12px; font-weight: 700; color: #fff; background: #d81f26; border-radius: 999px; vertical-align: middle; }
+/* 배송조회 — 택배사 페이지 새 창으로 */
+.trkbtns { display: flex; flex-direction: column; gap: 5px; align-items: stretch; }
+.btn.tracebtn { border-color: #cfd4db; color: #16191f; background: #fff; white-space: nowrap; }
+.btn.tracebtn:hover:not(:disabled) { background: #eef1f5; border-color: #8a919c; }
+.tracerow { margin-top: 12px; }
+.tracelabel { font-weight: 700; margin-bottom: 5px; }
+.tracefoot { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.tracesample { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: #8a919c; }
+
 /* 위탁출고 표시 — 파일에 구분이 없어 손으로 체크 */
 .consigncol { width: 46px; text-align: center; }
 .consignbox { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; padding: 4px; }
 .consignbox input { width: 17px; height: 17px; accent-color: #7c3aed; cursor: pointer; }
 .consignbadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   font-weight: 800; color: #fff; background: #7c3aed; white-space: nowrap; }
+
+/* 되돌리기 (L-2) */
+.btn.undobtn { background: #fff; border-color: #cfd4db; color: #16191f; font-weight: 700; white-space: nowrap; }
+.btn.undobtn:hover:not(:disabled) { background: #eef1f5; }
+.btn.undobtn:disabled { opacity: .45; }
+.undocount { display: inline-block; margin-left: 5px; min-width: 17px; padding: 0 5px; border-radius: 999px;
+  background: #eef1f5; color: #4a515c; font-size: 11px; font-weight: 800; line-height: 17px; text-align: center; }
+.snaprow { display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 10px; border: 1px solid #e6e9ee; background: #fff; }
+.snaptime { font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.snapreason { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.snapcnt { color: #4a515c; white-space: nowrap; font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) { .snaprow { flex-wrap: wrap; } .snapreason { flex-basis: 100%; } }
 
 /* 마감 점검 (0-13) */
 .btn.closebtn { position: relative; background: #16191f; border-color: #16191f; color: #fff; font-weight: 700; }
@@ -5734,9 +6036,10 @@ const CSS = `
   .topamt .tval { font-size: 18px; }
   .livewrap { order: 2; padding: 6px; }
   .livetxt { display: none; }          /* 붉은 점만 남김 (공간 절약) */
-  .topright { order: 3; flex: 1 1 auto; flex-wrap: nowrap; gap: 6px; }
-  .datein { flex: 1 1 auto; min-width: 0; }
-  .topright .btn { flex: 0 0 auto; padding: 9px 12px; }
+  /* ⚠ 버튼이 5개(엑셀·불러오기·되돌리기·마감)라 nowrap 이면 390px 에서 터진다 */
+  .topright { order: 3; flex: 1 1 100%; flex-wrap: wrap; gap: 6px; }
+  .datein { flex: 1 1 100%; min-width: 0; }
+  .topright .btn { flex: 1 1 auto; padding: 9px 8px; font-size: 13px; white-space: nowrap; }
   /* 탭: 8개를 2줄×4개로 — 글자 접힘 없이 고정 영역 축소 */
   .tabs { flex-wrap: wrap; gap: 5px; padding: 8px 0; }
   .tab { flex: 1 1 calc(25% - 4px); white-space: nowrap; font-size: 12px; padding: 8px 2px; overflow: hidden; min-height: 40px; }
