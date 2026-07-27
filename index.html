@@ -4841,7 +4841,11 @@ function App() {
     }, "취소")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
       className: "onick clickable" + (rs === "all" ? " struck" : ""),
       onClick: () => selectNick(s.nick)
-    }, s.nick), rs === "all" && /*#__PURE__*/React.createElement("span", {
+    }, s.nick), isShipped(s.nick) && /*#__PURE__*/React.createElement("span", {
+      className: "shipdonebadge"
+    }, "📦 출고완료"), cust(s.nick).keep && /*#__PURE__*/React.createElement("span", {
+      className: "keepbadge sm"
+    }, "🔖 킵"), rs === "all" && /*#__PURE__*/React.createElement("span", {
       className: "refundbadge"
     }, "환불"), (rs === "part" || rs === "allpart") && /*#__PURE__*/React.createElement("span", {
       className: "refundbadge part"
@@ -4964,7 +4968,11 @@ function App() {
     className: "sm-sep"
   }, "·"), /*#__PURE__*/React.createElement("span", {
     className: "sm-item unpaid"
-  }, "미입금 ", /*#__PURE__*/React.createElement("b", null, nickList.length - paidCount), "명"), keepNicks.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+  }, "미입금 ", /*#__PURE__*/React.createElement("b", null, nickList.length - paidCount), "명"), shippedNickCount > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+    className: "sm-sep"
+  }, "·"), /*#__PURE__*/React.createElement("span", {
+    className: "sm-item shipdone"
+  }, "📦 출고완료 ", /*#__PURE__*/React.createElement("b", null, shippedNickCount), "명")), keepNicks.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
     className: "sm-sep"
   }, "·"), /*#__PURE__*/React.createElement("span", {
     className: "sm-item keep"
@@ -5033,7 +5041,9 @@ function App() {
       className: "sub"
     }, " (상품 ", won(sum), " + 배송 ", won(shipFee), ")") : /*#__PURE__*/React.createElement("span", {
       className: "sub"
-    }, " (상품 ", won(sum), " · 배송비 없음)"), c.keep && /*#__PURE__*/React.createElement("span", {
+    }, " (상품 ", won(sum), " · 배송비 없음)"), isShipped(n) && /*#__PURE__*/React.createElement("span", {
+      className: "shipdonebadge"
+    }, "📦 출고완료"), c.keep && /*#__PURE__*/React.createElement("span", {
       className: "keepbadge"
     }, "🔖 킵 · 이번 발송 제외"), rs === "all" && /*#__PURE__*/React.createElement("span", {
       className: "refundbadge"
@@ -6401,6 +6411,10 @@ const CSS = `
 .whtbl tfoot td { border-top: 2px solid #d9dde3; font-weight: 800; padding-top: 10px; }
 .settletop { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .summarycard { display: flex; align-items: center; gap: 10px; padding: 12px 16px; font-size: 15px; }
+.shipdonebadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+  font-weight: 800; color: #14508f; background: #e4eefb; border: 1px solid #a9c9f0; white-space: nowrap; }
+.keepbadge.sm { margin-left: 6px; padding: 1px 7px; font-size: 11px; font-weight: 800; }
+
 /* 출고완료 (7/27) — 이미 운송장이 붙어 나간 건 */
 .shipsel-row.shipped { opacity: .55; background: #f6f7f9; }
 .shipsel-row.shipped.on { opacity: 1; background: #eaf3ff; }
@@ -6412,6 +6426,7 @@ const CSS = `
 
 /* 킵 (5-19) */
 .sm-item.keep { color: #b06a00; }
+.sm-item.shipdone { color: #14508f; }
 .card.keepbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
   border-color: #f0b872; background: #fffaf2; }
 .btn.keepload { margin-left: auto; background: #fff3e0; border-color: #f0b872; color: #8a4b00; font-weight: 700; white-space: nowrap; }
