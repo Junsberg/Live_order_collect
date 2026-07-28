@@ -21,6 +21,18 @@
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<!-- ⚠ SheetJS 가 안 뜨면 엑셀 저장·운송장 업로드·출고 파일이 전부 막힌다. 대체 주소를 둔다.
+     (실제로 「XLSX is not defined」 로 기능이 통째로 죽는 것을 검증 중 확인함) -->
+<script>
+if (typeof XLSX === "undefined") {
+  document.write('<script src="https://cdn.jsdelivr.net/npm/xlsx@0.20.3/dist/xlsx.full.min.js"><\/script>');
+}
+</script>
+<script>
+if (typeof XLSX === "undefined") {
+  document.write('<script src="https://unpkg.com/xlsx@0.20.3/dist/xlsx.full.min.js"><\/script>');
+}
+</script>
 <!-- Supabase 로그인용. ⚠ CDN 한 곳이 죽으면 로그인 자체가 불가능해지므로 대체 주소를 둔다. -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
@@ -267,8 +279,9 @@ const migrateTrk = (shipData, customers) => {
     if (d && (d.tracking || "") !== t) changed++;
     return {
       ...d,
-      tracking: t
-    };
+      tracking: t,
+      seq: Number(d && d.seq) || 1
+    }; // 옛 자료에는 차수가 없다 → 1차
   });
   const cs = {};
   Object.entries(customers || {}).forEach(([k, c]) => {
@@ -396,6 +409,116 @@ function App() {
     }
   };
   const closeToast = id => setToasts(ts => ts.filter(t => t.id !== id));
+
+  /* ---------- 서버 저장 (4단계) ----------
+     ⚠ 로컬 저장을 없애지 않는다. 인터넷이 끊겨도 방송은 돌아가야 한다 (설계안 1-8 오프라인 우선).
+        입력 → 로컬에 항상 저장 → 서버에도 저장 (되면). 실패하면 배너로 알리고 나중에 다시 올린다.
+     ⚠ rev 로 덮어쓰기를 막는다. 시각 비교는 같은 초에 두 요청이 오면 뚫린다 (실제로 확인함). */
+  const [srvRev, setSrvRev] = useState(null); // 내가 읽었을 때의 서버 버전
+  const [srvState, setSrvState] = useState("idle"); // idle | saving | ok | fail | conflict
+  const [srvConflict, setSrvConflict] = useState(null);
+  const [srvPick, setSrvPick] = useState(null); // 서버·로컬이 다를 때 고르는 중
+  const srvRevRef = useRef(null);
+  const srvBusy = useRef(false);
+  /* ⚠ 아래 3개는 실제 검증에서 잡힌 결함 3건을 막기 위한 것이다. 지우지 말 것.
+     ① srvSyncedDate — 서버와 「맞춰본」 날짜. 날짜를 바꾼 직후에는 아직 확인 전이므로
+        이 값이 지금 날짜와 같아질 때까지 서버 저장을 하지 않는다.
+        (없으면: 7/27 주문 3건을 들고 7/22 로 날짜를 바꾸면 그 3건이 7/22 에 기록된다)
+     ② srvSyncedRef — 서버에 있는 것과 같다고 아는 내용. 같으면 다시 올리지 않는다.
+        (없으면: 앱을 열기만 해도 서버 rev 가 오르고 저장자 이름이 바뀌어,
+         다른 창에 「먼저 저장했습니다」 가짜 충돌 배너가 뜬다)
+     ③ srvPendingRef — 저장 중에 들어온 변경을 버리지 않고 밀어두는 표식.
+        (없으면: 회선이 느릴 때 마지막 입력이 서버에 안 올라간 채 끝난다) */
+  const [srvSyncedDate, setSrvSyncedDate] = useState(null);
+  const srvSyncedRef = useRef(null);
+  const srvPendingRef = useRef(false);
+  const [srvRetryTick, setSrvRetryTick] = useState(0); // 밀어둔 저장을 다시 태우는 신호
+  const [srvLoadTick, setSrvLoadTick] = useState(0); // 불러오기 실패 시 다시 시도하는 신호
+  const srvFirstSync = useRef(true); // 앱을 처음 열 때인가 (날짜 변경과 구분)
+
+  const serverOn = () => !!(sb() && auth && auth.email && !auth.unregistered && !auth.loadFailed);
+
+  // 서버에서 그 날짜를 읽어온다
+  const serverLoad = async date => {
+    const c = sb();
+    if (!c) return {
+      ok: false
+    };
+    try {
+      const {
+        data,
+        error
+      } = await c.rpc("load_broadcast", {
+        p_date: date,
+        p_seq: 1
+      });
+      if (error) return {
+        ok: false,
+        err: error.message
+      };
+      const row = Array.isArray(data) ? data[0] : data;
+      if (!row || !row.found) return {
+        ok: true,
+        exists: false
+      };
+      return {
+        ok: true,
+        exists: true,
+        rev: Number(row.rev),
+        payload: row.payload,
+        updatedAt: row.updated_at,
+        updatedBy: row.updated_by
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        err: e && e.message || "load failed"
+      };
+    }
+  };
+
+  // 서버에 저장한다. rev 가 안 맞으면 거부되고 누가 바꿨는지 알려준다.
+  const serverSave = async (date, payload, baseRev) => {
+    const c = sb();
+    if (!c) return {
+      ok: false
+    };
+    try {
+      const {
+        data,
+        error
+      } = await c.rpc("save_broadcast", {
+        p_date: date,
+        p_seq: 1,
+        p_payload: payload,
+        p_base_rev: baseRev
+      });
+      if (error) return {
+        ok: false,
+        err: error.message
+      };
+      const row = Array.isArray(data) ? data[0] : data;
+      if (!row) return {
+        ok: false,
+        err: "no result"
+      };
+      if (!row.ok) return {
+        ok: false,
+        conflict: true,
+        rev: Number(row.rev),
+        by: row.conflict_by
+      };
+      return {
+        ok: true,
+        rev: Number(row.rev)
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        err: e && e.message || "save failed"
+      };
+    }
+  };
 
   /* 모든 읽기는 이 함수를 지난다.
      ⚠ 서버 연동(4단계) 때 이 함수 하나만 서버 호출로 바꾸면 전체가 따라온다.
@@ -845,10 +968,78 @@ function App() {
       clearTimeout(t2);
     };
   }, [intro]);
+
+  /* 로컬에 저장 → 서버에도 저장.
+     ⚠ 순서가 중요하다. 로컬을 먼저 확실히 남긴 뒤 서버로 보낸다.
+        서버가 안 되는 상황(인터넷 끊김·충돌)에서도 입력한 내용이 사라지면 안 된다. */
   useEffect(() => {
     if (!loaded) return;
-    const t = setTimeout(() => {
-      saveKey("saja:session", JSON.stringify({
+    const payload = {
+      products,
+      orders,
+      customers,
+      shipFee,
+      bdate,
+      pickState,
+      settleHeader,
+      trackHeader,
+      shipData
+    };
+    const t = setTimeout(async () => {
+      await saveKey("saja:session", JSON.stringify(payload), "방송 데이터");
+      if (!serverOn() || srvPick) return; // 고르는 중이면 올리지 않는다
+      // ⚠ 날짜를 바꾼 직후 — 서버에 그 날짜가 뭐가 있는지 확인하기 전에는 절대 올리지 않는다.
+      //    확인 없이 올리면 앞 날짜의 주문이 새 날짜에 그대로 기록된다.
+      if (srvSyncedDate !== bdate) return;
+      const str = JSON.stringify(payload);
+      // ⚠ 서버에 있는 것과 똑같으면 올릴 이유가 없다. 되올리면 저장자 이름과 rev 만 바뀌어
+      //    다른 사람 화면에 가짜 충돌이 뜬다.
+      if (srvSyncedRef.current === str) return;
+      if (srvBusy.current) {
+        srvPendingRef.current = true;
+        return;
+      } // 버리지 않고 밀어둔다
+      srvBusy.current = true;
+      srvPendingRef.current = false;
+      setSrvState("saving");
+      const r = await serverSave(bdate, payload, srvRevRef.current);
+      srvBusy.current = false;
+      if (r.ok) {
+        srvRevRef.current = r.rev;
+        setSrvRev(r.rev);
+        srvSyncedRef.current = str;
+        setSrvState("ok");
+        setSrvConflict(null);
+      } else if (r.conflict) {
+        // ⚠ 조용히 덮어쓰지 않는다. 남이 먼저 저장했으면 사람이 판단해야 한다.
+        setSrvState("conflict");
+        setSrvConflict({
+          by: r.by || "다른 사람",
+          rev: r.rev
+        });
+      } else {
+        setSrvState("fail");
+      }
+      // 저장하는 사이에 들어온 변경이 있으면 한 번 더 태운다 (그냥 버리면 마지막 입력이 사라진다)
+      if (srvPendingRef.current) setSrvRetryTick(n => n + 1);
+    }, 700); // 서버 요청이 붙으므로 로컬(400ms)보다 조금 여유를 둔다
+    return () => clearTimeout(t);
+  }, [products, orders, customers, shipFee, bdate, pickState, settleHeader, trackHeader, shipData, loaded, auth, srvPick, srvSyncedDate, srvRetryTick]);
+
+  /* 앱을 열거나 날짜를 바꾸면 서버를 먼저 확인한다.
+     ⚠ 서버에 그 날짜가 있으면 서버 것이 기준이다. 매니저 PC 의 옛 데이터가
+        사장님이 올린 최신본을 덮어쓰는 것을 막는다. */
+  const syncedDate = useRef(null);
+  /* ⚠ 날짜를 바꾸기 전에 「지금 날짜」의 저장을 반드시 끝낸다.
+     자동저장은 0.7초 뒤에 일어나는데, 그 사이에 날짜를 바꾸면 대기 중이던 저장이 취소되어
+     마지막에 넣은 주문이 서버에 올라가지 못한 채 사라진다. (실제로 재현됨)
+     저장에 실패하면 날짜를 바꾸지 않는다 — 못 올린 내용을 안고 날짜를 넘어가면 그대로 유실된다. */
+  const [dateBusy, setDateBusy] = useState(false);
+  const changeDate = async nd => {
+    const next = nd || todayISO();
+    if (next === bdate) return;
+    if (serverOn() && srvSyncedDate === bdate && !srvPick) {
+      const payload = {
         products,
         orders,
         customers,
@@ -858,10 +1049,213 @@ function App() {
         settleHeader,
         trackHeader,
         shipData
-      }), "방송 데이터");
-    }, 400);
-    return () => clearTimeout(t);
-  }, [products, orders, customers, shipFee, bdate, pickState, settleHeader, trackHeader, shipData, loaded]);
+      };
+      const str = JSON.stringify(payload);
+      if (srvSyncedRef.current !== str) {
+        setDateBusy(true);
+        setSrvState("saving");
+        await saveKey("saja:session", str, "방송 데이터");
+        const r = await serverSave(bdate, payload, srvRevRef.current);
+        setDateBusy(false);
+        if (!r.ok) {
+          setSrvState(r.conflict ? "conflict" : "fail");
+          if (r.conflict) setSrvConflict({
+            by: r.by || "다른 사람",
+            rev: r.rev
+          });
+          showToast(`❌ ${bdate} 내용을 서버에 올리지 못했습니다 — 날짜를 바꾸지 않습니다`);
+          return; // 못 올렸으면 날짜를 넘기지 않는다
+        }
+        srvRevRef.current = r.rev;
+        setSrvRev(r.rev);
+        srvSyncedRef.current = str;
+      }
+    }
+    setBdate(next);
+  };
+  useEffect(() => {
+    if (!loaded || !serverOn()) return;
+    if (syncedDate.current === bdate) return;
+    syncedDate.current = bdate;
+    const first = srvFirstSync.current; // 앱을 처음 연 것인가, 날짜를 바꾼 것인가
+    let alive = true;
+    (async () => {
+      const r = await serverLoad(bdate);
+      if (!alive) return;
+      if (!r.ok) {
+        // 못 읽었으면 올리지도 않는다. 잠시 뒤 다시 시도한다.
+        // ⚠ 여기서 srvFirstSync 를 내리면 안 된다. 내리면 재시도가 「날짜를 바꾼 것」으로 오인돼
+        //    앱을 열었을 뿐인데 「자료가 없습니다」 안내가 뜬다.
+        setSrvState("fail");
+        syncedDate.current = null;
+        setTimeout(() => {
+          if (alive) setSrvLoadTick(n => n + 1);
+        }, 5000);
+        return;
+      }
+      srvFirstSync.current = false; // 읽기에 성공한 뒤에만 내린다
+      const localEmpty = orders.length === 0 && products.length === 0;
+      if (!r.exists) {
+        // 서버에 그 날짜가 없음
+        srvRevRef.current = null;
+        setSrvRev(null);
+        srvSyncedRef.current = null;
+        if (first || localEmpty) {
+          // 앱을 막 열었을 때 = 이 PC 내용이 곧 그 날짜의 내용이다 → 그대로 올린다
+          setSrvSyncedDate(bdate);
+          setSrvState("idle");
+        } else {
+          // ⚠ 날짜를 바꾼 경우 — 화면에 남은 건 「앞 날짜」의 주문이다.
+          //    묻지 않고 올리면 그 주문이 이 날짜 것으로 둔갑한다.
+          setSrvPick({
+            srv: null,
+            empty: true,
+            localCount: orders.length,
+            srvCount: 0
+          });
+        }
+        return;
+      }
+      const localStr = JSON.stringify({
+        products,
+        orders,
+        customers,
+        shipFee,
+        bdate,
+        pickState,
+        settleHeader,
+        trackHeader,
+        shipData
+      });
+      const srvStr = JSON.stringify(r.payload || {});
+      if (srvStr === localStr || localEmpty || !first) {
+        /* ⚠ !first = 사용자가 날짜를 바꾼 경우.
+           이때 화면에 남아 있는 건 「앞 날짜」의 내용이므로 이 날짜의 후보가 될 수 없다.
+           후보로 내놓으면 사장님이 습관적으로 「이 PC 것으로 덮어쓰기」를 눌렀을 때
+           이 날짜의 서버 자료가 앞 날짜 내용으로 덮어써진다. */
+        applyServerPayload(r); // 서버 것을 쓴다
+      } else {
+        setSrvPick({
+          srv: r,
+          localCount: orders.length,
+          srvCount: r.payload && (r.payload.orders || []).length || 0
+        });
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [bdate, loaded, auth, srvLoadTick]);
+
+  // 「빈 날짜」 안내에서 고른 결과
+  const emptyStartFresh = () => {
+    // 이 날짜를 빈 방송으로 시작
+    takeSnap("날짜 변경 · 빈 방송으로 시작 직전");
+    setProducts([]);
+    setOrders([]);
+    setCustomers({});
+    setPickState({});
+    setShipData([]);
+    srvRevRef.current = null;
+    setSrvRev(null);
+    srvSyncedRef.current = null;
+    setSrvPick(null);
+    setSrvConflict(null);
+    setSrvSyncedDate(bdate);
+    setSrvState("idle");
+    showToast(`✓ ${bdate} 을(를) 새 방송으로 시작합니다`);
+  };
+  const emptyMoveHere = () => {
+    // 지금 화면 내용을 이 날짜로 올린다
+    srvRevRef.current = null;
+    setSrvRev(null);
+    srvSyncedRef.current = null;
+    setSrvPick(null);
+    setSrvConflict(null);
+    setSrvSyncedDate(bdate);
+    showToast(`⚠ 지금 화면 내용을 ${bdate} 로 올립니다`);
+  };
+  const applyServerPayload = r => {
+    const d = r.payload || {};
+    const m = migrateTrk(d.shipData, d.customers);
+    const nextShipFee = typeof d.shipFee === "number" ? d.shipFee : 4000;
+    const nextSettle = d.settleHeader ? d.settleHeader : settleHeader;
+    const nextTrack = d.trackHeader ? d.trackHeader : trackHeader;
+    setProducts(d.products || []);
+    setOrders(d.orders || []);
+    setCustomers(m.customers);
+    setShipFee(nextShipFee);
+    setPickState(d.pickState || {});
+    if (d.settleHeader) setSettleHeader(d.settleHeader);
+    if (d.trackHeader) setTrackHeader(d.trackHeader);
+    setShipData(m.shipData);
+    srvRevRef.current = r.rev;
+    setSrvRev(r.rev);
+    // ⚠ 방금 받은 내용 = 서버에 있는 내용. 이걸 기록해두지 않으면 화면에 적용한 것만으로
+    //    자동저장이 깨어나 「받은 것을 그대로 되올리는」 헛저장이 일어난다.
+    srvSyncedRef.current = JSON.stringify({
+      products: d.products || [],
+      orders: d.orders || [],
+      customers: m.customers,
+      shipFee: nextShipFee,
+      bdate,
+      pickState: d.pickState || {},
+      settleHeader: nextSettle,
+      trackHeader: nextTrack,
+      shipData: m.shipData
+    });
+    setSrvSyncedDate(bdate);
+    setSrvState("ok");
+    setSrvPick(null);
+    setSrvConflict(null);
+  };
+
+  // 충돌·선택 상황에서 「서버 것 받기」
+  const takeServer = async () => {
+    const r = await serverLoad(bdate);
+    if (!r.ok || !r.exists) {
+      showToast("❌ 서버에서 불러오지 못했습니다");
+      return;
+    }
+    applyServerPayload(r);
+    showToast(`✓ 서버 데이터를 불러왔습니다 · 주문 ${(r.payload.orders || []).length}건`);
+  };
+  // 「이 PC 것으로 덮어쓰기」 — ⚠ 사장님만
+  const forceMine = async () => {
+    if (!auth || !auth.isOwner) {
+      showToast("⚠ 덮어쓰기는 사장님만 할 수 있습니다");
+      return;
+    }
+    const r0 = await serverLoad(bdate);
+    if (!r0.ok) {
+      showToast("❌ 서버 상태를 확인하지 못했습니다");
+      return;
+    }
+    const payload = {
+      products,
+      orders,
+      customers,
+      shipFee,
+      bdate,
+      pickState,
+      settleHeader,
+      trackHeader,
+      shipData
+    };
+    const r = await serverSave(bdate, payload, r0.exists ? r0.rev : null);
+    if (r.ok) {
+      srvRevRef.current = r.rev;
+      setSrvRev(r.rev);
+      srvSyncedRef.current = JSON.stringify(payload); // 방금 올린 것이 곧 서버 내용
+      setSrvSyncedDate(bdate);
+      setSrvState("ok");
+      setSrvPick(null);
+      setSrvConflict(null);
+      showToast("⚠ 이 PC 내용으로 서버를 덮어썼습니다 — 되돌릴 수 없습니다");
+    } else {
+      showToast("❌ 덮어쓰기 실패 — 다시 시도해주세요");
+    }
+  };
 
   // 상단바 실제 높이를 --topbar-h 로 추적 → 탭 줄이 정확히 그 아래에 고정되도록
   useEffect(() => {
@@ -913,9 +1307,26 @@ function App() {
   // ⚠ 킵 주문건은 「아직 거래가 끝나지 않은 것」이라 집계에서 통째로 뺀다.
   //    출고·창고·매출·마감점검이 전부 activeOrders 를 쓰므로 여기 한 곳만 막으면 따라온다. (5-19)
   const isKeep = nick => !!(customers[nick] && customers[nick].keep);
-  const activeOrders = useMemo(() => orders.filter(o => !o.canceled && !(customers[o.nick] && customers[o.nick].keep)), [orders, customers]);
+  /* ---------- 차수(출고 마감) ----------
+     같은 날 오전에 출고까지 끝낸 손님이 오후 방송에서 또 주문하는 경우가 있다.
+     운송장이 붙은 시점에 그때까지의 주문을 「마감」하고, 이후 주문은 새 차수로 본다.
+     o.done = true 인 주문은 이미 보내고 정산도 끝난 건이라 현재 차수 계산에서 뺀다.
+     ⚠ 매출·결산에서는 빼면 안 된다. 오늘 판 것은 맞기 때문이다. (아래 doneSales 로 다시 더한다) */
+  const doneOrders = useMemo(() => orders.filter(o => o.done && !o.canceled), [orders]);
+  const doneSales = useMemo(() => doneOrders.reduce((s, o) => s + o.price * o.qty, 0), [doneOrders]);
+  const doneFees = useMemo(() => doneOrders.reduce((s, o) => s + (Number(o.doneFee) || 0), 0), [doneOrders]);
+  const donePaidSales = useMemo(() => doneOrders.reduce((s, o) => s + (o.donePaid !== false ? o.price * o.qty : 0), 0), [doneOrders]);
+  const donePaidFees = useMemo(() => doneOrders.reduce((s, o) => s + (o.donePaid !== false ? Number(o.doneFee) || 0 : 0), 0), [doneOrders]);
+  const doneNicks = useMemo(() => new Set(doneOrders.map(o => o.nick)), [doneOrders]);
+  /* 차수 번호 — 마감된 차수가 n개면 지금 받고 있는 건 (n+1)차다.
+     운송장은 「닉네임 + 차수」로 한 줄씩 남는다. 그래야 1차 송장이 2차에 덮이지 않는다. */
+  const doneSeqOf = n => orders.reduce((m, o) => o.nick === n && o.done ? Math.max(m, Number(o.doneSeq) || 1) : m, 0);
+  const curSeq = n => doneSeqOf(n) + 1;
+  const seqOf = d => Number(d && d.seq) || 1;
+  const rowFor = (n, q) => shipData.find(d => d.nick === n && seqOf(d) === (q || curSeq(n)));
+  const activeOrders = useMemo(() => orders.filter(o => !o.canceled && !o.done && !(customers[o.nick] && customers[o.nick].keep)), [orders, customers]);
   // 킵 주문건 (화면·목록용)
-  const keepOrders = useMemo(() => orders.filter(o => !o.canceled && customers[o.nick] && customers[o.nick].keep), [orders, customers]);
+  const keepOrders = useMemo(() => orders.filter(o => !o.canceled && !o.done && customers[o.nick] && customers[o.nick].keep), [orders, customers]);
   const keepNicks = useMemo(() => [...new Set(keepOrders.map(o => o.nick))], [keepOrders]);
   const totalSales = useMemo(() => activeOrders.reduce((s, o) => s + o.price * o.qty, 0), [activeOrders]);
   const paidSales = useMemo(() => activeOrders.reduce((s, o) => s + (customers[o.nick] && customers[o.nick].paid ? o.price * o.qty : 0), 0), [activeOrders, customers]);
@@ -934,12 +1345,14 @@ function App() {
     const c = customers[o.nick];
     return c && c.paid && !noFee(c);
   }).map(o => o.nick)).size, [activeOrders, customers]);
-  const totalWithShip = totalSales + shipPayNickCount * shipFee;
-  const paidWithShip = paidSales + paidShipPayNickCount * shipFee;
+  // ⚠ 마감된 차수도 오늘의 매출이다. 현재 차수 금액에 더해 상단바·결산이 하루 전체를 보이게 한다.
+  const totalWithShip = totalSales + shipPayNickCount * shipFee + doneSales + doneFees;
+  const paidWithShip = paidSales + paidShipPayNickCount * shipFee + donePaidSales + donePaidFees;
+  // ⚠ 정산 대상 = 「아직 안 보낸 주문」이 있는 사람. 마감된 차수만 있는 사람은 정산할 게 없다.
   const nickList = useMemo(() => {
     const s = [];
     orders.forEach(o => {
-      if (!s.includes(o.nick)) s.push(o.nick);
+      if (!o.done && !s.includes(o.nick)) s.push(o.nick);
     });
     return s;
   }, [orders]);
@@ -947,11 +1360,13 @@ function App() {
   //    킵 고객도 정산서를 보내야 하고, 주문 목록에 보여야 한다.
   const byNick = useMemo(() => {
     const m = {};
-    orders.filter(o => !o.canceled).forEach(o => {
+    orders.filter(o => !o.canceled && !o.done).forEach(o => {
       (m[o.nick] = m[o.nick] || []).push(o);
     });
     return m;
-  }, [activeOrders]);
+  }, [orders]);
+  // ⚠ 주문 목록에서는 마감분도 「출고완료」로 보여준다. 안 보이면 사장님이 없어진 줄 안다.
+  //    다만 금액·건수는 현재 차수만 세고, 마감분은 doneCount 로 따로 표시한다.
   const nickSummary = useMemo(() => {
     const m = {};
     orders.forEach(o => {
@@ -959,10 +1374,16 @@ function App() {
         nick: o.nick,
         total: 0,
         lastTs: 0,
-        active: 0
+        active: 0,
+        doneCount: 0,
+        doneTotal: 0
       });
       e.lastTs = Math.max(e.lastTs, o.ts || 0);
-      if (!o.canceled) {
+      if (o.canceled) return;
+      if (o.done) {
+        e.doneCount += 1;
+        e.doneTotal += o.price * o.qty;
+      } else {
         e.total += o.price * o.qty;
         e.active += 1;
       }
@@ -1247,10 +1668,11 @@ function App() {
       nickRef.current && nickRef.current.focus();
       return;
     }
-    const existing = orders.find(o => o.nick === n && o.name === name && o.price === price && !o.canceled);
+    // ⚠ 마감된(출고완료) 주문에는 합치지 않는다. 합치면 새 주문이 이미 보낸 건에 흡수돼 사라진다.
+    const existing = orders.find(o => o.nick === n && o.name === name && o.price === price && !o.canceled && !o.done);
     const rid = existing ? existing.id : uid();
     setOrders(os => {
-      const i = os.findIndex(o => o.nick === n && o.name === name && o.price === price && !o.canceled);
+      const i = os.findIndex(o => o.nick === n && o.name === name && o.price === price && !o.canceled && !o.done);
       if (i >= 0) {
         const cp = [...os];
         cp[i] = {
@@ -1578,7 +2000,7 @@ function App() {
       setCust(n, {
         notified: true
       });
-      setShipData(prev => prev.map(d => d.nick === n && d.renotify ? {
+      setShipData(prev => prev.map(d => d.nick === n && d.renotify && seqOf(d) === curSeq(n) ? {
         ...d,
         renotify: false
       } : d));
@@ -1605,7 +2027,121 @@ function App() {
     });
     return s;
   }, [shipData]);
-  const isShipped = nick => shippedNicks.has(nick);
+
+  /* ---------- 차수 자동 마감 / 해제 ----------
+     ⚠ 운송장이 붙는 곳이 세 군데(롯데 업로드·CJ 업로드·직접 입력)라 각각에서 호출하면 빠뜨리기 쉽다.
+        그래서 「운송장 목록이 바뀌면」 한곳에서 판단한다. 초기화로 운송장이 사라지면 그대로 되돌린다.
+     ⚠ 되돌릴 수 있어야 하므로 마감 시점의 손님 상태(입금·안내·킵·배송비면제)를 주문에 함께 적어둔다. */
+  useEffect(() => {
+    if (!loaded) return;
+    /* ⚠ 「운송장이 있는 사람」을 그때그때 마감하면, 마감 뒤에 들어온 2차 주문까지 곧바로 마감돼버린다.
+          그래서 운송장 번호 기준으로 판단한다 — 그 번호로 아직 마감한 적이 없을 때만 마감한다. */
+    /* ⚠ 「운송장이 있는 사람」 기준으로 마감하면, 마감 뒤 들어온 2차 주문까지 곧바로 마감된다.
+          그래서 운송장 번호 기준으로 판단한다 — 그 번호로 아직 마감한 적이 없을 때만 마감한다. */
+    const toClose = shipData.filter(d => normTrk(d.tracking) && d.tracking !== d.closedTrk).map(d => ({
+      nick: d.nick,
+      seq: seqOf(d),
+      trk: d.tracking
+    })).filter(x => orders.some(o => o.nick === x.nick && !o.done && !o.canceled));
+
+    // 해제 — 그 차수의 운송장이 사라졌으면 마감을 되돌린다 (초기화·삭제)
+    const doneBatches = [];
+    orders.forEach(o => {
+      if (!o.done) return;
+      const q = Number(o.doneSeq) || 1;
+      if (!doneBatches.some(b => b.nick === o.nick && b.seq === q)) doneBatches.push({
+        nick: o.nick,
+        seq: q
+      });
+    });
+    const toOpen = doneBatches.filter(b => !shipData.some(d => d.nick === b.nick && seqOf(d) === b.seq && normTrk(d.tracking)));
+    if (!toClose.length && !toOpen.length) return;
+    const inClose = o => toClose.some(x => x.nick === o.nick);
+    const inOpen = o => toOpen.some(b => b.nick === o.nick && (Number(o.doneSeq) || 1) === b.seq);
+    if (toClose.length) takeSnap(`출고완료 처리 직전 (${toClose.map(x => x.nick).join(", ")})`);else takeSnap(`출고완료 되돌리기 직전 (${toOpen.map(b => b.nick).join(", ")})`);
+    setOrders(prev => {
+      const firstOf = {};
+      return prev.map(o => {
+        if (inClose(o) && !o.done && !o.canceled) {
+          const x = toClose.find(z => z.nick === o.nick);
+          const c = customers[o.nick] || EMPTY_CUST;
+          const head = !firstOf[o.nick];
+          firstOf[o.nick] = true;
+          const extra = head ? {
+            doneFee: noFee(c) ? 0 : shipFee,
+            donePaid: !!c.paid,
+            doneCust: {
+              paid: !!c.paid,
+              notified: !!c.notified,
+              keep: !!c.keep,
+              shipPaid: !!c.shipPaid,
+              keepPaid: Number(c.keepPaid) || 0,
+              freeShip: !!c.freeShip,
+              pickup: !!c.pickup
+            }
+          } : {};
+          return {
+            ...o,
+            done: true,
+            doneSeq: x.seq,
+            doneTrk: x.trk,
+            doneAt: Date.now(),
+            ...extra
+          };
+        }
+        if (inOpen(o) && o.done) {
+          const {
+            done,
+            doneSeq,
+            doneTrk,
+            doneAt,
+            doneFee,
+            donePaid,
+            doneCust,
+            ...rest
+          } = o;
+          return rest;
+        }
+        return o;
+      });
+    });
+    setCustomers(prev => {
+      const next = {
+        ...prev
+      };
+      // 마감 → 다음 차수를 새로 받을 수 있게 입금·안내·킵·배송비면제를 푼다 (배송지·메모는 그대로 둔다)
+      toClose.forEach(x => {
+        const c = next[x.nick] || EMPTY_CUST;
+        next[x.nick] = {
+          ...c,
+          paid: false,
+          notified: false,
+          keep: false,
+          shipPaid: false,
+          keepPaid: 0,
+          freeShip: false,
+          pickup: false
+        };
+      });
+      // 해제 → 마감할 때 적어둔 상태로 되돌린다
+      toOpen.forEach(b => {
+        const head = orders.find(o => o.nick === b.nick && o.done && (Number(o.doneSeq) || 1) === b.seq && o.doneCust);
+        if (head) next[b.nick] = {
+          ...(next[b.nick] || EMPTY_CUST),
+          ...head.doneCust
+        };
+      });
+      return next;
+    });
+
+    // 이 운송장으로 마감했다고 적어둔다 (같은 번호로 두 번 마감하지 않기 위해)
+    if (toClose.length) setShipData(prev => prev.map(d => toClose.some(x => x.nick === d.nick && x.seq === seqOf(d)) ? {
+      ...d,
+      closedTrk: d.tracking
+    } : d));
+    if (toClose.length) showToast(`✓ 「${toClose.map(x => x.nick).join(", ")}」 출고완료 — 이후 주문은 새로 정산됩니다`);else showToast(`↩ 「${toOpen.map(b => b.nick).join(", ")}」 출고완료를 되돌렸습니다`);
+  }, [shipData, shippedNicks, orders, loaded]);
+  const isShipped = nick => !orders.some(o => o.nick === nick && !o.done && !o.canceled) && doneSeqOf(nick) > 0;
   const pivot = useMemo(() => {
     const m = {};
     activeOrders.forEach(o => {
@@ -1921,7 +2457,7 @@ function App() {
     // ⚠ 목록에 행이 있으면 그 값이 절대 우선. 손으로 지운 사람에게 고객정보의 옛 번호가 되살아나면 오배송이 된다.
     const trackByNick = {};
     if (withTracking) shipData.forEach(d => {
-      trackByNick[d.nick] = normTrk(d.tracking);
+      if (seqOf(d) === curSeq(d.nick)) trackByNick[d.nick] = normTrk(d.tracking);
     });
     const rows = [["이름", "전화번호", "휴대폰번호", "우편번호", "주소", "상품명", "옵션명", "추가구성", "수량", "주문번호", "운임구분", "배송시요구사항", "송장번호", "주문처", "보내는분", "전화번호", "운임", "송장번호"]];
     sortLinesByName(lines).forEach(o => {
@@ -2024,7 +2560,7 @@ function App() {
     // ⚠ 롯데와 같은 규칙: 조회 목록에 행이 있으면 그 값이 절대 우선
     const trackByNick = {};
     shipData.forEach(d => {
-      trackByNick[d.nick] = normTrk(d.tracking);
+      if (seqOf(d) === curSeq(d.nick)) trackByNick[d.nick] = normTrk(d.tracking);
     });
     const head = ["보내는분성명", "보내는분전화번호", "보내는분주소(전체, 분할)", "품목명", "내품수량", "박스타입", "받는분성명", "받는분전화번호", "받는분주소(전체, 분할)", "배송메세지1", "고객주문번호"];
     if (withTracking) head.push("송장번호");
@@ -2552,9 +3088,11 @@ function App() {
   // ⚠ 직접 수정한 운송장은 파일 값이 달라도 조용히 덮어쓰지 않고 확인을 받는다.
   const mergeShipData = (data, label) => {
     // 집계는 현재 상태 기준으로 미리 계산 (setState 갱신 함수는 나중에 실행되므로 그 안에서 세면 0이 됨)
+    // ⚠ 닉네임만으로 맞추면 2차 운송장이 1차를 덮어써 1차 번호가 사라진다.
+    //    지금 받고 있는 차수의 줄에만 붙인다.
     const byNick = {};
     shipData.forEach(d => {
-      byNick[d.nick] = d;
+      if (seqOf(d) === curSeq(d.nick)) byNick[d.nick] = d;
     });
     let added = 0,
       same = 0,
@@ -2576,6 +3114,7 @@ function App() {
         });
         apply.push({
           ...d,
+          seq: curSeq(d.nick),
           manual: false
         });
         return;
@@ -2615,17 +3154,22 @@ function App() {
       apply.push(merged);
     });
     setShipData(prev => {
+      const key = d => d.nick + '#' + (Number(d.seq) || 1);
       const idx = {};
       prev.forEach((d, i) => {
-        idx[d.nick] = i;
+        idx[key(d)] = i;
       });
       const next = [...prev];
-      apply.forEach(d => {
-        if (idx[d.nick] != null) {
-          next[idx[d.nick]] = d;
+      apply.forEach(d0 => {
+        const d = {
+          ...d0,
+          seq: Number(d0.seq) || 1
+        };
+        if (idx[key(d)] != null) {
+          next[idx[key(d)]] = d;
         } else {
           next.push(d);
-          idx[d.nick] = next.length - 1;
+          idx[key(d)] = next.length - 1;
         }
       });
       return next;
@@ -2670,6 +3214,7 @@ function App() {
 
   const openTrkEdit = d => setTrkEdit({
     nick: d.nick,
+    seq: seqOf(d),
     value: normTrk(d.tracking),
     carrier: d.carrier || ""
   });
@@ -2677,8 +3222,8 @@ function App() {
   /* 위탁출고 표시 — 파일에는 구분이 없으므로 손으로 체크한다.
      ⚠ 표시 전용이다. 택배사·다운로드·엑셀 어디에도 영향을 주지 않는다.
      (우리가 직접 접수한 건은 운송장 조회·배송흐름이 보이지만, 위탁은 번호만 받아서 넣기 때문에 구분이 필요) */
-  const toggleConsign = nick => {
-    setShipData(prev => prev.map(d => d.nick === nick ? {
+  const toggleConsign = (nick, seq) => {
+    setShipData(prev => prev.map(d => d.nick === nick && seqOf(d) === seq ? {
       ...d,
       consign: !d.consign
     } : d));
@@ -2689,8 +3234,9 @@ function App() {
     const {
       nick
     } = trkEdit;
+    const eseq = Number(trkEdit.seq) || 1;
     const val = normTrk(trkEdit.value);
-    const cur = shipData.find(d => d.nick === nick);
+    const cur = shipData.find(d => d.nick === nick && seqOf(d) === eseq);
     if (!cur) {
       setTrkEdit(null);
       return;
@@ -2706,7 +3252,7 @@ function App() {
       return;
     }
     // 지우기·중복은 사고로 이어질 수 있어 앱 공통 「한 번 더」 방식으로 확인받는다
-    const dup = val ? shipData.find(d => d.nick !== nick && normTrk(d.tracking) === val) : null;
+    const dup = val ? shipData.find(d => !(d.nick === nick && seqOf(d) === eseq) && normTrk(d.tracking) === val) : null;
     const risk = !val ? "empty" : dup ? "dup" : "";
     if (risk && trkEdit.arm !== risk) {
       setTrkEdit({
@@ -2718,7 +3264,7 @@ function App() {
     }
     // 이미 안내한 사람의 번호를 바꾸면 재안내가 필요하다 (업로드와 같은 규칙)
     const needRenotify = !!(before && val && cust(nick).notified);
-    setShipData(prev => prev.map(d => d.nick === nick ? {
+    setShipData(prev => prev.map(d => d.nick === nick && seqOf(d) === eseq ? {
       ...d,
       tracking: val,
       carrier,
@@ -4045,7 +4591,94 @@ function App() {
   }, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("b", null, "⚠ 자동 저장이 안 되고 있습니다."), " ", saveState.quota ? "저장 공간이 꽉 찼습니다. 지금 바로 「엑셀 저장」으로 파일을 남겨주세요." : "지금 바로 「엑셀 저장」으로 파일을 남겨주세요. 새로고침하면 입력한 내용이 사라질 수 있습니다."), /*#__PURE__*/React.createElement("button", {
     className: "btn sm",
     onClick: exportXlsx
-  }, "엑셀 저장")), undoOpen && /*#__PURE__*/React.createElement("div", {
+  }, "엑셀 저장")), srvPick && srvPick.empty && /*#__PURE__*/React.createElement("div", {
+    className: "closewrap"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closecard"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closetitle"
+  }, "⚠ ", bdate, " 에는 서버에 자료가 없습니다"), /*#__PURE__*/React.createElement("div", {
+    className: "sub",
+    style: {
+      marginTop: 6
+    }
+  }, "지금 화면에 있는 주문 ", srvPick.localCount, "건은 ", /*#__PURE__*/React.createElement("b", null, "앞 날짜의 내용"), "입니다. 어떻게 할까요?"), /*#__PURE__*/React.createElement("div", {
+    className: "rpfoot",
+    style: {
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn primary big",
+    onClick: emptyStartFresh
+  }, "이 날짜를 빈 방송으로 시작 (권장)"), /*#__PURE__*/React.createElement("button", {
+    className: "btn danger",
+    onClick: emptyMoveHere
+  }, "지금 화면 내용을 이 날짜로 올리기")), /*#__PURE__*/React.createElement("div", {
+    className: "hint",
+    style: {
+      marginTop: 10
+    }
+  }, "고르기 전까지 ", /*#__PURE__*/React.createElement("b", null, "서버에 저장되지 않습니다."), " 앞 날짜에 올려둔 내용은 그대로 있습니다."))), srvPick && !srvPick.empty && /*#__PURE__*/React.createElement("div", {
+    className: "closewrap"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closecard"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closetitle"
+  }, "⚠ 이 기기의 내용이 서버와 다릅니다"), /*#__PURE__*/React.createElement("div", {
+    className: "sub",
+    style: {
+      marginTop: 6
+    }
+  }, bdate, " · 어느 쪽을 쓸지 골라주세요"), /*#__PURE__*/React.createElement("div", {
+    className: "srvpick"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "srvbox"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "srvttl"
+  }, "☁ 서버"), /*#__PURE__*/React.createElement("div", {
+    className: "srvnum"
+  }, "주문 ", srvPick.srvCount, "건"), /*#__PURE__*/React.createElement("div", {
+    className: "srvmeta"
+  }, srvPick.srv.updatedBy || "-", " · ", srvPick.srv.updatedAt ? new Date(srvPick.srv.updatedAt).toLocaleString("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }) : "-")), /*#__PURE__*/React.createElement("div", {
+    className: "srvbox"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "srvttl"
+  }, "💻 이 PC"), /*#__PURE__*/React.createElement("div", {
+    className: "srvnum"
+  }, "주문 ", srvPick.localCount, "건"), /*#__PURE__*/React.createElement("div", {
+    className: "srvmeta"
+  }, "아직 서버에 안 올라감"))), /*#__PURE__*/React.createElement("div", {
+    className: "rpfoot",
+    style: {
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn primary big",
+    onClick: takeServer
+  }, "☁ 서버 것 쓰기 (권장)"), auth.isOwner ? /*#__PURE__*/React.createElement("button", {
+    className: "btn danger",
+    onClick: forceMine
+  }, "이 PC 것으로 덮어쓰기") : /*#__PURE__*/React.createElement("span", {
+    className: "hint"
+  }, "덮어쓰기는 사장님만 할 수 있습니다")), /*#__PURE__*/React.createElement("div", {
+    className: "hint",
+    style: {
+      marginTop: 10
+    }
+  }, "고르기 전까지 ", /*#__PURE__*/React.createElement("b", null, "서버에 저장되지 않습니다."), " 이 PC 내용은 그대로 남아 있습니다."))), srvConflict && !srvPick && /*#__PURE__*/React.createElement("div", {
+    className: "srvbar"
+  }, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("b", null, "⚠ 「", srvConflict.by, "」님이 먼저 저장했습니다."), " ", "지금 입력한 내용은 ", /*#__PURE__*/React.createElement("b", null, "이 PC에만"), " 있습니다. 서버 것을 받으면 이 PC 내용은 사라집니다."), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    onClick: takeServer
+  }, "서버 것 받기"), auth.isOwner && /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    onClick: forceMine
+  }, "내 것으로 덮어쓰기")), undoOpen && /*#__PURE__*/React.createElement("div", {
     className: "closewrap",
     onClick: e => {
       if (e.target === e.currentTarget) {
@@ -4208,7 +4841,8 @@ function App() {
     className: "datein",
     type: "date",
     value: bdate,
-    onChange: e => setBdate(e.target.value || todayISO())
+    disabled: dateBusy,
+    onChange: e => changeDate(e.target.value)
   }), /*#__PURE__*/React.createElement("button", {
     className: "btn xlbtn",
     onClick: exportXlsx,
@@ -4843,7 +5477,10 @@ function App() {
       onClick: () => selectNick(s.nick)
     }, s.nick), isShipped(s.nick) && /*#__PURE__*/React.createElement("span", {
       className: "shipdonebadge"
-    }, "📦 출고완료"), cust(s.nick).keep && /*#__PURE__*/React.createElement("span", {
+    }, "📦 출고완료"), s.doneCount > 0 && !isShipped(s.nick) && /*#__PURE__*/React.createElement("span", {
+      className: "donebadge",
+      title: `이미 보낸 ${s.doneCount}건 · ${won(s.doneTotal)}원 — 이번 정산에는 들어가지 않습니다`
+    }, "📦 출고완료 ", s.doneCount, "건"), cust(s.nick).keep && /*#__PURE__*/React.createElement("span", {
       className: "keepbadge sm"
     }, "🔖 킵"), rs === "all" && /*#__PURE__*/React.createElement("span", {
       className: "refundbadge"
@@ -5043,7 +5680,13 @@ function App() {
       className: "sub"
     }, " (상품 ", won(sum), " · 배송비 없음)"), isShipped(n) && /*#__PURE__*/React.createElement("span", {
       className: "shipdonebadge"
-    }, "📦 출고완료"), c.keep && /*#__PURE__*/React.createElement("span", {
+    }, "📦 출고완료"), (() => {
+      const dn = doneOrders.filter(o => o.nick === n);
+      return dn.length > 0 ? /*#__PURE__*/React.createElement("span", {
+        className: "donebadge",
+        title: "이미 보낸 건입니다. 이번 정산서에는 들어가지 않습니다."
+      }, "📦 출고완료 ", dn.length, "건") : null;
+    })(), c.keep && /*#__PURE__*/React.createElement("span", {
       className: "keepbadge"
     }, "🔖 킵 · 이번 발송 제외"), rs === "all" && /*#__PURE__*/React.createElement("span", {
       className: "refundbadge"
@@ -5483,13 +6126,20 @@ function App() {
       className: "consigncol",
       title: "위탁출고로 나간 건에 체크하세요"
     }, "위탁"), /*#__PURE__*/React.createElement("th", null, "운송장번호"), /*#__PURE__*/React.createElement("th", null, "안내"))), /*#__PURE__*/React.createElement("tbody", null, filtered.map((d, i) => {
-      const orphan = !activeNickSet.has(d.nick); // 주문서가 삭제된 송장 기록
+      const dq = Number(d.seq) || 1;
+      const isDoneRow = orders.some(o => o.nick === d.nick && o.done && (Number(o.doneSeq) || 1) === dq);
+      // ⚠ 마감된 차수는 「주문 삭제됨」이 아니다. 보낸 뒤라 현재 주문 목록에 없을 뿐이다.
+      const orphan = !isDoneRow && !activeNickSet.has(d.nick);
       return /*#__PURE__*/React.createElement("tr", {
         key: i,
         className: orphan ? "roworphan" : d.tracking ? "" : "rowwarn"
       }, /*#__PURE__*/React.createElement("td", {
         className: "whname"
-      }, d.nick, orphan && /*#__PURE__*/React.createElement("span", {
+      }, d.nick, dq > 1 && /*#__PURE__*/React.createElement("span", {
+        className: "seqbadge"
+      }, dq, "차"), isDoneRow && /*#__PURE__*/React.createElement("span", {
+        className: "donebadge"
+      }, "출고완료"), orphan && /*#__PURE__*/React.createElement("span", {
         className: "orphanbadge"
       }, orders.some(o => o.nick === d.nick && o.refund) ? "환불" : "주문 삭제됨"), d.renotify && /*#__PURE__*/React.createElement("span", {
         className: "renotifybadge"
@@ -5506,10 +6156,10 @@ function App() {
       }, /*#__PURE__*/React.createElement("input", {
         type: "checkbox",
         checked: !!d.consign,
-        onChange: () => toggleConsign(d.nick)
+        onChange: () => toggleConsign(d.nick, dq)
       }))), /*#__PURE__*/React.createElement("td", {
         className: "trackcell"
-      }, trkEdit && trkEdit.nick === d.nick ? /*#__PURE__*/React.createElement("div", {
+      }, trkEdit && trkEdit.nick === d.nick && (Number(trkEdit.seq) || 1) === dq ? /*#__PURE__*/React.createElement("div", {
         className: "trkedit"
       }, /*#__PURE__*/React.createElement("input", {
         className: "in trkin",
@@ -5924,7 +6574,13 @@ function App() {
     className: "foot"
   }, "사자창고 라이브 · ", saveState.ok ? "자동 저장됨" : /*#__PURE__*/React.createElement("b", {
     className: "savefail"
-  }, "⚠ 자동 저장 안 됨"), " · 전체 저장 「", dateCode, "_사자창고_라이브.xlsx」 · 출고 「롯데/CJ_사자창고_출고_", dateCode, ".xlsx」"));
+  }, "⚠ 자동 저장 안 됨"), serverOn() && /*#__PURE__*/React.createElement(React.Fragment, null, " · ", srvState === "ok" ? /*#__PURE__*/React.createElement("span", {
+    className: "srvok"
+  }, "☁ 서버 저장됨") : srvState === "saving" ? "☁ 저장 중…" : srvState === "conflict" ? /*#__PURE__*/React.createElement("b", {
+    className: "savefail"
+  }, "☁ 충돌 — 확인 필요") : srvState === "fail" ? /*#__PURE__*/React.createElement("b", {
+    className: "savefail"
+  }, "☁ 서버 저장 실패 (이 PC에는 저장됨)") : "☁ 서버 연결됨"), " · 전체 저장 「", dateCode, "_사자창고_라이브.xlsx」 · 출고 「롯데/CJ_사자창고_출고_", dateCode, ".xlsx」"));
 }
 function OrderRow({
   o,
@@ -5990,6 +6646,20 @@ const CSS = `
   0% { opacity: 0; transform: translateY(12px); }
   100% { opacity: 1; transform: translateY(0); }
 }
+/* 서버 저장 (4단계) */
+.srvbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 200;
+  display: flex; align-items: center; justify-content: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 18px; background: #b06a00; color: #fff; font-size: 14px; font-weight: 700;
+  box-shadow: 0 -4px 18px rgba(0,0,0,.25); }
+.srvbar .btn { background: #fff; border-color: #fff; color: #8a4b00; font-weight: 800; }
+.srvpick { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+.srvbox { padding: 14px; border: 1px solid #e6e9ee; border-radius: 12px; background: #f6f7f9; }
+.srvttl { font-size: 13px; color: #8a919c; font-weight: 700; }
+.srvnum { font-size: 22px; font-weight: 800; margin: 4px 0; }
+.srvmeta { font-size: 12px; color: #8a919c; }
+.srvok { color: #0f766e; }
+@media (max-width: 560px) { .srvpick { grid-template-columns: 1fr; } }
+
 /* 저장 실패 경고 — 방송 중 놓치면 그날 데이터가 날아간다 */
 .savebar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 200;
@@ -6411,6 +7081,10 @@ const CSS = `
 .whtbl tfoot td { border-top: 2px solid #d9dde3; font-weight: 800; padding-top: 10px; }
 .settletop { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .summarycard { display: flex; align-items: center; gap: 10px; padding: 12px 16px; font-size: 15px; }
+.seqbadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+  background: #eef2ff; color: #3b4bc9; font-weight: 700; }
+.donebadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+  background: #e8f6ec; color: #1f7a3d; font-weight: 700; }
 .shipdonebadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   font-weight: 800; color: #14508f; background: #e4eefb; border: 1px solid #a9c9f0; white-space: nowrap; }
 .keepbadge.sm { margin-left: 6px; padding: 1px 7px; font-size: 11px; font-weight: 800; }
