@@ -1255,68 +1255,6 @@ function App() {
   // 「빈 날짜」 안내에서 고른 결과
   /* 출고완료 잠금해제 — 아직 안 보냈는데 잘못 마감된 건을 되돌린다.
      ⚠ 운송장 기록은 건드리지 않는다. 그 주문만 다시 「이번 차수」로 돌려놓는다. */
-  /* 손으로 출고완료 처리 — 운송장 없이 나간 건(위탁 등)이나 예전 자료 정리용.
-     ⚠ 운송장 자동 마감과 같은 결과를 만들되, 되돌릴 수 있도록 doneCust 를 함께 적는다. */
-  const closeBatchManual = nick => {
-    const open = orders.filter(o => o.nick === nick && !o.done && !o.canceled);
-    if (!open.length) {
-      showToast("이미 전부 출고완료입니다.");
-      return;
-    }
-    takeSnap(`출고완료 처리 직전 (${nick})`);
-    const c = customers[nick] || EMPTY_CUST;
-    const seq = curSeq(nick);
-    const row = shipData.find(d => d.nick === nick && seqOf(d) === seq);
-    const trk = row ? normTrk(row.tracking) : "";
-    let head = true;
-    setOrders(prev => prev.map(o => {
-      if (o.nick !== nick || o.done || o.canceled) return o;
-      const extra = head ? {
-        doneFee: noFee(c) ? 0 : shipFee,
-        donePaid: !!c.paid,
-        doneCust: {
-          paid: !!c.paid,
-          notified: !!c.notified,
-          keep: !!c.keep,
-          shipPaid: !!c.shipPaid,
-          keepPaid: Number(c.keepPaid) || 0,
-          freeShip: !!c.freeShip,
-          pickup: !!c.pickup
-        }
-      } : {};
-      head = false;
-      const {
-        wasDone,
-        ...rest
-      } = o;
-      return {
-        ...rest,
-        done: true,
-        doneSeq: seq,
-        doneTrk: trk,
-        doneAt: Date.now(),
-        ...extra
-      };
-    }));
-    setCustomers(prev => ({
-      ...prev,
-      [nick]: {
-        ...(prev[nick] || EMPTY_CUST),
-        paid: false,
-        notified: false,
-        keep: false,
-        shipPaid: false,
-        keepPaid: 0,
-        freeShip: false,
-        pickup: false
-      }
-    }));
-    if (row) setShipData(prev => prev.map(d => d.nick === nick && seqOf(d) === seq ? {
-      ...d,
-      closedTrk: d.tracking
-    } : d));
-    showToast(`✓ 「${nick}」 ${open.length}건 출고완료 — 이후 주문은 새로 정산됩니다`);
-  };
   const unlockDone = orderId => {
     const o = orders.find(x => x.id === orderId);
     if (!o || !o.done) return;
@@ -1560,6 +1498,10 @@ function App() {
   // 킵 주문건 (화면·목록용)
   const keepOrders = useMemo(() => orders.filter(o => !o.canceled && !o.done && customers[o.nick] && customers[o.nick].keep), [orders, customers]);
   const keepNicks = useMemo(() => [...new Set(keepOrders.map(o => o.nick))], [keepOrders]);
+  /* ⚠ 재고 차감·판매량 집계 기준.
+        이미 보낸 차수(출고완료)도 실제로 판 것이므로 재고에서 빠져야 한다.
+        빼먹으면 오전에 판 만큼 재고가 안 줄어 「아직 남았다」고 착각하고 초과 판매한다. */
+  const stockOrders = useMemo(() => [...activeOrders, ...doneOrders], [activeOrders, doneOrders]);
   const totalSales = useMemo(() => activeOrders.reduce((s, o) => s + o.price * o.qty, 0), [activeOrders]);
   const paidSales = useMemo(() => activeOrders.reduce((s, o) => s + (customers[o.nick] && customers[o.nick].paid ? o.price * o.qty : 0), 0), [activeOrders, customers]);
   const orderNickCount = useMemo(() => new Set(activeOrders.map(o => o.nick)).size, [activeOrders]);
@@ -1953,7 +1895,7 @@ function App() {
   // 대소문자만 다른 주문자가 이미 있으면 알린다 (자동으로 합치지는 않는다 — 다른 계정일 수 있음)
   const warnSimilarNick = n => {
     const k = nickKey(n).toLowerCase();
-    const alt = nickList.find(x => x !== n && nickKey(x).toLowerCase() === k);
+    const alt = settleNickList.find(x => x !== n && nickKey(x).toLowerCase() === k);
     if (alt) showToast(`⚠ 「${alt}」와 대소문자만 다릅니다 — 같은 분이면 닉네임을 맞춰주세요`);
   };
   // 옵션 상품 드릴다운: 값 하나 선택
@@ -2482,34 +2424,41 @@ function App() {
 
   // ===== 결산 엑셀 (그날 판매 내역 정리) =====
   const exportClosingXlsx = () => {
-    if (activeOrders.length === 0) {
+    /* ⚠ 결산에는 「이미 보낸 차수(출고완료)」도 넣어야 한다.
+          빼면 오전에 출고한 매출이 하루 결산에서 통째로 사라지고, 상단바 금액과도 어긋난다.
+          (7/28 발견 — 차수 기능을 넣으면서 생긴 문제) */
+    const closingOrders = [...activeOrders, ...doneOrders];
+    const doneFeeOf = n => doneOrders.filter(o => o.nick === n).reduce((t, o) => t + (Number(o.doneFee) || 0), 0);
+    const feeOfAll = n => feeOf(n) + doneFeeOf(n);
+    const paidOf = n => cust(n).paid || doneOrders.some(o => o.nick === n && o.donePaid !== false);
+    if (closingOrders.length === 0) {
       showToast("결산할 주문이 없습니다.");
       return;
     }
     const wb = XLSX.utils.book_new();
-    const nicks = nickList.filter(n => activeOrders.some(o => o.nick === n));
-    const sumOf = n => activeOrders.filter(o => o.nick === n).reduce((s, o) => s + o.price * o.qty, 0);
-    const qtyOf = n => activeOrders.filter(o => o.nick === n).reduce((s, o) => s + o.qty, 0);
-    const paidList = nicks.filter(n => cust(n).paid);
+    const nicks = settleNickList.filter(n => closingOrders.some(o => o.nick === n));
+    const sumOf = n => closingOrders.filter(o => o.nick === n).reduce((s, o) => s + o.price * o.qty, 0);
+    const qtyOf = n => closingOrders.filter(o => o.nick === n).reduce((s, o) => s + o.qty, 0);
+    const paidList = nicks.filter(n => paidOf(n));
     const pickList = nicks.filter(n => cust(n).pickup);
     const freeList = nicks.filter(n => !cust(n).pickup && cust(n).freeShip);
-    const feeList = nicks.filter(n => !noFee(cust(n))); // 배송비를 실제로 내는 사람
-    const paidFeeList = paidList.filter(n => !noFee(cust(n)));
+    const feeList = nicks.filter(n => feeOfAll(n) > 0); // 배송비를 실제로 내는 사람
+    const paidFeeList = paidList.filter(n => feeOfAll(n) > 0);
     // 환불 — 취소와 달리 실제로 돈이 나간 기록이라 따로 집계한다
     const refundOrders = orders.filter(o => o.refund);
     const refundAmt = refundOrders.reduce((t, o) => t + o.price * o.qty, 0);
-    const refundAllList = nickList.filter(n => cust(n).refundAll); // 전체환불자는 활성 주문이 0건이라 nicks 에 없음
+    const refundAllList = settleNickList.filter(n => cust(n).refundAll); // 전체환불자는 활성 주문이 0건이라 nicks 에 없음
     const refundNickCount = new Set(refundOrders.map(o => o.nick)).size;
-    const goods = activeOrders.reduce((s, o) => s + o.price * o.qty, 0);
+    const goods = closingOrders.reduce((s, o) => s + o.price * o.qty, 0);
     const feeSum = feeList.length * shipFee;
     const total = goods + feeSum;
     const paidGoods = paidList.reduce((s, n) => s + sumOf(n), 0);
     const paidTotal = paidGoods + paidFeeList.length * shipFee;
-    const totalQty = activeOrders.reduce((s, o) => s + o.qty, 0);
+    const totalQty = closingOrders.reduce((s, o) => s + o.qty, 0);
     const canceledCnt = orders.filter(o => o.canceled).length;
 
     // 1) 총괄 요약
-    const s1 = [[`사자창고 라이브 결산`, bdate], [], ["[매출]", ""], ["상품 매출", goods, "환불분 제외 · 실제로 판 것만"], ["배송비 수입", feeSum, `${feeList.length}명 × ${shipFee}원 (픽업 ${pickList.length}명 · 무료배송 ${freeList.length}명 · 전체환불 ${refundAllList.length}명 제외)`], ["총 매출", total], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["미수금", total - paidTotal, `${nicks.length - paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0], ["입금률 (금액)", total ? Math.round(paidTotal / total * 100) / 100 : 0], [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", activeOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length, "주문만 취소 (돈이 오가지 않음)"], [], ["[킵 보류]", "", "이번에 발송하지 않는 주문 — 위 매출에 포함되지 않음"], ["킵 인원", keepNicks.length], ["킵 건수", keepOrders.length], ["킵 상품금액", keepOrders.reduce((t, o) => t + o.price * o.qty, 0)], ["킵 입금액", keepNicks.reduce((t, nk) => t + (Number(cust(nk).keepPaid) || 0), 0), "받았지만 아직 매출이 아님 (배송비 포함)"], [], ["[환불]", ""], ["환불 건수", refundOrders.length, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 부분환불 ${refundNickCount - refundAllList.length}명` : refundOrders.length ? `부분환불 ${refundNickCount}명` : ""], ["환불 상품금액", refundAmt], ["환불 배송비", refundAllList.length * shipFee, refundAllList.length ? `전체환불 ${refundAllList.length}명 × ${shipFee}원` : ""], ["환불 합계", refundAmt + refundAllList.length * shipFee, "실제로 돌려준 돈 · 위 매출에는 포함되어 있지 않음"], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(activeOrders.map(o => `${o.name}\u241f${o.price}`)).size, "같은 상품도 가격이 다르면 별개로 셈"], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
+    const s1 = [[`사자창고 라이브 결산`, bdate], [], ["[매출]", ""], ["상품 매출", goods, "환불분 제외 · 실제로 판 것만"], ["배송비 수입", feeSum, `${feeList.length}명 × ${shipFee}원 (픽업 ${pickList.length}명 · 무료배송 ${freeList.length}명 · 전체환불 ${refundAllList.length}명 제외)`], ["총 매출", total], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["미수금", total - paidTotal, `${nicks.length - paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0], ["입금률 (금액)", total ? Math.round(paidTotal / total * 100) / 100 : 0], [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", closingOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length, "주문만 취소 (돈이 오가지 않음)"], [], ["[킵 보류]", "", "이번에 발송하지 않는 주문 — 위 매출에 포함되지 않음"], ["킵 인원", keepNicks.length], ["킵 건수", keepOrders.length], ["킵 상품금액", keepOrders.reduce((t, o) => t + o.price * o.qty, 0)], ["킵 입금액", keepNicks.reduce((t, nk) => t + (Number(cust(nk).keepPaid) || 0), 0), "받았지만 아직 매출이 아님 (배송비 포함)"], [], ["[환불]", ""], ["환불 건수", refundOrders.length, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 부분환불 ${refundNickCount - refundAllList.length}명` : refundOrders.length ? `부분환불 ${refundNickCount}명` : ""], ["환불 상품금액", refundAmt], ["환불 배송비", refundAllList.length * shipFee, refundAllList.length ? `전체환불 ${refundAllList.length}명 × ${shipFee}원` : ""], ["환불 합계", refundAmt + refundAllList.length * shipFee, "실제로 돌려준 돈 · 위 매출에는 포함되어 있지 않음"], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(closingOrders.map(o => `${o.name}\u241f${o.price}`)).size, "같은 상품도 가격이 다르면 별개로 셈"], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
     const ws1 = XLSX.utils.aoa_to_sheet(s1);
     ws1["!cols"] = [{
       wch: 20
@@ -2531,10 +2480,10 @@ function App() {
     // 2) 상품별 판매 실적 (매출순)
     // ⚠ 집계 키는 「상품명 + 가격」. 상품명만으로 묶으면 막판 할인처럼 같은 상품을
     //   다른 가격에 판 경우 단가·수량이 틀리게 나온다 (매출 합계는 맞아서 알아채기 어렵다).
-    //   환불된 주문은 activeOrders 에서 이미 빠져 있다 — 실제로 판 것만 집계한다.
+    //   환불된 주문은 closingOrders 에서 이미 빠져 있다 — 실제로 판 것만 집계한다.
     const pm = {};
-    activeOrders.forEach(o => {
-      const paid = cust(o.nick).paid;
+    closingOrders.forEach(o => {
+      const paid = o.done ? o.donePaid !== false : cust(o.nick).paid;
       const k = `${o.name}\u241f${o.price}`;
       pm[k] = pm[k] || {
         name: o.name,
@@ -2590,18 +2539,18 @@ function App() {
     // ⚠ 전체환불자는 활성 주문이 0건이라 nicks 에 없다. 환불 기록이 사라지지 않도록 따로 붙인다.
     const s3nicks = [...nicks, ...refundAllList.filter(n => !nicks.includes(n))];
     const s3 = [["닉네임", "이름", "연락처", "상품금액", "배송비", "총 결제금액", "입금", "환불", "수령방식", "안내", "주문건수", "수량", "상품내역", "현금영수증", "특이사항"]];
-    const sortedNicks = s3nicks.sort((a, b) => sumOf(b) + feeOf(b) - (sumOf(a) + feeOf(a)) || a.localeCompare(b, "ko"));
+    const sortedNicks = s3nicks.sort((a, b) => sumOf(b) + feeOfAll(b) - (sumOf(a) + feeOfAll(a)) || a.localeCompare(b, "ko"));
     sortedNicks.forEach(n => {
       const c = cust(n);
       const g = sumOf(n),
-        f = feeOf(n);
+        f = feeOfAll(n);
       const rf = orders.filter(o => o.nick === n && o.refund);
       const rfAmt = rf.reduce((t, o) => t + o.price * o.qty, 0);
       const rs = c.refundAll ? `전체환불 ${won(rfAmt + shipFee)}` : rf.length ? `부분환불 ${won(rfAmt)}` : "";
-      const lines = activeOrders.filter(o => o.nick === n).map(o => `${o.name}${o.qty > 1 ? ` ${o.qty}개` : ""}`).join(", ") + (rf.length ? `${activeOrders.some(o => o.nick === n) ? " / " : ""}[환불] ` + rf.map(o => `${o.name}${o.qty > 1 ? ` ${o.qty}개` : ""}`).join(", ") : "");
-      s3.push([n, c.name || "", c.phone || "", g, f, g + f, c.paid ? "입금" : "미입금", rs, c.pickup ? "픽업수령" : c.freeShip ? "택배(무료)" : "택배", c.notified ? "안내" : "", activeOrders.filter(o => o.nick === n).length, qtyOf(n), lines, c.cashReceipt || "", c.memo || ""]);
+      const lines = closingOrders.filter(o => o.nick === n).map(o => `${o.name}${o.qty > 1 ? ` ${o.qty}개` : ""}`).join(", ") + (rf.length ? `${closingOrders.some(o => o.nick === n) ? " / " : ""}[환불] ` + rf.map(o => `${o.name}${o.qty > 1 ? ` ${o.qty}개` : ""}`).join(", ") : "");
+      s3.push([n, c.name || "", c.phone || "", g, f, g + f, paidOf(n) ? "입금" : "미입금", rs, c.pickup ? "픽업수령" : c.freeShip ? "택배(무료)" : "택배", c.notified ? "안내" : "", closingOrders.filter(o => o.nick === n).length, qtyOf(n), lines, c.cashReceipt || "", c.memo || ""]);
     });
-    s3.push(["합계", "", "", goods, feeSum, total, `입금 ${paidList.length} / 미입금 ${nicks.length - paidList.length}`, refundOrders.length ? `환불 ${won(refundAmt + refundAllList.length * shipFee)}` : "", "", "", activeOrders.length, totalQty, "", "", ""]);
+    s3.push(["합계", "", "", goods, feeSum, total, `입금 ${paidList.length} / 미입금 ${nicks.length - paidList.length}`, refundOrders.length ? `환불 ${won(refundAmt + refundAllList.length * shipFee)}` : "", "", "", closingOrders.length, totalQty, "", "", ""]);
     const ws3 = XLSX.utils.aoa_to_sheet(s3);
     ws3["!cols"] = [{
       wch: 14
@@ -2642,14 +2591,15 @@ function App() {
 
     // 4) 현금영수증 발행 대상
     const s4 = [["이름", "닉네임", "현금영수증 번호", "상품금액", "배송비", "결제금액", "발행여부"]];
+    // ⚠ 영수증 금액은 마감분까지 합친 값을 쓴다 (화면과 같아야 한다)
     cashList.forEach(n => {
       const c = cust(n);
-      const g = sumOf(n),
-        f = feeOf(n);
+      const g = receiptSumOf(n),
+        f = receiptFeeOf(n);
       s4.push([c.name || "", n, c.cashReceipt || "", g, f, g + f, c.cashIssued ? "발행완료" : "미발행"]);
     });
     if (cashList.length) {
-      s4.push(["합계", "", "", cashList.reduce((s, n) => s + sumOf(n), 0), cashList.reduce((s, n) => s + feeOf(n), 0), cashList.reduce((s, n) => s + sumOf(n) + feeOf(n), 0), `발행 ${cashIssuedCount} / 미발행 ${cashList.length - cashIssuedCount}`]);
+      s4.push(["합계", "", "", cashList.reduce((s, n) => s + receiptSumOf(n), 0), cashList.reduce((s, n) => s + receiptFeeOf(n), 0), cashList.reduce((s, n) => s + receiptSumOf(n) + receiptFeeOf(n), 0), `발행 ${cashIssuedCount} / 미발행 ${cashList.length - cashIssuedCount}`]);
     } else {
       s4.push(["현금영수증을 신청한 사람이 없습니다.", "", "", "", "", "", ""]);
     }
@@ -2679,7 +2629,16 @@ function App() {
   };
 
   // 현금영수증 번호를 입력한 사람만
-  const cashList = useMemo(() => nickList.filter(n => (cust(n).cashReceipt || "").trim()), [nickList, customers]);
+  /* ⚠ 이미 보낸 손님도 포함한다.
+        출고 뒤에 「현금영수증 해달라」고 하는 손님이 종종 있는데, 마감됐다고 목록에서 빼면
+        번호를 넣을 자리도, 발행 체크할 자리도 사라진다. (7/28 실사용에서 발견) */
+  const cashList = useMemo(() => settleNickList.filter(n => (cust(n).cashReceipt || "").trim()), [settleNickList, customers]);
+  /* 현금영수증 금액 = 그 손님이 오늘 실제로 낸 돈.
+     이미 보낸 차수(마감분)까지 합쳐야 한다 — 마감분만 빼면 0원으로 발행하게 된다. */
+  const receiptSumOf = n => (byNick[n] || []).reduce((s, o) => s + o.price * o.qty, 0) + doneOrders.filter(o => o.nick === n).reduce((s, o) => s + o.price * o.qty, 0);
+  // 마감된 차수는 이미 받은 돈이다 — 입금 판정에 함께 넣는다
+  const paidAnyOf = n => cust(n).paid || doneOrders.some(o => o.nick === n && o.donePaid !== false);
+  const receiptFeeOf = n => feeOf(n) + doneOrders.filter(o => o.nick === n).reduce((s, o) => s + (Number(o.doneFee) || 0), 0);
   const cashIssuedCount = cashList.filter(n => cust(n).cashIssued).length;
 
   // 출고 라인을 「받는분 이름」 가나다순으로 정렬.
@@ -3883,7 +3842,8 @@ function App() {
 
     // --- 데이터 자가 점검 (5-14) — 조용히 틀린 것을 잡는다 ---
     // 운송장은 있는데 주문이 없음 = 환불 처리를 안 했거나 주문서를 지움
-    const aliveNicks = new Set(activeOrders.map(o => o.nick));
+    // ⚠ 출고완료된 주문도 「살아 있는 주문」이다. 빼면 보낸 손님마다 「주문 없음」 경고가 뜬다.
+    const aliveNicks = new Set([...activeOrders, ...doneOrders].map(o => o.nick));
     const orphan = shipData.filter(d => normTrk(d.tracking) && !aliveNicks.has(d.nick)).map(d => d.nick);
     push({
       key: "orphan",
@@ -3920,12 +3880,12 @@ function App() {
       if (p.options && p.options.length) {
         expandProduct(p).forEach(c => {
           if (p.stocks && p.stocks[c.key] != null) {
-            const sold = activeOrders.filter(o => o.name === c.name).reduce((t, o) => t + o.qty, 0);
+            const sold = stockOrders.filter(o => o.name === c.name).reduce((t, o) => t + o.qty, 0);
             if (sold > p.stocks[c.key]) overSold.push(`${c.name}(${sold}/${p.stocks[c.key]})`);
           }
         });
       } else if (p.stock != null) {
-        const sold = activeOrders.filter(o => o.name === p.name).reduce((t, o) => t + o.qty, 0);
+        const sold = stockOrders.filter(o => o.name === p.name).reduce((t, o) => t + o.qty, 0);
         if (sold > p.stock) overSold.push(`${p.name}(${sold}/${p.stock})`);
       }
     });
@@ -4088,9 +4048,10 @@ function App() {
       const next = {
         ...regulars
       };
-      nickList.forEach(nk => {
+      // ⚠ 마감되면 paid 가 풀리므로 nickList·c.paid 만 보면 출고한 손님 배송지가 단골로 안 쌓인다
+      settleNickList.forEach(nk => {
         const c = customers[nk];
-        if (!c || !c.paid) return;
+        if (!c || !paidAnyOf(nk)) return;
         if (!String(c.addr || "").trim() || !String(c.phone || "").trim()) return;
         const key = addrKey(c);
         const entry = next[nk] ? {
@@ -4131,7 +4092,7 @@ function App() {
       if (touched) setRegulars(next);
     }, 1200); // 입력 중에 계속 쌓이지 않게 넉넉히 기다린다
     return () => clearTimeout(t);
-  }, [customers, nickList, loaded, bdate]);
+  }, [customers, settleNickList, orders, loaded, bdate]);
 
   // 그 닉네임의 지난 배송지 (오늘 것과 같은 주소는 제외 — 이미 채워져 있으니 보여줄 필요 없다)
   const regularsFor = nk => {
@@ -4405,7 +4366,7 @@ function App() {
       showToast(`${which} 운송장 조회 결과가 없습니다.`);
       return;
     }
-    const lines = activeOrders.filter(o => nicks.has(o.nick));
+    const lines = [...activeOrders, ...doneOrders].filter(o => nicks.has(o.nick));
     if (lines.length === 0) {
       showToast("⚠ 송장은 있는데 주문서가 없는 사람뿐입니다 — 주문서 삭제 또는 환불 처리를 확인하세요");
       return;
@@ -4497,10 +4458,10 @@ function App() {
 
     // 2. 카톡_안내
     const s2 = [["닉네임", "총 결제금액", "안내여부", "금액", "입금여부", "주소확인", "이름", "연락처", "주소", "배송 요청사항", "현금영수증", "현금영수증 발행", "특이사항"]];
-    nickList.forEach(n => {
+    settleNickList.forEach(n => {
       const c = cust(n);
-      const sum = (byNick[n] || []).reduce((s, o) => s + o.price * o.qty, 0);
-      s2.push([n, sum + feeOf(n), c.notified ? "안내" : "", sum, c.paid ? "확인" : "", c.addrChecked ? "확인" : "", c.name, c.phone, c.addr, c.req, c.cashReceipt || "", c.cashIssued ? "발행완료" : "", c.memo]);
+      const sum = receiptSumOf(n); // 마감분 포함 — 백업에서 빠지면 안 된다
+      s2.push([n, sum + receiptFeeOf(n), c.notified ? "안내" : "", sum, paidAnyOf(n) ? "확인" : "", c.addrChecked ? "확인" : "", c.name, c.phone, c.addr, c.req, c.cashReceipt || "", c.cashIssued ? "발행완료" : "", c.memo]);
     });
     const ws2 = XLSX.utils.aoa_to_sheet(s2);
     ws2["!cols"] = [{
@@ -5371,7 +5332,7 @@ function App() {
       }, /*#__PURE__*/React.createElement("b", null, g.label || `옵션${gi + 1}`, ":"), " ", g.values.map(v => v.name + (v.price ? ` (${won(v.price)})` : "")).join(" / "))), stocked.length > 0 && /*#__PURE__*/React.createElement("div", {
         className: "opt-prod-stock"
       }, "재고: ", stocked.map(c => {
-        const sold = activeOrders.filter(o => o.name === c.name).reduce((s, o) => s + o.qty, 0);
+        const sold = stockOrders.filter(o => o.name === c.name).reduce((s, o) => s + o.qty, 0);
         const left = Math.max(0, p.stocks[c.key] - sold);
         return `${c.names.join(" ")} ${left}`;
       }).join(" · "))), /*#__PURE__*/React.createElement("div", {
@@ -5384,7 +5345,7 @@ function App() {
         onClick: () => delProduct(p)
       }, "삭제"))));
     }
-    const sold = activeOrders.filter(o => o.name === p.name && o.price === p.price).reduce((s, o) => s + o.qty, 0);
+    const sold = stockOrders.filter(o => o.name === p.name && o.price === p.price).reduce((s, o) => s + o.qty, 0);
     const left = p.stock == null ? null : p.stock - sold;
     const soldOut = left != null && left <= 0;
     return /*#__PURE__*/React.createElement("div", {
@@ -5576,7 +5537,7 @@ function App() {
         const key = names.join(COMBO_SEP);
         if (prod.stocks[key] != null) {
           const cname = prod.name + " " + names.join(" ");
-          const sold = activeOrders.filter(o => o.name === cname).reduce((s, o) => s + o.qty, 0);
+          const sold = stockOrders.filter(o => o.name === cname).reduce((s, o) => s + o.qty, 0);
           left = Math.max(0, prod.stocks[key] - sold);
           soldOut = left <= 0;
         }
@@ -5626,7 +5587,7 @@ function App() {
         className: "padprice"
       }, "옵션 선택 ▸"));
     }
-    const sold = activeOrders.filter(o => o.name === p.name && o.price === p.price).reduce((s, o) => s + o.qty, 0);
+    const sold = stockOrders.filter(o => o.name === p.name && o.price === p.price).reduce((s, o) => s + o.qty, 0);
     const left = p.stock == null ? null : p.stock - sold;
     const soldOut = left != null && left <= 0;
     return /*#__PURE__*/React.createElement("button", {
@@ -5729,7 +5690,17 @@ function App() {
     }, "취소")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
       className: "onick clickable" + (rs === "all" ? " struck" : ""),
       onClick: () => selectNick(s.nick)
-    }, s.nick), isShipped(s.nick) && /*#__PURE__*/React.createElement("span", {
+    }, s.nick), /*#__PURE__*/React.createElement("button", {
+      className: "btn ghost sm nickeditbtn",
+      title: "닉네임 수정",
+      onClick: () => {
+        setEditNickFor(s.nick);
+        setEditNickVal(s.nick);
+        setDelNickArm(null);
+      }
+    }, "✎"), /*#__PURE__*/React.createElement("span", {
+      className: "nrowtags"
+    }, isShipped(s.nick) && /*#__PURE__*/React.createElement("span", {
       className: "shipdonebadge"
     }, "📦 출고완료"), s.doneCount > 0 && !isShipped(s.nick) && /*#__PURE__*/React.createElement("span", {
       className: "donebadge",
@@ -5740,18 +5711,10 @@ function App() {
       className: "refundbadge"
     }, "환불"), (rs === "part" || rs === "allpart") && /*#__PURE__*/React.createElement("span", {
       className: "refundbadge part"
-    }, "부분환불"), /*#__PURE__*/React.createElement("button", {
-      className: "btn ghost sm nickeditbtn",
-      title: "닉네임 수정",
-      onClick: () => {
-        setEditNickFor(s.nick);
-        setEditNickVal(s.nick);
-        setDelNickArm(null);
-      }
-    }, "✎"), cust(s.nick).paid && (cust(s.nick).name || "").trim() && /*#__PURE__*/React.createElement("span", {
+    }, "부분환불"), cust(s.nick).paid && (cust(s.nick).name || "").trim() && /*#__PURE__*/React.createElement("span", {
       className: "nrowname",
       title: cust(s.nick).name.trim()
-    }, cust(s.nick).name.trim()), /*#__PURE__*/React.createElement("span", {
+    }, cust(s.nick).name.trim())), /*#__PURE__*/React.createElement("span", {
       className: "nsum" + (s.active === 0 ? " zero" : "")
     }, won(s.total), "원"), delNickArm === s.nick ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
       className: "btn ghost sm danger",
@@ -5932,19 +5895,13 @@ function App() {
       className: "sub"
     }, " (상품 ", won(sum), " + 배송 ", won(shipFee), ")") : /*#__PURE__*/React.createElement("span", {
       className: "sub"
-    }, " (상품 ", won(sum), " · 배송비 없음)"), isShipped(n) && /*#__PURE__*/React.createElement("span", {
-      className: "shipdonebadge"
-    }, "📦 출고완료"), (() => {
+    }, " (상품 ", won(sum), " · 배송비 없음)"), (() => {
       const dn = doneOrders.filter(o => o.nick === n);
       return dn.length > 0 ? /*#__PURE__*/React.createElement("span", {
         className: "donebadge",
         title: "이미 보낸 건입니다. 이번 정산서에는 들어가지 않습니다."
       }, "📦 출고완료 ", dn.length, "건") : null;
-    })(), hasOpenOrder(n) && /*#__PURE__*/React.createElement("button", {
-      className: "btn ghost sm donebtn",
-      title: "운송장 없이 이미 보낸 건이면 눌러주세요. 이후 주문은 새 차수로 정산됩니다.",
-      onClick: () => closeBatchManual(n)
-    }, "📦 출고완료로 처리"), c.keep && /*#__PURE__*/React.createElement("span", {
+    })(), c.keep && /*#__PURE__*/React.createElement("span", {
       className: "keepbadge"
     }, "🔖 킵 · 이번 발송 제외"), rs === "all" && /*#__PURE__*/React.createElement("span", {
       className: "refundbadge"
@@ -6022,7 +5979,7 @@ function App() {
       })
     }, "픽업"))), list.length === 0 && /*#__PURE__*/React.createElement("div", {
       className: "empty small"
-    }, rs ? "환불 처리됨 — 상품 금액과 배송비가 매출에서 빠졌습니다" : "유효 주문 없음 (전체 취소됨)"), list.length > 0 && openMsg[n] && /*#__PURE__*/React.createElement("pre", {
+    }, rs ? "환불 처리됨 — 상품 금액과 배송비가 매출에서 빠졌습니다" : doneOrders.some(o => o.nick === n) ? "이미 다 보낸 손님입니다 — 새 주문이 들어오면 여기에 다시 잡힙니다" : "유효 주문 없음 (전체 취소됨)"), list.length > 0 && openMsg[n] && /*#__PURE__*/React.createElement("pre", {
       className: "msg"
     }, settleMsg(n)), /*#__PURE__*/React.createElement("div", {
       className: "rowgap"
@@ -6576,8 +6533,9 @@ function App() {
     className: "cashlist"
   }, cashList.map(n => {
     const c = cust(n);
-    const sum = (byNick[n] || []).reduce((s, o) => s + o.price * o.qty, 0);
-    const fee = feeOf(n);
+    const sum = receiptSumOf(n);
+    const fee = receiptFeeOf(n);
+    const doneCnt = doneOrders.filter(o => o.nick === n).length;
     return /*#__PURE__*/React.createElement("div", {
       className: "cashrow" + (c.cashIssued ? " issued" : ""),
       key: n
@@ -6585,7 +6543,10 @@ function App() {
       className: "cinfo"
     }, /*#__PURE__*/React.createElement("span", {
       className: "cnick"
-    }, c.name || n), /*#__PURE__*/React.createElement("span", {
+    }, c.name || n), doneCnt > 0 && /*#__PURE__*/React.createElement("span", {
+      className: "donebadge",
+      title: "이미 보낸 건까지 합친 금액입니다"
+    }, "📦 출고완료 ", doneCnt, "건 포함"), /*#__PURE__*/React.createElement("span", {
       className: "cnum"
     }, c.cashReceipt), /*#__PURE__*/React.createElement("span", {
       className: "camt"
@@ -7161,7 +7122,12 @@ const CSS = `
   padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 700;
   color: #0f766e; background: #e7f5f1; border: 1px solid #b6e2d3;
 }
-.nsum { flex: 1; text-align: right; font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
+/* 상태 표시(출고완료·킵·환불·배송지 이름)는 오른쪽에 모아 둔다.
+   왼쪽에 섞여 있으면 닉네임을 눈으로 훑기 어렵다. (7/28 사장님 요청) */
+.nrowtags { margin-left: auto; display: flex; align-items: center; justify-content: flex-end;
+  gap: 6px; flex-wrap: wrap; min-width: 0; }
+.nrowtags:empty { display: none; }
+.nsum { flex: 0 0 auto; min-width: 96px; text-align: right; font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
 .nsum.zero { color: #b0b7c0; text-decoration: line-through; }
 .nickeditbtn { flex: 0 0 auto; padding: 5px 9px; color: #8a919c; }
 .in.nickedit { flex: 1; min-width: 0; font-weight: 700; padding: 7px 9px; }
@@ -7363,7 +7329,6 @@ const CSS = `
   text-decoration: line-through; color: #7b8494; }
 .lockbadge { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   background: #e8f6ec; color: #1f7a3d; font-weight: 700; text-decoration: none; vertical-align: middle; }
-.donebtn { margin-left: 8px; }
 .seqbadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   background: #eef2ff; color: #3b4bc9; font-weight: 700; }
 .donebadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
