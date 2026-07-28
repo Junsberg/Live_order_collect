@@ -277,11 +277,16 @@ const migrateTrk = (shipData, customers) => {
   const sd = (shipData || []).map(d => {
     const t = normTrk(d && d.tracking);
     if (d && (d.tracking || "") !== t) changed++;
-    return {
+    /* ⚠ 예전 자료에는 차수·마감표식이 없다. closedTrk 를 「이미 처리된 것」으로 채워 넣는다.
+          채우지 않으면 앱을 여는 것만으로 그 손님의 주문이 전부 마감돼,
+          아직 안 보낸 방송 주문건까지 잠긴다. (7/28 실제 발생 — 사남매맘) */
+    const out = {
       ...d,
       tracking: t,
       seq: Number(d && d.seq) || 1
-    }; // 옛 자료에는 차수가 없다 → 1차
+    };
+    if (t && !out.closedTrk) out.closedTrk = t;
+    return out;
   });
   const cs = {};
   Object.entries(customers || {}).forEach(([k, c]) => {
@@ -429,6 +434,13 @@ function App() {
          다른 창에 「먼저 저장했습니다」 가짜 충돌 배너가 뜬다)
      ③ srvPendingRef — 저장 중에 들어온 변경을 버리지 않고 밀어두는 표식.
         (없으면: 회선이 느릴 때 마지막 입력이 서버에 안 올라간 채 끝난다) */
+  /* ⚠ 탭 실시간 동기화 — 같은 PC 에서 창을 여러 개 켜는 경우.
+     탭들은 localStorage 를 공유하는데 거기엔 rev 보호가 없어서, 늦게 저장한 탭이
+     다른 탭의 내용을 통째로 덮어쓴다. (인터넷이 끊긴 상태면 그대로 유실)
+     그래서 한 탭이 바뀌면 나머지 탭이 즉시 따라오게 한다. 서버는 더 쓰지 않는다. */
+  const tabId = useRef(Math.random().toString(36).slice(2) + Date.now());
+  const bcRef = useRef(null);
+  const lastBcRef = useRef(null); // 마지막으로 주고받은 내용 — 되울림(무한 반복) 방지
   const [srvSyncedDate, setSrvSyncedDate] = useState(null);
   const srvSyncedRef = useRef(null);
   const srvPendingRef = useRef(false);
@@ -986,17 +998,45 @@ function App() {
       shipData
     };
     const t = setTimeout(async () => {
-      await saveKey("saja:session", JSON.stringify(payload), "방송 데이터");
-      if (!serverOn() || srvPick) return; // 고르는 중이면 올리지 않는다
+      const str = JSON.stringify(payload);
+      await saveKey("saja:session", str, "방송 데이터");
+      // 다른 탭에 알린다 (내가 방금 반영한 내용이면 되울림이므로 보내지 않는다)
+      const tell = synced => {
+        if (lastBcRef.current === str) return;
+        lastBcRef.current = str;
+        const msg = {
+          from: tabId.current,
+          bdate,
+          str,
+          rev: srvRevRef.current,
+          synced: !!synced
+        };
+        try {
+          bcRef.current && bcRef.current.postMessage(msg);
+        } catch (e) {}
+        try {
+          localStorage.setItem("saja:sync", JSON.stringify(msg));
+        } catch (e) {}
+      };
+      if (!serverOn() || srvPick) {
+        tell(false);
+        return;
+      } // 고르는 중이면 올리지 않는다
       // ⚠ 날짜를 바꾼 직후 — 서버에 그 날짜가 뭐가 있는지 확인하기 전에는 절대 올리지 않는다.
       //    확인 없이 올리면 앞 날짜의 주문이 새 날짜에 그대로 기록된다.
-      if (srvSyncedDate !== bdate) return;
-      const str = JSON.stringify(payload);
+      if (srvSyncedDate !== bdate) {
+        tell(false);
+        return;
+      }
       // ⚠ 서버에 있는 것과 똑같으면 올릴 이유가 없다. 되올리면 저장자 이름과 rev 만 바뀌어
       //    다른 사람 화면에 가짜 충돌이 뜬다.
-      if (srvSyncedRef.current === str) return;
+      if (srvSyncedRef.current === str) {
+        tell(true);
+        return;
+      }
       if (srvBusy.current) {
         srvPendingRef.current = true;
+        tell(false);
         return;
       } // 버리지 않고 밀어둔다
       srvBusy.current = true;
@@ -1020,6 +1060,7 @@ function App() {
       } else {
         setSrvState("fail");
       }
+      tell(r.ok); // 다른 탭도 같은 rev 를 갖게 해야 헛충돌이 안 난다
       // 저장하는 사이에 들어온 변경이 있으면 한 번 더 태운다 (그냥 버리면 마지막 입력이 사라진다)
       if (srvPendingRef.current) setSrvRetryTick(n => n + 1);
     }, 700); // 서버 요청이 붙으므로 로컬(400ms)보다 조금 여유를 둔다
@@ -1029,6 +1070,70 @@ function App() {
   /* 앱을 열거나 날짜를 바꾸면 서버를 먼저 확인한다.
      ⚠ 서버에 그 날짜가 있으면 서버 것이 기준이다. 매니저 PC 의 옛 데이터가
         사장님이 올린 최신본을 덮어쓰는 것을 막는다. */
+  // 다른 탭에서 온 내용을 화면에 반영한다 (서버 응답과 달리 이미 정규화된 값이라 그대로 쓴다)
+  const applyTabPayload = (str, rev, synced) => {
+    let d = null;
+    try {
+      d = JSON.parse(str);
+    } catch (e) {
+      return;
+    }
+    const m = migrateTrk(d.shipData, d.customers);
+    setProducts(d.products || []);
+    setOrders(d.orders || []);
+    setCustomers(m.customers);
+    setShipFee(typeof d.shipFee === "number" ? d.shipFee : 4000);
+    setPickState(d.pickState || {});
+    if (d.settleHeader) setSettleHeader(d.settleHeader);
+    if (d.trackHeader) setTrackHeader(d.trackHeader);
+    setShipData(m.shipData);
+    if (rev !== undefined && rev !== null) {
+      srvRevRef.current = rev;
+      setSrvRev(rev);
+    }
+    if (synced) {
+      // 그 탭이 서버 저장까지 마쳤다면 이 탭도 서버와 같은 상태다 → 다시 올릴 필요가 없다
+      srvSyncedRef.current = str;
+      setSrvSyncedDate(d.bdate);
+      setSrvState("ok");
+      setSrvConflict(null);
+    }
+  };
+
+  // 탭 사이 연결 — BroadcastChannel 이 막히면 localStorage 이벤트로 대신한다
+  useEffect(() => {
+    if (!loaded) return;
+    const onMsg = msg => {
+      if (!msg || msg.from === tabId.current) return;
+      if (msg.bdate !== bdate) return; // 다른 날짜를 보는 탭 → 건드리지 않는다
+      if (srvPick) return; // 고르는 중에는 화면을 바꾸지 않는다
+      if (lastBcRef.current === msg.str) return; // 이미 반영된 내용
+      lastBcRef.current = msg.str;
+      applyTabPayload(msg.str, msg.rev, msg.synced);
+    };
+    let ch = null;
+    try {
+      ch = new BroadcastChannel("saja-live-sync");
+      ch.onmessage = e => onMsg(e.data);
+      bcRef.current = ch;
+    } catch (e) {
+      bcRef.current = null;
+    }
+    const onStorage = e => {
+      if (e.key !== "saja:sync" || !e.newValue) return;
+      try {
+        onMsg(JSON.parse(e.newValue));
+      } catch (x) {}
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      try {
+        ch && ch.close();
+      } catch (e) {}
+      bcRef.current = null;
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [bdate, loaded, srvPick]);
   const syncedDate = useRef(null);
   /* ⚠ 날짜를 바꾸기 전에 「지금 날짜」의 저장을 반드시 끝낸다.
      자동저장은 0.7초 뒤에 일어나는데, 그 사이에 날짜를 바꾸면 대기 중이던 저장이 취소되어
@@ -1148,6 +1253,130 @@ function App() {
   }, [bdate, loaded, auth, srvLoadTick]);
 
   // 「빈 날짜」 안내에서 고른 결과
+  /* 출고완료 잠금해제 — 아직 안 보냈는데 잘못 마감된 건을 되돌린다.
+     ⚠ 운송장 기록은 건드리지 않는다. 그 주문만 다시 「이번 차수」로 돌려놓는다. */
+  /* 손으로 출고완료 처리 — 운송장 없이 나간 건(위탁 등)이나 예전 자료 정리용.
+     ⚠ 운송장 자동 마감과 같은 결과를 만들되, 되돌릴 수 있도록 doneCust 를 함께 적는다. */
+  const closeBatchManual = nick => {
+    const open = orders.filter(o => o.nick === nick && !o.done && !o.canceled);
+    if (!open.length) {
+      showToast("이미 전부 출고완료입니다.");
+      return;
+    }
+    takeSnap(`출고완료 처리 직전 (${nick})`);
+    const c = customers[nick] || EMPTY_CUST;
+    const seq = curSeq(nick);
+    const row = shipData.find(d => d.nick === nick && seqOf(d) === seq);
+    const trk = row ? normTrk(row.tracking) : "";
+    let head = true;
+    setOrders(prev => prev.map(o => {
+      if (o.nick !== nick || o.done || o.canceled) return o;
+      const extra = head ? {
+        doneFee: noFee(c) ? 0 : shipFee,
+        donePaid: !!c.paid,
+        doneCust: {
+          paid: !!c.paid,
+          notified: !!c.notified,
+          keep: !!c.keep,
+          shipPaid: !!c.shipPaid,
+          keepPaid: Number(c.keepPaid) || 0,
+          freeShip: !!c.freeShip,
+          pickup: !!c.pickup
+        }
+      } : {};
+      head = false;
+      const {
+        wasDone,
+        ...rest
+      } = o;
+      return {
+        ...rest,
+        done: true,
+        doneSeq: seq,
+        doneTrk: trk,
+        doneAt: Date.now(),
+        ...extra
+      };
+    }));
+    setCustomers(prev => ({
+      ...prev,
+      [nick]: {
+        ...(prev[nick] || EMPTY_CUST),
+        paid: false,
+        notified: false,
+        keep: false,
+        shipPaid: false,
+        keepPaid: 0,
+        freeShip: false,
+        pickup: false
+      }
+    }));
+    if (row) setShipData(prev => prev.map(d => d.nick === nick && seqOf(d) === seq ? {
+      ...d,
+      closedTrk: d.tracking
+    } : d));
+    showToast(`✓ 「${nick}」 ${open.length}건 출고완료 — 이후 주문은 새로 정산됩니다`);
+  };
+  const unlockDone = orderId => {
+    const o = orders.find(x => x.id === orderId);
+    if (!o || !o.done) return;
+    takeSnap(`출고완료 잠금해제 직전 (${o.nick} · ${o.name})`);
+    setOrders(prev => prev.map(x => {
+      if (x.id !== orderId) return x;
+      const {
+        done,
+        doneSeq,
+        doneTrk,
+        doneAt,
+        doneFee,
+        donePaid,
+        doneCust,
+        ...rest
+      } = x;
+      /* ⚠ 마감 정보를 버리지 않고 보관한다.
+            버리면 실수로 푼 뒤 다시 잠글 방법이 「손님 단위 처리」뿐이라,
+            아직 안 보낸 방송 주문건까지 같이 잠겨버린다. (실제로 그렇게 동작함을 확인) */
+      return {
+        ...rest,
+        wasDone: {
+          seq: doneSeq,
+          trk: doneTrk,
+          at: doneAt,
+          fee: doneFee,
+          paid: donePaid,
+          cust: doneCust
+        }
+      };
+    }));
+    showToast(`🔓 「${o.nick}」 ${o.name} — 다시 이번 정산에 들어갑니다`);
+  };
+
+  // 잠금해제를 되돌린다 — 그 주문 하나만 원래대로 잠근다
+  const relockDone = orderId => {
+    const o = orders.find(x => x.id === orderId);
+    if (!o || !o.wasDone) return;
+    takeSnap(`출고완료 다시 잠금 직전 (${o.nick} · ${o.name})`);
+    setOrders(prev => prev.map(x => {
+      if (x.id !== orderId) return x;
+      const w = x.wasDone || {};
+      const {
+        wasDone,
+        ...rest
+      } = x;
+      const back = {
+        ...rest,
+        done: true,
+        doneSeq: w.seq || 1,
+        doneTrk: w.trk || "",
+        doneAt: w.at || Date.now()
+      };
+      if (w.fee != null) back.doneFee = w.fee;
+      if (w.paid != null) back.donePaid = w.paid;
+      if (w.cust) back.doneCust = w.cust;
+      return back;
+    }));
+    showToast(`🔒 「${o.nick}」 ${o.name} — 다시 출고완료로 되돌렸습니다`);
+  };
   const emptyStartFresh = () => {
     // 이 날짜를 빈 방송으로 시작
     takeSnap("날짜 변경 · 빈 방송으로 시작 직전");
@@ -1257,7 +1486,10 @@ function App() {
     }
   };
 
-  // 상단바 실제 높이를 --topbar-h 로 추적 → 탭 줄이 정확히 그 아래에 고정되도록
+  /* 상단바 실제 높이를 --topbar-h 로 추적 → 탭 줄이 정확히 그 아래에 고정되도록
+     ⚠ 로그인 화면에는 상단바가 없다. 화면이 바뀔 때마다 다시 잡아야 한다.
+       (한 번만 실행하면 상단바가 생기기 전에 끝나버려 --topbar-h 가 영영 안 채워지고,
+        기본값 95px 로 굳어 창 폭이 달라지면 탭 줄이 상단바에 가리거나 밀린다) */
   useEffect(() => {
     const el = topbarRef.current;
     if (!el) return;
@@ -1280,7 +1512,7 @@ function App() {
       window.removeEventListener("resize", apply);
       window.removeEventListener("orientationchange", apply);
     };
-  }, []);
+  }, [auth, loaded, tab]);
 
   // 불러온 파일명은 세션 데이터와 별도 키로 보관 (엑셀 저장 payload에는 미포함)
   useEffect(() => {
@@ -1338,7 +1570,9 @@ function App() {
   //   refundAll 전체환불 → 배송비까지 돌려줌 (0-3에서 UI 추가 · 조건은 미리 넣어둠)
   //   shipPaid  킵 때 배송비까지 미리 받음 → 발송할 때 또 받으면 안 됨 ⭐ 5-19
   const noFee = c => !!(c && (c.pickup || c.freeShip || c.refundAll || c.shipPaid));
-  const feeOf = nick => noFee(customers[nick]) ? 0 : shipFee;
+  // ⚠ 마감만 남은 사람은 이번에 보낼 게 없으므로 배송비도 0이다.
+  const hasOpenOrder = n => orders.some(o => o.nick === n && !o.canceled && !o.done);
+  const feeOf = nick => noFee(customers[nick]) || !hasOpenOrder(nick) ? 0 : shipFee;
   // 배송비를 실제로 내는 사람 수
   const shipPayNickCount = useMemo(() => new Set(activeOrders.filter(o => !noFee(customers[o.nick])).map(o => o.nick)).size, [activeOrders, customers]);
   const paidShipPayNickCount = useMemo(() => new Set(activeOrders.filter(o => {
@@ -1348,13 +1582,31 @@ function App() {
   // ⚠ 마감된 차수도 오늘의 매출이다. 현재 차수 금액에 더해 상단바·결산이 하루 전체를 보이게 한다.
   const totalWithShip = totalSales + shipPayNickCount * shipFee + doneSales + doneFees;
   const paidWithShip = paidSales + paidShipPayNickCount * shipFee + donePaidSales + donePaidFees;
-  // ⚠ 정산 대상 = 「아직 안 보낸 주문」이 있는 사람. 마감된 차수만 있는 사람은 정산할 게 없다.
+  // ⚠ 계산용 목록 = 「아직 안 보낸 주문」이 있는 사람. 마감분만 있는 사람은 정산할 금액이 없다.
   const nickList = useMemo(() => {
     const s = [];
     orders.forEach(o => {
       if (!o.done && !s.includes(o.nick)) s.push(o.nick);
     });
     return s;
+  }, [orders]);
+  /* ⚠ 화면 표시용은 따로 둔다. 마감분만 남은 사람도 정산 탭에 보여야 한다.
+     안 보이면 「주문이 사라졌다」고 놀라게 된다. 보이되 회색 취소선으로 잠가 둔다. */
+  const settleNickList = useMemo(() => {
+    // ⚠ 취소·환불된 사람도 그대로 둔다. 빼면 「환불 취소」를 누를 자리가 사라진다.
+    const s = [];
+    orders.forEach(o => {
+      if (!s.includes(o.nick)) s.push(o.nick);
+    });
+    return s;
+  }, [orders]);
+  // 화면에 보여줄 주문 줄 — 마감분 포함 (금액 계산에는 쓰지 않는다)
+  const byNickAll = useMemo(() => {
+    const m = {};
+    orders.filter(o => !o.canceled).forEach(o => {
+      (m[o.nick] = m[o.nick] || []).push(o);
+    });
+    return m;
   }, [orders]);
   // ⚠ 정산서·주문 화면용이라 킵도 포함한다 (취소만 제외).
   //    킵 고객도 정산서를 보내야 하고, 주문 목록에 보여야 한다.
@@ -2034,8 +2286,6 @@ function App() {
      ⚠ 되돌릴 수 있어야 하므로 마감 시점의 손님 상태(입금·안내·킵·배송비면제)를 주문에 함께 적어둔다. */
   useEffect(() => {
     if (!loaded) return;
-    /* ⚠ 「운송장이 있는 사람」을 그때그때 마감하면, 마감 뒤에 들어온 2차 주문까지 곧바로 마감돼버린다.
-          그래서 운송장 번호 기준으로 판단한다 — 그 번호로 아직 마감한 적이 없을 때만 마감한다. */
     /* ⚠ 「운송장이 있는 사람」 기준으로 마감하면, 마감 뒤 들어온 2차 주문까지 곧바로 마감된다.
           그래서 운송장 번호 기준으로 판단한다 — 그 번호로 아직 마감한 적이 없을 때만 마감한다. */
     const toClose = shipData.filter(d => normTrk(d.tracking) && d.tracking !== d.closedTrk).map(d => ({
@@ -5259,7 +5509,7 @@ function App() {
     }, n)));
   })(), !nick.trim() && /*#__PURE__*/React.createElement("div", {
     className: "hint"
-  }, "닉네임을 먼저 입력하면 상품 버튼·직접입력이 활성화됩니다.")), nick.trim() && (byNick[nick.trim()] || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "닉네임을 먼저 입력하면 상품 버튼·직접입력이 활성화됩니다.")), nick.trim() && (byNickAll[nick.trim()] || []).length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "card focus"
   }, /*#__PURE__*/React.createElement("div", {
     className: "rowbetween"
@@ -5268,7 +5518,9 @@ function App() {
     style: {
       margin: 0
     }
-  }, "「", nick.trim(), "」 현재 주문 · 합계 ", won((byNick[nick.trim()] || []).reduce((s, o) => s + o.price * o.qty, 0)), "원"), /*#__PURE__*/React.createElement("button", {
+  }, "「", nick.trim(), "」 현재 주문 · 합계 ", won((byNick[nick.trim()] || []).reduce((s, o) => s + o.price * o.qty, 0)), "원", doneOrders.filter(o => o.nick === nick.trim()).length > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, " · 출고완료 ", doneOrders.filter(o => o.nick === nick.trim()).length, "건은 합계에서 제외")), /*#__PURE__*/React.createElement("button", {
     className: "btn sm delordbtn" + (delNickArm === nick.trim() ? " armed" : ""),
     onClick: () => delNickOrders(nick.trim())
   }, delNickArm === nick.trim() ? "한 번 더 누르면 삭제!" : "주문서 삭제")), orders.filter(o => o.nick === nick.trim()).map(o => /*#__PURE__*/React.createElement(OrderRow, {
@@ -5277,6 +5529,8 @@ function App() {
     chgQty: chgQty,
     toggleCancel: toggleCancel,
     delOrder: delOrder,
+    unlockDone: unlockDone,
+    relockDone: relockDone,
     hideNick: true,
     recent: o.id === recentId
   })), /*#__PURE__*/React.createElement("input", {
@@ -5659,7 +5913,7 @@ function App() {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "empty"
-  }, paidOnly ? "입금완료 주문이 없습니다." : unpaidOnly ? "미입금 주문이 없습니다." : freeOnly ? "무료배송으로 체크된 주문이 없습니다." : memoOnly ? "특이사항이 있는 주문이 없습니다." : `「${settleSearch}」 검색 결과가 없습니다.`)), nickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase()) && (!memoOnly || (cust(n).memo || "").trim()) && (!freeOnly || cust(n).freeShip) && (!unpaidOnly || !cust(n).paid) && (!paidOnly || cust(n).paid)).map(n => {
+  }, paidOnly ? "입금완료 주문이 없습니다." : unpaidOnly ? "미입금 주문이 없습니다." : freeOnly ? "무료배송으로 체크된 주문이 없습니다." : memoOnly ? "특이사항이 있는 주문이 없습니다." : `「${settleSearch}」 검색 결과가 없습니다.`)), settleNickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase()) && (!memoOnly || (cust(n).memo || "").trim()) && (!freeOnly || cust(n).freeShip) && (!unpaidOnly || !cust(n).paid) && (!paidOnly || cust(n).paid)).map(n => {
     const list = byNick[n] || [];
     const sum = list.reduce((s, o) => s + o.price * o.qty, 0);
     const c = cust(n);
@@ -5686,7 +5940,11 @@ function App() {
         className: "donebadge",
         title: "이미 보낸 건입니다. 이번 정산서에는 들어가지 않습니다."
       }, "📦 출고완료 ", dn.length, "건") : null;
-    })(), c.keep && /*#__PURE__*/React.createElement("span", {
+    })(), hasOpenOrder(n) && /*#__PURE__*/React.createElement("button", {
+      className: "btn ghost sm donebtn",
+      title: "운송장 없이 이미 보낸 건이면 눌러주세요. 이후 주문은 새 차수로 정산됩니다.",
+      onClick: () => closeBatchManual(n)
+    }, "📦 출고완료로 처리"), c.keep && /*#__PURE__*/React.createElement("span", {
       className: "keepbadge"
     }, "🔖 킵 · 이번 발송 제외"), rs === "all" && /*#__PURE__*/React.createElement("span", {
       className: "refundbadge"
@@ -6582,6 +6840,10 @@ function App() {
     className: "savefail"
   }, "☁ 서버 저장 실패 (이 PC에는 저장됨)") : "☁ 서버 연결됨"), " · 전체 저장 「", dateCode, "_사자창고_라이브.xlsx」 · 출고 「롯데/CJ_사자창고_출고_", dateCode, ".xlsx」"));
 }
+
+/* ⚠ 이미 보낸 주문(o.done)은 지우거나 고칠 수 없게 잠근다.
+      숨기지는 않는다 — 안 보이면 「주문이 사라졌다」고 놀라기 때문이다.
+      잘못 마감된 건은 「잠금해제」로 되돌릴 수 있다. */
 function OrderRow({
   o,
   chgQty,
@@ -6589,36 +6851,50 @@ function OrderRow({
   delOrder,
   hideNick,
   recent,
-  onNickClick
+  onNickClick,
+  unlockDone,
+  relockDone
 }) {
+  const done = !!o.done;
   return /*#__PURE__*/React.createElement("div", {
-    className: "orow" + (o.canceled ? " canceled" : "") + (recent ? " recent" : "")
+    className: "orow" + (o.canceled ? " canceled" : "") + (done ? " donelock" : "") + (recent ? " recent" : "")
   }, !hideNick && /*#__PURE__*/React.createElement("span", {
-    className: "onick" + (onNickClick ? " clickable" : ""),
-    onClick: onNickClick ? () => onNickClick(o.nick) : undefined
+    className: "onick" + (onNickClick && !done ? " clickable" : ""),
+    onClick: onNickClick && !done ? () => onNickClick(o.nick) : undefined
   }, o.nick), /*#__PURE__*/React.createElement("span", {
     className: "oname"
-  }, o.name, o.canceled && " (취소)"), /*#__PURE__*/React.createElement("span", {
+  }, o.name, o.canceled && " (취소)", done && /*#__PURE__*/React.createElement("span", {
+    className: "lockbadge",
+    title: o.doneTrk ? `운송장 ${fmtTrk(o.doneTrk)}` : ""
+  }, "📦 출고완료", o.doneSeq > 1 ? ` ${o.doneSeq}차` : "")), /*#__PURE__*/React.createElement("span", {
     className: "qtybox"
   }, /*#__PURE__*/React.createElement("button", {
     className: "qbtn",
     onClick: () => chgQty(o.id, -1),
-    disabled: o.canceled
+    disabled: o.canceled || done
   }, "−"), /*#__PURE__*/React.createElement("span", {
     className: "qty"
   }, o.qty), /*#__PURE__*/React.createElement("button", {
     className: "qbtn",
     onClick: () => chgQty(o.id, +1),
-    disabled: o.canceled
+    disabled: o.canceled || done
   }, "+")), /*#__PURE__*/React.createElement("span", {
     className: "oamt"
-  }, won(o.price * o.qty), "원"), /*#__PURE__*/React.createElement("button", {
+  }, won(o.price * o.qty), "원"), done ? unlockDone ? /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm",
+    title: "잘못 출고완료로 잡힌 경우 되돌립니다",
+    onClick: () => unlockDone(o.id)
+  }, "잠금해제") : null : /*#__PURE__*/React.createElement(React.Fragment, null, o.wasDone && relockDone && /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm relockbtn",
+    title: "잠금해제를 되돌립니다 — 이 주문만 다시 출고완료로",
+    onClick: () => relockDone(o.id)
+  }, "🔒 다시 잠금"), /*#__PURE__*/React.createElement("button", {
     className: "btn ghost sm",
     onClick: () => toggleCancel(o.id)
   }, o.canceled ? "복구" : "취소"), /*#__PURE__*/React.createElement("button", {
     className: "btn ghost sm",
     onClick: () => delOrder(o.id)
-  }, "×"));
+  }, "×")));
 }
 const CSS = `
 * { box-sizing: border-box; }
@@ -7081,6 +7357,13 @@ const CSS = `
 .whtbl tfoot td { border-top: 2px solid #d9dde3; font-weight: 800; padding-top: 10px; }
 .settletop { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .summarycard { display: flex; align-items: center; gap: 10px; padding: 12px 16px; font-size: 15px; }
+/* 이미 보낸 주문 — 회색 취소선으로 잠금 표시 */
+.orow.donelock { opacity: .62; background: #f4f5f7; }
+.orow.donelock .oname, .orow.donelock .oamt, .orow.donelock .onick, .orow.donelock .qty {
+  text-decoration: line-through; color: #7b8494; }
+.lockbadge { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+  background: #e8f6ec; color: #1f7a3d; font-weight: 700; text-decoration: none; vertical-align: middle; }
+.donebtn { margin-left: 8px; }
 .seqbadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   background: #eef2ff; color: #3b4bc9; font-weight: 700; }
 .donebadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
