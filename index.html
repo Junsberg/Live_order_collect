@@ -4289,11 +4289,17 @@ function App() {
 
   // 화면의 킵 상태를 목록에 반영한다.
   // ⚠ 오늘 방송에 없는 사람의 킵은 건드리지 않는다 (지난 방송에서 넘어온 것이 지워지면 안 됨).
+  /* ⚠⚠ 「오늘 화면에 있나」는 settleNickList 로 판단한다. nickList 를 쓰면 안 된다. (2026-07-28 2차)
+        nickList 는 「아직 안 보낸 주문이 있는 사람」이라, 출고가 끝나 전부 마감된 사람은 빠진다.
+        그 사람은 정산 탭에 멀쩡히 보이는데도 「지난 방송에서 넘어온 킵」으로 오인돼
+        목록에서 지워지지도 않고 불러오기 카드에 계속 뜬다.
+        (실제 사례: 7/27 「드리맘」 — 주문 3건이 전부 1차 마감된 뒤 킵 카드에 남음)
+        인수인계서의 「지금 보낼 것 vs 오늘 판 것」 혼동과 같은 뿌리다. */
   useEffect(() => {
     if (!keepsLoaded.current || !loaded) return;
     const t = setTimeout(() => {
       setKeeps(prev => {
-        const today = new Set(nickList);
+        const today = new Set(settleNickList);
         // 오늘 화면에 있는 사람 중 킵이 아닌 사람은 목록에서 뺀다 (= 킵 해제)
         const keptOrders = (prev.orders || []).filter(o => !today.has(o.nick) || isKeep(o.nick));
         const keptCusts = {};
@@ -4321,7 +4327,7 @@ function App() {
       });
     }, 800);
     return () => clearTimeout(t);
-  }, [keepOrders, keepNicks, customers, nickList, loaded]);
+  }, [keepOrders, keepNicks, customers, settleNickList, loaded]);
   useEffect(() => {
     if (!keepsLoaded.current) return;
     const t = setTimeout(() => {
@@ -4330,11 +4336,13 @@ function App() {
     return () => clearTimeout(t);
   }, [keeps]);
 
-  // 오늘 화면에 아직 안 올라온 킵 (= 불러올 수 있는 것)
+  /* 오늘 화면에 아직 안 올라온 킵 (= 불러올 수 있는 것)
+     ⚠ 위 동기화 effect 와 같은 이유로 settleNickList 를 쓴다. nickList 를 쓰면
+        출고가 끝나 전부 마감된 사람이 「불러올 킵」으로 잡혀, 눌러도 아무 일도 안 일어난다. */
   const keepPending = useMemo(() => {
-    const today = new Set(nickList);
+    const today = new Set(settleNickList);
     return (keeps.orders || []).filter(o => !today.has(o.nick));
-  }, [keeps, nickList]);
+  }, [keeps, settleNickList]);
   const keepPendingNicks = useMemo(() => [...new Set(keepPending.map(o => o.nick))], [keepPending]);
   const loadKeeps = () => {
     if (!keepPending.length) {
