@@ -2637,6 +2637,17 @@ function App() {
      이미 보낸 차수(마감분)까지 합쳐야 한다 — 마감분만 빼면 0원으로 발행하게 된다. */
   const receiptSumOf = n => (byNick[n] || []).reduce((s, o) => s + o.price * o.qty, 0) + doneOrders.filter(o => o.nick === n).reduce((s, o) => s + o.price * o.qty, 0);
   // 마감된 차수는 이미 받은 돈이다 — 입금 판정에 함께 넣는다
+  /* 정산 탭 정렬 — 손볼 것부터 위로 올린다.
+     미입금(할 일) → 입금 → 킵 → 픽업 → 이미 보낸 사람(맨 아래).
+     같은 등급 안에서는 원래 순서를 그대로 둔다. */
+  const settleRank = n => {
+    if (!hasOpenOrder(n)) return 4; // 이미 다 보낸 사람은 맨 뒤
+    const c = cust(n);
+    if (c.pickup) return 3;
+    if (c.keep) return 2;
+    if (c.paid) return 1;
+    return 0; // 미입금이 맨 앞
+  };
   const paidAnyOf = n => cust(n).paid || doneOrders.some(o => o.nick === n && o.donePaid !== false);
   const receiptFeeOf = n => feeOf(n) + doneOrders.filter(o => o.nick === n).reduce((s, o) => s + (Number(o.doneFee) || 0), 0);
   const cashIssuedCount = cashList.filter(n => cust(n).cashIssued).length;
@@ -5716,7 +5727,9 @@ function App() {
       title: cust(s.nick).name.trim()
     }, cust(s.nick).name.trim())), /*#__PURE__*/React.createElement("span", {
       className: "nsum" + (s.active === 0 ? " zero" : "")
-    }, won(s.total), "원"), delNickArm === s.nick ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+    }, won(s.total), "원"), /*#__PURE__*/React.createElement("span", {
+      className: "nrowact"
+    }, delNickArm === s.nick ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
       className: "btn ghost sm danger",
       onClick: () => delNickOrders(s.nick)
     }, "삭제?"), s.active > 0 && /*#__PURE__*/React.createElement("button", {
@@ -5731,7 +5744,7 @@ function App() {
     }, "환불취소")) : /*#__PURE__*/React.createElement("button", {
       className: "btn ghost sm",
       onClick: () => delNickOrders(s.nick)
-    }, "삭제"))), refundFor && refundFor.nick === s.nick && (() => {
+    }, "삭제")))), refundFor && refundFor.nick === s.nick && (() => {
       const list = orders.filter(o => o.nick === s.nick && !o.canceled);
       const picked = list.filter(o => refundFor.sel[o.id]);
       const amt = picked.reduce((t, o) => t + o.price * o.qty, 0);
@@ -5876,7 +5889,7 @@ function App() {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "empty"
-  }, paidOnly ? "입금완료 주문이 없습니다." : unpaidOnly ? "미입금 주문이 없습니다." : freeOnly ? "무료배송으로 체크된 주문이 없습니다." : memoOnly ? "특이사항이 있는 주문이 없습니다." : `「${settleSearch}」 검색 결과가 없습니다.`)), settleNickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase()) && (!memoOnly || (cust(n).memo || "").trim()) && (!freeOnly || cust(n).freeShip) && (!unpaidOnly || !cust(n).paid) && (!paidOnly || cust(n).paid)).map(n => {
+  }, paidOnly ? "입금완료 주문이 없습니다." : unpaidOnly ? "미입금 주문이 없습니다." : freeOnly ? "무료배송으로 체크된 주문이 없습니다." : memoOnly ? "특이사항이 있는 주문이 없습니다." : `「${settleSearch}」 검색 결과가 없습니다.`)), settleNickList.filter(n => n.toLowerCase().includes(settleSearch.trim().toLowerCase()) && (!memoOnly || (cust(n).memo || "").trim()) && (!freeOnly || cust(n).freeShip) && (!unpaidOnly || !cust(n).paid) && (!paidOnly || cust(n).paid)).sort((a, b) => settleRank(a) - settleRank(b)).map(n => {
     const list = byNick[n] || [];
     const sum = list.reduce((s, o) => s + o.price * o.qty, 0);
     const c = cust(n);
@@ -7124,10 +7137,13 @@ const CSS = `
 }
 /* 상태 표시(출고완료·킵·환불·배송지 이름)는 오른쪽에 모아 둔다.
    왼쪽에 섞여 있으면 닉네임을 눈으로 훑기 어렵다. (7/28 사장님 요청) */
+/* ⚠ 오른쪽 칸은 「태그 → 금액 → 버튼」 순으로 항상 같은 자리에 있어야 한다.
+   빈 태그 상자를 숨기면(:empty) 밀어주는 여백이 사라져 태그 없는 행만 금액이 왼쪽으로 붙는다.
+   그래서 상자는 비어 있어도 남겨두고, 금액·버튼은 고정폭으로 잡는다. (7/28 사장님 지적) */
 .nrowtags { margin-left: auto; display: flex; align-items: center; justify-content: flex-end;
   gap: 6px; flex-wrap: wrap; min-width: 0; }
-.nrowtags:empty { display: none; }
-.nsum { flex: 0 0 auto; min-width: 96px; text-align: right; font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
+.nsum { flex: 0 0 112px; text-align: right; font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
+.nrowact { flex: 0 0 auto; min-width: 64px; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .nsum.zero { color: #b0b7c0; text-decoration: line-through; }
 .nickeditbtn { flex: 0 0 auto; padding: 5px 9px; color: #8a919c; }
 .in.nickedit { flex: 1; min-width: 0; font-weight: 700; padding: 7px 9px; }
