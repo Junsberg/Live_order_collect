@@ -6408,8 +6408,9 @@ function App() {
       className: "nrowname",
       title: cust(s.nick).name.trim()
     }, cust(s.nick).name.trim())), /*#__PURE__*/React.createElement("span", {
-      className: "nsum" + (s.active === 0 ? " zero" : "")
-    }, won(s.total), "원"), /*#__PURE__*/React.createElement("span", {
+      className: "nsum" + (s.active === 0 ? " zero" : ""),
+      title: s.active === 0 && s.doneTotal > 0 ? `이미 보낸 ${s.doneCount}건 합계입니다 — 이번 정산에는 들어가지 않습니다` : undefined
+    }, won(s.active === 0 && s.doneTotal > 0 ? s.doneTotal : s.total), "원"), /*#__PURE__*/React.createElement("span", {
       className: "nrowact"
     }, delNickArm === s.nick ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
       className: "btn ghost sm danger",
