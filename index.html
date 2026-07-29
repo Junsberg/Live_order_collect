@@ -736,6 +736,10 @@ function App() {
   const [shipFee, setShipFee] = useState(4000);
   const [bdate, setBdate] = useState(todayISO());
   const [pickState, setPickState] = useState({});
+  /* ⚠ 「오늘」을 상태로 들고 시계를 따라간다. todayISO() 를 화면에서 바로 부르면
+        자정을 넘겨도 다시 그려지기 전까지 낡은 값이 남아, 정작 날짜가 바뀐 순간에
+        경고가 안 뜬다. 그 순간이 가장 위험한 순간이다. */
+  const [today, setToday] = useState(todayISO());
   const [nick, setNick] = useState("");
   const [pName, setPName] = useState("");
   const [pPrice, setPPrice] = useState("");
@@ -1540,6 +1544,11 @@ function App() {
     };
   }, [bdate, loaded, srvPick]);
   const syncedDate = useRef(null);
+  /* ⚠ 「어느 날짜에서 왔는가」를 기억한다.
+        빈 날짜 안내가 뜰 때 bdate 는 이미 새 날짜다. 옮기기 확인 카드에
+        「07-27 → 07-29」를 찍어 주려면 앞 날짜를 따로 들고 있어야 한다.
+        엑셀 불러오기·새 방송 시작으로 날짜가 바뀐 경우는 「앞 날짜」가 없으므로 null 로 지운다. */
+  const fromDateRef = useRef(null);
   /* ⚠ 날짜를 바꾸기 전에 「지금 날짜」의 저장을 반드시 끝낸다.
      자동저장은 0.7초 뒤에 일어나는데, 그 사이에 날짜를 바꾸면 대기 중이던 저장이 취소되어
      마지막에 넣은 주문이 서버에 올라가지 못한 채 사라진다. (실제로 재현됨)
@@ -1586,6 +1595,7 @@ function App() {
         srvSyncedRef.current = str;
       }
     }
+    fromDateRef.current = bdate; // ⭐ 옮기기 확인 카드에 「어디서 왔는지」를 찍기 위해
     setBdate(next);
   };
   useEffect(() => {
@@ -1625,6 +1635,7 @@ function App() {
           setSrvPick({
             srv: null,
             empty: true,
+            from: fromDateRef.current,
             localCount: orders.length,
             srvCount: 0
           });
@@ -1742,15 +1753,64 @@ function App() {
     setSrvState("idle");
     showToast(`✓ ${bdate} 을(를) 새 방송으로 시작합니다`);
   };
+  /* ⚠⚠ 「지금 화면 내용을 이 날짜로 올리기」 — 3단 잠금 (2026-07-29 3차)
+     이것은 「옮기기」가 아니라 「복사」다. 앞 날짜 서버 데이터는 그대로 남는다.
+     재현 결과: 앞 날짜 60,000원 · 옮긴 날짜 60,000원 · 주문 id 동일 · 요약본도 양쪽 생성.
+     기간 회계(0-7)에서 매출이 두 배로 잡힌다.
+      그런데 없앨 수도 없다. 날짜를 잘못 잡고 받은 주문을 옮기는 유일한 수단이다
+     (엑셀 저장→불러오기는 applyImported 가 원래 날짜까지 되돌려 옮기기에 못 쓴다).
+      → 없애지 않고 조인다.
+        1단 첫 화면에서 감춘다 (작은 링크로만 진입)
+        2단 어디서 어디로·몇 건·얼마인지 숫자로 보여준다
+        3단 「한 번 더 탭」
+        + 사장님만 (forceMine 과 같은 기준 — 하루 매출을 복제할 수 있다)
+        + ⭐ 실행 뒤 「앞 날짜에 남아 있다」 배너를 띄우고 새로고침해도 유지한다
+          3단 확인은 「오눌림」을 막을 뿐이고, 이중계상은 「뒷정리를 잊어서」 생긴다. */
+  const [moveOpen, setMoveOpen] = useState(false); // 2단 확인 카드가 열렸는가
+  const [moveArm, setMoveArm] = useState(false); // 3단 「한 번 더」 대기
+  const [moveLeft, setMoveLeft] = useState(null); // { from, to, count, amount } 뒷정리 배너
+  const moveLeftLoaded = useRef(false);
+  useEffect(() => {
+    (async () => {
+      const v = await loadJson("saja:movewarn", null);
+      if (v && v.from) setMoveLeft(v);
+      moveLeftLoaded.current = true;
+    })();
+  }, []);
+  useEffect(() => {
+    if (!moveLeftLoaded.current) return;
+    try {
+      // 표시용이라 실패해도 장사 기록에는 영향이 없다 (saja:loadedFile 과 같은 취급)
+      if (moveLeft) window.storage.set("saja:movewarn", JSON.stringify(moveLeft)).catch(() => {});else window.storage.delete("saja:movewarn").catch(() => {});
+    } catch (e) {}
+  }, [moveLeft]);
+  const moveAmount = () => orders.reduce((t, o) => t + (o.price || 0) * (o.qty || 0), 0);
   const emptyMoveHere = () => {
-    // 지금 화면 내용을 이 날짜로 올린다
+    // 3단을 다 거친 뒤에만 불린다
+    if (!auth || !auth.isOwner) {
+      showToast("⚠ 옮기기는 사장님만 할 수 있습니다");
+      return;
+    }
+    const from = srvPick && srvPick.from || fromDateRef.current;
+    const count = orders.length,
+      amount = moveAmount();
     srvRevRef.current = null;
     setSrvRev(null);
     srvSyncedRef.current = null;
     setSrvPick(null);
     setSrvConflict(null);
+    setMoveOpen(false);
+    setMoveArm(false);
     setSrvSyncedDate(bdate);
-    showToast(`⚠ 지금 화면 내용을 ${bdate} 로 올립니다`);
+    // ⭐ 앞 날짜를 아는 경우에만 뒷정리 배너를 띄운다.
+    //    엑셀 불러오기로 온 경우(from 없음)는 앞 날짜 서버 행이 없어 이중계상이 안 생긴다.
+    if (from) setMoveLeft({
+      from,
+      to: bdate,
+      count,
+      amount
+    });
+    showToast(`⚠ 지금 화면 내용을 ${bdate} 로 복사했습니다${from ? ` — ${from} 는 따로 비워주세요` : ""}`);
   };
   const applyServerPayload = r => {
     const d = r.payload || {};
@@ -1861,6 +1921,18 @@ function App() {
       window.removeEventListener("orientationchange", apply);
     };
   }, [auth, loaded, tab]);
+
+  /* 자정을 넘기면 「오늘」이 바뀐다 — 앱을 켜둔 채로도 스스로 알아채게 한다.
+     ⚠ 값이 실제로 달라졌을 때만 바꾼다. 매번 새 값을 넣으면 30초마다 헛되이 다시 그린다. */
+  useEffect(() => {
+    const t = setInterval(() => {
+      setToday(prev => {
+        const now = todayISO();
+        return now === prev ? prev : now;
+      });
+    }, 30000);
+    return () => clearInterval(t);
+  }, []);
 
   // 불러온 파일명은 세션 데이터와 별도 키로 보관 (엑셀 저장 payload에는 미포함)
   useEffect(() => {
@@ -2237,6 +2309,7 @@ function App() {
     setCustomers({});
     setNick("");
     setResetArm(false);
+    fromDateRef.current = null; // 비우고 시작하므로 옮길 앞 날짜가 없다
     setBdate(todayISO());
     setPickState({});
     setLoadedFile(null);
@@ -2257,6 +2330,7 @@ function App() {
     setCustomers({});
     setNick("");
     setResetAllArm(false);
+    fromDateRef.current = null;
     setBdate(todayISO());
     setPickState({});
     setLoadedFile(null);
@@ -3408,6 +3482,8 @@ function App() {
     setOrders(d.orders || []);
     setCustomers(m.customers);
     setShipFee(typeof d.shipFee === "number" ? d.shipFee : 4000);
+    // ⚠ 파일에서 온 것이라 「앞 날짜」가 없다. 지우지 않으면 엉뚱한 날짜가 확인 카드에 찍힌다.
+    fromDateRef.current = null;
     setBdate(d.bdate || todayISO());
     setPickState(d.pickState || {});
     if (d.settleHeader) setSettleHeader(d.settleHeader);
@@ -5368,7 +5444,7 @@ function App() {
     style: {
       marginTop: 6
     }
-  }, "지금 화면에 있는 주문 ", srvPick.localCount, "건은 ", /*#__PURE__*/React.createElement("b", null, "앞 날짜의 내용"), "입니다. 어떻게 할까요?"), /*#__PURE__*/React.createElement("div", {
+  }, "지금 화면에 있는 주문 ", srvPick.localCount, "건은 ", /*#__PURE__*/React.createElement("b", null, "앞 날짜의 내용"), "입니다. 어떻게 할까요?"), !moveOpen ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     className: "rpfoot",
     style: {
       marginTop: 14
@@ -5376,15 +5452,67 @@ function App() {
   }, /*#__PURE__*/React.createElement("button", {
     className: "btn primary big",
     onClick: emptyStartFresh
-  }, "이 날짜를 빈 방송으로 시작 (권장)"), /*#__PURE__*/React.createElement("button", {
-    className: "btn danger",
-    onClick: emptyMoveHere
-  }, "지금 화면 내용을 이 날짜로 올리기")), /*#__PURE__*/React.createElement("div", {
+  }, "이 날짜를 빈 방송으로 시작 (권장)")), /*#__PURE__*/React.createElement("div", {
     className: "hint",
     style: {
       marginTop: 10
     }
-  }, "고르기 전까지 ", /*#__PURE__*/React.createElement("b", null, "서버에 저장되지 않습니다."), " 앞 날짜에 올려둔 내용은 그대로 있습니다."))), srvPick && !srvPick.empty && /*#__PURE__*/React.createElement("div", {
+  }, "고르기 전까지 ", /*#__PURE__*/React.createElement("b", null, "서버에 저장되지 않습니다."), " 앞 날짜에 올려둔 내용은 그대로 있습니다."), auth.isOwner ? /*#__PURE__*/React.createElement("div", {
+    className: "movelink"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn linkbtn",
+    onClick: () => {
+      setMoveOpen(true);
+      setMoveArm(false);
+    }
+  }, "아니요 — 지금 화면 내용을 이 날짜로 옮기려는 것입니다")) : /*#__PURE__*/React.createElement("div", {
+    className: "hint",
+    style: {
+      marginTop: 8
+    }
+  }, "날짜를 옮기는 것은 ", /*#__PURE__*/React.createElement("b", null, "사장님만"), " 할 수 있습니다")) :
+  /*#__PURE__*/
+  /* ⚠ 2단 — 대상을 숫자로 보여준다. 「어디서 어디로·몇 건·얼마」를 확인하지 않으면
+        지난 방송을 열어둔 채 눌렀을 때 그 날짜의 매출이 통째로 복제된다. */
+  React.createElement("div", {
+    className: "movebox"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "movettl"
+  }, "⚠ 이 날짜로 옮기기 — 마지막 확인"), /*#__PURE__*/React.createElement("div", {
+    className: "moveline"
+  }, /*#__PURE__*/React.createElement("b", null, srvPick.from || "지금 화면"), " 의 주문 ", /*#__PURE__*/React.createElement("b", null, srvPick.localCount, "건"), "(₩", won(moveAmount()), ")을 ", /*#__PURE__*/React.createElement("b", null, bdate), " 로 ", /*#__PURE__*/React.createElement("b", null, "복사"), "합니다"), srvPick.from && /*#__PURE__*/React.createElement("div", {
+    className: "movewarn"
+  }, "⚠ 옮기기가 아니라 ", /*#__PURE__*/React.createElement("b", null, "복사"), "입니다 — ", srvPick.from, " 에도 ", /*#__PURE__*/React.createElement("b", null, "그대로 남습니다"), ".", /*#__PURE__*/React.createElement("br", null), "그대로 두면 두 날짜에 같은 매출이 잡힙니다. 복사한 뒤 ", srvPick.from, " 로 가서", /*#__PURE__*/React.createElement("b", null, " 설정 → 새 방송 시작"), " 으로 비워주세요."), /*#__PURE__*/React.createElement("div", {
+    className: "rpfoot",
+    style: {
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn",
+    onClick: () => {
+      setMoveOpen(false);
+      setMoveArm(false);
+    }
+  }, "취소"), /*#__PURE__*/React.createElement("button", {
+    className: "btn danger" + (moveArm ? " armed" : ""),
+    onClick: () => {
+      if (!moveArm) {
+        setMoveArm(true);
+        setTimeout(() => setMoveArm(false), 4000);
+        return;
+      }
+      emptyMoveHere();
+    }
+  }, moveArm ? `한 번 더 탭 — ${bdate} 로 복사` : `${bdate} 로 복사합니다`))))), moveLeft && /*#__PURE__*/React.createElement("div", {
+    className: "srvbar movebar"
+  }, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("b", null, "⚠ ", moveLeft.from, " 에 같은 주문 ", moveLeft.count, "건(₩", won(moveLeft.amount), ")이 남아 있습니다."), " ", moveLeft.to, " 로 복사했습니다 — 그대로 두면 ", /*#__PURE__*/React.createElement("b", null, "두 날짜에 같은 매출"), "이 잡힙니다."), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    onClick: () => changeDate(moveLeft.from),
+    disabled: dateBusy
+  }, moveLeft.from, " 로 가기"), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    onClick: () => setMoveLeft(null)
+  }, "확인했습니다")), srvPick && !srvPick.empty && /*#__PURE__*/React.createElement("div", {
     className: "closewrap"
   }, /*#__PURE__*/React.createElement("div", {
     className: "closecard"
@@ -5634,7 +5762,17 @@ function App() {
     disabled: activeOrders.length === 0
   }, "📋 마감", closeLeft > 0 && /*#__PURE__*/React.createElement("span", {
     className: "closebadge"
-  }, closeLeft)))), /*#__PURE__*/React.createElement("div", {
+  }, closeLeft))), bdate !== today && /*#__PURE__*/React.createElement("div", {
+    className: "daywarn"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "dwmsg"
+  }, "⚠ 지금 보고 있는 날짜는 ", /*#__PURE__*/React.createElement("b", null, bdate), " 입니다 (오늘은 ", today, ")"), /*#__PURE__*/React.createElement("span", {
+    className: "dwhint"
+  }, "이어서 받는 중이면 그대로 두세요"), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm dwbtn",
+    onClick: () => changeDate(today),
+    disabled: dateBusy
+  }, "오늘(", today, ")로 바꾸기"))), /*#__PURE__*/React.createElement("div", {
     className: "tabs"
   }, tabs.map(([k, label, badge, blink]) => /*#__PURE__*/React.createElement("button", {
     key: k,
@@ -7448,6 +7586,26 @@ const CSS = `
   padding: 12px 18px; background: #b06a00; color: #fff; font-size: 14px; font-weight: 700;
   box-shadow: 0 -4px 18px rgba(0,0,0,.25); }
 .srvbar .btn { background: #fff; border-color: #fff; color: #8a4b00; font-weight: 800; }
+/* 날짜 옮기기 3단 잠금 (2026-07-29 3차) */
+.movelink { margin-top: 12px; text-align: center; }
+.linkbtn {
+  background: none; border: none; padding: 4px 2px; cursor: pointer;
+  font-family: inherit; font-size: 13px; font-weight: 700; color: #8a919c;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+.linkbtn:hover { color: #b3162a; }
+.movebox { margin-top: 14px; padding: 14px; border: 1px solid #f3b7c0; border-radius: 12px; background: #fff5f6; }
+.movettl { font-size: 15px; font-weight: 800; color: #b3162a; }
+.moveline { margin-top: 8px; font-size: 14px; font-weight: 700; color: #3d4550; line-height: 1.55; }
+.movewarn {
+  margin-top: 10px; padding: 10px 12px; border-radius: 10px;
+  background: #ffe9ec; border: 1px solid #f3b7c0;
+  font-size: 13px; font-weight: 700; color: #b3162a; line-height: 1.6;
+}
+.btn.danger.armed { background: #8f0f22; border-color: #8f0f22; }
+.movebar { background: #b3162a; }
+.movebar .btn { color: #b3162a; }
+@media print { .movebar { display: none !important; } }
 .srvpick { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
 .srvbox { padding: 14px; border: 1px solid #e6e9ee; border-radius: 12px; background: #f6f7f9; }
 .srvttl { font-size: 13px; color: #8a919c; font-weight: 700; }
@@ -7574,8 +7732,30 @@ const CSS = `
 .topbar {
   position: sticky; top: 0; z-index: 10; margin: 0 -12px;
   background: #16191f; color: #fff; padding: 12px 18px;
-  display: flex; align-items: center; gap: 14px;
+  /* ⚠ flex-wrap 은 날짜 경고(.daywarn)가 제 줄을 차지하기 위한 것이다.
+        경고가 없을 때는 아무것도 감싸지 않으므로 기존 배치가 그대로다. */
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
 }
+/* 지금 보는 날짜가 오늘이 아닐 때 상단바 아래 줄에 붙는 경고
+   ⚠ order 를 크게 줘서 항상 마지막 줄에 온다 (430px 이하에서 livewrap/topright 가
+      order 2·3 을 쓰므로, 지정하지 않으면 경고가 중간에 끼어든다) */
+.daywarn {
+  order: 9; flex: 1 1 100%;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 9px 12px; border-radius: 10px;
+  background: rgba(232,51,74,.16); border: 1px solid rgba(232,51,74,.55);
+  font-size: 14px; font-weight: 700; color: #ffd9df;
+}
+.daywarn .dwmsg b { color: #fff; }
+.daywarn .dwhint { font-weight: 600; color: #ffaeba; font-size: 13px; }
+.daywarn .dwbtn { margin-left: auto; background: #fff; border-color: #fff; color: #b3162a; font-weight: 800; }
+.daywarn .dwbtn:hover { background: #ffe9ec; }
+.daywarn .dwbtn:disabled { opacity: .55; }
+@media (max-width: 430px) {
+  .daywarn { font-size: 13px; padding: 8px 10px; gap: 6px; }
+  .daywarn .dwbtn { margin-left: 0; flex: 1 1 100%; }
+}
+@media print { .daywarn { display: none !important; } }
 .livewrap { display: flex; align-items: center; gap: 6px; background: rgba(232,51,74,.15); border: 1px solid rgba(232,51,74,.5); padding: 4px 10px; border-radius: 999px; }
 .livedot { width: 8px; height: 8px; border-radius: 50%; background: #e8334a; animation: pulse 1.4s infinite; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
