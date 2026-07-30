@@ -1373,6 +1373,8 @@ function App() {
   const [mPrice, setMPrice] = useState("");
   const [mQty, setMQty] = useState("1");
   const [printMode, setPrintMode] = useState(false);
+  const [acctOpen, setAcctOpen] = useState(false); // 📊 회계 화면 (0-7 2단계)
+  const [acctOnlyMissing, setAcctOnlyMissing] = useState(false); // 「미입력만 보기」
   const [recentId, setRecentId] = useState(null);
   const flashRecent = id => {
     setRecentId(id);
@@ -3100,6 +3102,30 @@ function App() {
     /* 배송 손익 (0-7 1단계) — 「받은 배송비」 − 「택배사에 낸 운임」
        ⚠ 운송장을 안 올리면 carrier 가 비어 lotteCount·cjCount 가 0이 된다.
           운임 0으로 계산하면 손익이 부풀려지므로 「모른다」를 따로 알려준다. */
+    /* 상품별 집계 — 결산 엑셀 「2. 상품별 실적」과 회계 화면이 **같은 값**을 쓴다.
+       ⚠ 집계 키는 「상품명 + 가격」. 상품명만으로 묶으면 막판 할인처럼 같은 상품을
+          다른 가격에 판 경우 단가·수량이 틀리게 나온다 (매출 합계는 맞아서 알아채기 어렵다).
+       ⚠ 두 곳에서 따로 세면 회계가 조용히 어긋난다 (money-rules §1). */
+    const pmap = {};
+    closingOrders.forEach(o => {
+      const paid = o.done ? o.donePaid !== false : cust(o.nick).paid;
+      const k = `${o.name}\u241f${o.price}`;
+      pmap[k] = pmap[k] || {
+        key: k,
+        name: o.name,
+        price: o.price,
+        qty: 0,
+        amt: 0,
+        paidQty: 0,
+        unpaidQty: 0,
+        buyers: new Set()
+      };
+      pmap[k].qty += o.qty;
+      pmap[k].amt += o.price * o.qty;
+      pmap[k][paid ? "paidQty" : "unpaidQty"] += o.qty;
+      pmap[k].buyers.add(o.nick);
+    });
+    const prodList = Object.values(pmap).sort((a, b) => b.amt - a.amt || a.name.localeCompare(b.name, "ko") || b.price - a.price);
     const lotteCost = lotteCount * (Number(shipCost.lotte) || 0);
     const cjCost = cjCount * (Number(shipCost.cj) || 0);
     const shipCostSum = lotteCost + cjCost;
@@ -3138,7 +3164,8 @@ function App() {
       shipCostSum,
       shipProfit,
       trkKnown,
-      shipCostUnknown
+      shipCostUnknown,
+      prodList
     };
   }, [activeOrders, doneOrders, orders, customers, settleNickList, shipFee, shipCost, shipData]);
 
@@ -3216,6 +3243,7 @@ function App() {
       shipProfit,
       shipCostUnknown
     } = closing;
+    // ⚠ 상품별 집계는 closing.prodList 를 그대로 쓴다 — 여기서 다시 세지 않는다 (money-rules §1)
     if (closingOrders.length === 0) {
       showToast("결산할 주문이 없습니다.");
       return;
@@ -3250,25 +3278,7 @@ function App() {
     // ⚠ 집계 키는 「상품명 + 가격」. 상품명만으로 묶으면 막판 할인처럼 같은 상품을
     //   다른 가격에 판 경우 단가·수량이 틀리게 나온다 (매출 합계는 맞아서 알아채기 어렵다).
     //   환불된 주문은 closingOrders 에서 이미 빠져 있다 — 실제로 판 것만 집계한다.
-    const pm = {};
-    closingOrders.forEach(o => {
-      const paid = o.done ? o.donePaid !== false : cust(o.nick).paid;
-      const k = `${o.name}\u241f${o.price}`;
-      pm[k] = pm[k] || {
-        name: o.name,
-        price: o.price,
-        qty: 0,
-        amt: 0,
-        paidQty: 0,
-        unpaidQty: 0,
-        buyers: new Set()
-      };
-      pm[k].qty += o.qty;
-      pm[k].amt += o.price * o.qty;
-      pm[k][paid ? "paidQty" : "unpaidQty"] += o.qty;
-      pm[k].buyers.add(o.nick);
-    });
-    const plist = Object.values(pm).sort((a, b) => b.amt - a.amt || a.name.localeCompare(b.name, "ko") || b.price - a.price);
+    const plist = closing.prodList;
     const s2 = [["순위", "상품명", "단가", "판매수량", "매출액", "매출비중", "구매자수", "입금수량", "미입금수량"]];
     plist.forEach((v, i) => {
       s2.push([i + 1, v.name, v.price, v.qty, v.amt, goods ? Math.round(v.amt / goods * 10000) / 10000 : 0, v.buyers.size, v.paidQty, v.unpaidQty]);
@@ -5081,6 +5091,43 @@ function App() {
     return () => clearTimeout(t);
   }, [costBook]);
 
+  /* ===== 마진 판정 (0-7 2단계) ⭐
+     ⚠ 마진 계산은 여기 한 곳에서만 한다. 회계 화면·요약본이 각자 계산하면 조용히 어긋난다.
+        공급가 8,000  → 마진 = (판매가 - 8,000) × 수량      사입
+        수수료 40%    → 마진 =  판매가 × 40%     × 수량      위탁
+     ⚠ 둘을 함께 빼지 않는다. 원가 사전에도 둘 중 하나만 남긴다.
+     ⚠ 원가를 안 넣으면 마진이 매출 전액(100%)으로 잡혀 순이익이 부풀려진다.
+        계산을 막지 않고 화면에 경고만 띄운다 (설계안 5-5 · 사장님이 판단한다). */
+  const costOf = (name, price) => costBook[costKey(name, price)] || null;
+  const hasCost = (name, price) => {
+    const c = costOf(name, price);
+    return !!(c && (Number(c.cost) > 0 || Number(c.feeRate) > 0));
+  };
+  const marginOf = (name, price, qty) => {
+    const c = costOf(name, price);
+    const q = Number(qty) || 0;
+    if (c && Number(c.feeRate) > 0) return Math.round(Number(price) * Number(c.feeRate) / 100) * q;
+    if (c && Number(c.cost) > 0) return (Number(price) - Number(c.cost)) * q;
+    return Number(price) * q; // 원가 미입력 — 100% 로 잡힌다 (경고 대상)
+  };
+  // 공급가와 수수료는 둘 중 하나만 남긴다 — 함께 두면 어느 쪽으로 계산했는지 알 수 없다
+  const setCostFor = (name, price, patch) => setCostBook(prev => {
+    const k = costKey(name, price);
+    const next = {
+      ...prev
+    };
+    const v = {
+      ...(next[k] || {}),
+      ...patch
+    };
+    if (Number(patch.cost) > 0) delete v.feeRate;
+    if (Number(patch.feeRate) > 0) delete v.cost;
+    if (!(Number(v.cost) > 0)) delete v.cost;
+    if (!(Number(v.feeRate) > 0)) delete v.feeRate;
+    if (!Object.keys(v).length) delete next[k];else next[k] = v;
+    return next;
+  });
+
   // 현재 상품 목록에 해당하는 원가 정보만 추려낸다 (보관함에 함께 저장 · 옵션 조합도 각각)
   const costSliceFor = list => {
     const out = {};
@@ -6040,7 +6087,124 @@ function App() {
     style: {
       marginTop: 10
     }
-  }, "❗ 표시는 데이터가 어긋난 것입니다 — 그냥 두면 나중에 원인을 찾기 어렵습니다."))), printMode && (() => {
+  }, "❗ 표시는 데이터가 어긋난 것입니다 — 그냥 두면 나중에 원인을 찾기 어렵습니다."))), acctOpen && (() => {
+    const rows = closing.prodList;
+    const missing = rows.filter(r => !hasCost(r.name, r.price));
+    const shown = acctOnlyMissing ? missing : rows;
+    const marginSum = rows.reduce((t, r) => t + marginOf(r.name, r.price, r.qty), 0);
+    const refundSum = closing.refundAmt + closing.refundAllList.length * shipFee;
+    const net = marginSum + closing.shipProfit - refundSum;
+    const keepNicks = settleNickList.filter(n => cust(n).keep);
+    const keepPaidSum = keepNicks.reduce((t, n) => t + (Number(cust(n).keepPaid) || 0), 0);
+    const arow = (label, val, note, cls) => /*#__PURE__*/React.createElement("div", {
+      className: "arow" + (cls ? " " + cls : ""),
+      key: label
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "alabel"
+    }, label), /*#__PURE__*/React.createElement("span", {
+      className: "aval"
+    }, won(val)), note && /*#__PURE__*/React.createElement("span", {
+      className: "anote"
+    }, note));
+    return /*#__PURE__*/React.createElement("div", {
+      className: "acctroot"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "accthead"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "accttitle"
+    }, "📊 회계 ", /*#__PURE__*/React.createElement("span", {
+      className: "acctdate"
+    }, bdate)), /*#__PURE__*/React.createElement("button", {
+      className: "btn",
+      onClick: () => setAcctOpen(false)
+    }, "닫기")), /*#__PURE__*/React.createElement("div", {
+      className: "acctcard"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "acctcaption"
+    }, "총 손익"), arow("상품 마진", marginSum, missing.length ? `⚠ 원가 미입력 ${missing.length}종 포함` : ""), arow("배송 손익", closing.shipProfit, closing.shipCostUnknown ? "⚠ 운송장 미업로드 — 운임을 모릅니다" : `배송비 ${won(closing.feeSum)} − 운임 ${won(closing.shipCostSum)}`), arow("환불", -refundSum, refundSum ? `전체환불 ${closing.refundAllList.length}명 · 부분환불 ${closing.refundNickCount}명` : ""), arow("순이익", net, "", "anet"), /*#__PURE__*/React.createElement("div", {
+      className: "hint",
+      style: {
+        marginTop: 8
+      }
+    }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "결산 엑셀과 같은 기준"), "입니다 — 킵은 빠지고 ", /*#__PURE__*/React.createElement("b", null, "미입금도 포함"), "됩니다. 실제로 들어온 돈은 입금 ", won(closing.paidTotal), " · 미수금 ", won(closing.total - closing.paidTotal), " 입니다.")), /*#__PURE__*/React.createElement("div", {
+      className: "acctcard"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "acctcaption"
+    }, "상품 마진"), missing.length > 0 && /*#__PURE__*/React.createElement("div", {
+      className: "acctwarn"
+    }, "⚠ 원가 미입력 ", missing.length, "종 — 마진이 실제보다 ", /*#__PURE__*/React.createElement("b", null, "높게"), " 표시됩니다", /*#__PURE__*/React.createElement("button", {
+      className: "btn sm",
+      onClick: () => setAcctOnlyMissing(v => !v)
+    }, acctOnlyMissing ? "전체 보기" : "미입력만 보기")), shown.length === 0 && /*#__PURE__*/React.createElement("div", {
+      className: "empty small"
+    }, "집계할 주문이 없습니다"), shown.map(r => {
+      const c = costOf(r.name, r.price) || {};
+      const m = marginOf(r.name, r.price, r.qty);
+      const rate = r.amt ? Math.round(m / r.amt * 1000) / 10 : 0;
+      return /*#__PURE__*/React.createElement("div", {
+        className: "prow" + (hasCost(r.name, r.price) ? "" : " nocost"),
+        key: r.key
+      }, /*#__PURE__*/React.createElement("div", {
+        className: "pname"
+      }, r.name, /*#__PURE__*/React.createElement("span", {
+        className: "pprice"
+      }, won(r.price), "원")), /*#__PURE__*/React.createElement("div", {
+        className: "pnums"
+      }, /*#__PURE__*/React.createElement("span", {
+        className: "pqty"
+      }, r.qty, "개"), /*#__PURE__*/React.createElement("span", {
+        className: "pamt"
+      }, won(r.amt))), /*#__PURE__*/React.createElement("div", {
+        className: "pcostwrap"
+      }, /*#__PURE__*/React.createElement("label", null, "공급가", /*#__PURE__*/React.createElement("input", {
+        className: "in sm pcost",
+        type: "number",
+        min: "0",
+        placeholder: "-",
+        value: c.cost || "",
+        onKeyDown: endEdit,
+        onChange: e => setCostFor(r.name, r.price, {
+          cost: Number(e.target.value) || 0
+        })
+      })), /*#__PURE__*/React.createElement("label", null, "수수료", /*#__PURE__*/React.createElement("input", {
+        className: "in sm pfee",
+        type: "number",
+        min: "0",
+        max: "100",
+        placeholder: "-",
+        value: c.feeRate || "",
+        onKeyDown: endEdit,
+        onChange: e => setCostFor(r.name, r.price, {
+          feeRate: Number(e.target.value) || 0
+        })
+      }), "%")), /*#__PURE__*/React.createElement("div", {
+        className: "pres"
+      }, /*#__PURE__*/React.createElement("span", {
+        className: "pmargin"
+      }, won(m)), /*#__PURE__*/React.createElement("span", {
+        className: "prate"
+      }, rate, "%")));
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "hint",
+      style: {
+        marginTop: 8
+      }
+    }, "공급가(사입)와 수수료(위탁)는 ", /*#__PURE__*/React.createElement("b", null, "둘 중 하나만"), " 씁니다. 하나를 넣으면 다른 쪽은 비워집니다.", /*#__PURE__*/React.createElement("br", null), "입력한 값은 ", /*#__PURE__*/React.createElement("b", null, "원가 사전"), "에 남아 다음 방송에 같은 상품·가격이 나오면 자동으로 채워집니다.")), /*#__PURE__*/React.createElement("div", {
+      className: "acctcard"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "acctcaption"
+    }, "배송 손익"), arow("배송비 수입", closing.feeSum, `${closing.feeList.length}명 × ${won(shipFee)}원 (픽업 ${closing.pickList.length}명 · 무료배송 ${closing.freeList.length}명 제외)`), arow("롯데 운임", -closing.lotteCost, closing.lotteCount ? `${closing.lotteCount}건 × ${won(shipCost.lotte)}원` : closing.shipCostUnknown ? "운송장 미업로드 — 계산 불가" : "0건"), arow("CJ 운임", -closing.cjCost, closing.cjCount ? `${closing.cjCount}건 × ${won(shipCost.cj)}원` : closing.shipCostUnknown ? "운송장 미업로드 — 계산 불가" : "0건"), arow("배송 손익", closing.shipProfit, "", "anet")), /*#__PURE__*/React.createElement("div", {
+      className: "acctcard"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "acctcaption"
+    }, "환불"), arow("전체환불", -(closing.refundAllList.length * shipFee + closing.refundOrders.filter(o => cust(o.nick).refundAll).reduce((t, o) => t + o.price * o.qty, 0)), `${closing.refundAllList.length}명 (배송비 포함)`), arow("부분환불", -(closing.refundAmt - closing.refundOrders.filter(o => cust(o.nick).refundAll).reduce((t, o) => t + o.price * o.qty, 0)), `${closing.refundNickCount - closing.refundAllList.length}명`), arow("환불 합계", -refundSum, "", "anet")), keepNicks.length > 0 && /*#__PURE__*/React.createElement("div", {
+      className: "acctcard acctkeep"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "acctcaption"
+    }, "🔖 킵 (아직 안 보낸 것)"), /*#__PURE__*/React.createElement("div", {
+      className: "hint"
+    }, "킵 ", /*#__PURE__*/React.createElement("b", null, keepNicks.length, "명"), " · 받은 돈 ", /*#__PURE__*/React.createElement("b", null, won(keepPaidSum), "원"), " — 아직 안 보낸 물건이라 ", /*#__PURE__*/React.createElement("b", null, "위 매출·마진에는 들어 있지 않습니다."), "다음 발송 때 그 날짜 매출로 잡힙니다.")));
+  })(), printMode && (() => {
     const grouped = {};
     shipLines.forEach(o => {
       (grouped[o.nick] = grouped[o.nick] || []).push(o);
@@ -6130,6 +6294,10 @@ function App() {
   }, "↩ 되돌리기", daySnaps.length > 0 && /*#__PURE__*/React.createElement("span", {
     className: "undocount"
   }, daySnaps.length)), /*#__PURE__*/React.createElement("button", {
+    className: "btn acctbtn",
+    onClick: () => setAcctOpen(true),
+    title: "오늘 매출에서 원가·운임을 뺀 실제 손익"
+  }, "📊 회계"), /*#__PURE__*/React.createElement("button", {
     className: "btn closebtn" + (closeLeft === 0 ? " done" : ""),
     onClick: () => setCloseOpen(true),
     disabled: activeOrders.length === 0
@@ -8533,6 +8701,38 @@ const CSS = `
       .btn.ghost 자체를 고치면 환불 버튼 등 다른 곳의 위계가 바뀐다.
    ⚠ 배경은 채우지 않는다 — 채우면 「아직 안 받았습니다」(흰 배경)와 같은 무게로 보인다. */
 .refundpanel.keeppaidpanel .btn.ghost { border-color: #bfa06a; color: #6b5310; }
+
+/* ===== 📊 회계 화면 (0-7 2단계) ===== */
+.acctroot { position: fixed; inset: 0; z-index: 60; overflow-y: auto; background: #f5f6f8; padding: 14px 14px 40px; }
+.accthead { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.accttitle { font-size: 20px; font-weight: 800; color: #16191f; }
+.acctdate { font-size: 14px; font-weight: 600; color: #8a919c; margin-left: 8px; }
+.acctcard { background: #fff; border: 1px solid #e3e6ea; border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; max-width: 1120px; }
+.acctcaption { font-size: 13px; font-weight: 700; color: #6b7280; margin-bottom: 8px; }
+.arow { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; border-bottom: 1px dashed #eef0f3; flex-wrap: wrap; }
+.arow:last-child { border-bottom: 0; }
+.alabel { min-width: 90px; font-size: 14px; color: #1a1d21; }
+.aval { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; margin-left: auto; }
+.anote { flex: 1 1 100%; font-size: 12px; color: #8a919c; }
+.arow.anet { border-top: 2px solid #16191f; border-bottom: 0; margin-top: 4px; padding-top: 8px; }
+.arow.anet .alabel, .arow.anet .aval { font-weight: 800; font-size: 18px; }
+.acctwarn { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: #fdf6e3; border: 1px solid #b7791f; border-radius: 10px; padding: 8px 12px; font-size: 13px; margin-bottom: 10px; }
+.prow { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid #f0f2f5; }
+.prow.nocost { background: #fffbf0; }
+.pname { font-size: 14px; font-weight: 600; }
+.pprice { font-size: 12px; color: #8a919c; margin-left: 6px; font-weight: 400; }
+.pnums { display: flex; gap: 10px; font-size: 13px; color: #4b5563; font-variant-numeric: tabular-nums; }
+.pcostwrap { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #6b7280; }
+.pcostwrap label { display: flex; gap: 4px; align-items: center; }
+.in.sm { width: 74px; padding: 5px 7px; font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
+.pres { display: flex; gap: 8px; align-items: baseline; min-width: 130px; justify-content: flex-end; }
+.pmargin { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.prate { font-size: 12px; color: #8a919c; min-width: 44px; text-align: right; }
+.acctkeep { border-color: #b7791f; background: #fdf6e3; }
+@media (max-width: 720px) {
+  .prow { grid-template-columns: 1fr; gap: 6px; }
+  .pres { justify-content: flex-start; }
+}
 .rptitle { font-weight: 800; margin-bottom: 8px; }
 .rpitem { display: flex; align-items: center; gap: 10px; padding: 7px 9px; border-radius: 9px; cursor: pointer; }
 .rpitem:hover { background: #fbe9e7; }
