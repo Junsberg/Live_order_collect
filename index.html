@@ -931,6 +931,122 @@ function App() {
     }
   };
 
+  /* ---------- 킵 서버 연동 (5-29 · 2026-07-29 4차) ----------
+     ⚠ 킵은 「받았는데 아직 안 보낸 돈」이다 (cust.keepPaid). 절대 잃으면 안 된다.
+        그래서 서버가 안 되면 조용히 로컬만 쓰고, 실패를 이유로 화면을 비우지 않는다.
+     ⚠ 기준 시각(at)은 「서버가 주고 앱이 그대로 돌려주는」 값이다.
+        PC 시계를 쓰면 시계가 조금 빠를 때 「서버가 더 최신인데도 덮어버리는」 쪽으로 틀린다. */
+  const keepAtRef = useRef({}); // nick → 서버가 알려준 그 행의 시각
+  const keepKnownAtRef = useRef(null); // 마지막으로 서버를 읽은 시각
+  const keepSrvOk = useRef(false); // 서버에서 한 번이라도 읽는 데 성공했나
+  const keepFirstAdopt = useRef(true); // 첫 채택인가 (로컬 전용 킵을 합쳐야 하는 시점)
+  const presentRef = useRef([]); // 오늘 화면에 있는 사람 (effect 의 낡은 값 방지)
+
+  const keepsRpc = async (name, params) => {
+    const c = sb();
+    if (!c) return {
+      ok: false
+    };
+    try {
+      const {
+        data,
+        error
+      } = await c.rpc(name, params || {});
+      if (error) return {
+        ok: false,
+        err: error.message
+      };
+      const d = Array.isArray(data) ? data[0] : data;
+      if (!d) return {
+        ok: false,
+        err: "no result"
+      };
+      return {
+        ok: true,
+        at: d.at,
+        list: d.list || [],
+        skipped: d.skipped || []
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        err: e && e.message || name + " failed"
+      };
+    }
+  };
+
+  // 로컬 { orders, customers } → 서버 { nick: { orders, cust, at } }
+  const keepsToServer = k => {
+    const byNick = {};
+    (k.orders || []).forEach(o => {
+      (byNick[o.nick] = byNick[o.nick] || []).push(o);
+    });
+    Object.keys(k.customers || {}).forEach(nk => {
+      byNick[nk] = byNick[nk] || [];
+    });
+    const out = {};
+    Object.entries(byNick).forEach(([nk, orders]) => {
+      // ⚠ at 이 없으면 서버는 「본 적 없는 사람」으로 보고 이미 있으면 손대지 않는다 (규칙⑤ = 1회 이관)
+      out[nk] = {
+        orders,
+        cust: (k.customers || {})[nk] || {},
+        at: keepAtRef.current[nk] || null
+      };
+    });
+    return out;
+  };
+  const keepsFromServer = list => {
+    const orders = [];
+    const customers = {};
+    (list || []).forEach(r => {
+      (r.orders || []).forEach(o => orders.push(o));
+      customers[r.nick] = r.cust || {};
+    });
+    return {
+      orders,
+      customers
+    };
+  };
+  /* ⚠ 서버와 로컬은 「같은 내용인데 순서만 다를」 수 있다. 그대로 비교하면 매번 달라 보여
+        setKeeps → 저장 → 서버 → setKeeps 가 끝없이 돈다. 순서를 맞춰 비교한다. */
+  const keepSig = k => JSON.stringify({
+    o: [...(k.orders || [])].sort((a, b) => String(a.id).localeCompare(String(b.id))),
+    c: Object.keys(k.customers || {}).sort().reduce((m, nk) => {
+      m[nk] = k.customers[nk];
+      return m;
+    }, {})
+  });
+  const adoptServerKeeps = r => {
+    keepKnownAtRef.current = r.at || keepKnownAtRef.current;
+    const atMap = {};
+    (r.list || []).forEach(x => {
+      atMap[x.nick] = x.at;
+    });
+    keepAtRef.current = atMap;
+    let next = keepsFromServer(r.list);
+    if (keepFirstAdopt.current) {
+      /* ⭐ 첫 채택에서만 「로컬에만 있는 사람」을 합친다 (1회 이관).
+            안 합치면 사장님 PC 에만 있던 킵이 화면에서 사라진 것처럼 보인다.
+            합쳐두면 다음 저장에서 규칙⑤(at 없음 = 없을 때만 넣음)로 서버에 올라간다. */
+      const have = new Set((r.list || []).map(x => x.nick));
+      const mine = keepsRef.current || {
+        orders: [],
+        customers: {}
+      };
+      (mine.orders || []).forEach(o => {
+        if (!have.has(o.nick)) next.orders.push(o);
+      });
+      Object.entries(mine.customers || {}).forEach(([nk, c]) => {
+        if (!have.has(nk)) next.customers[nk] = c;
+      });
+      keepFirstAdopt.current = false;
+    }
+    setKeeps(prev => keepSig(prev) === keepSig(next) ? prev : next);
+    if (r.skipped && r.skipped.length) {
+      showToast(`⚠ ${r.skipped.join(", ")} 의 킵은 다른 기기가 더 최신이라 서버 것을 씁니다`);
+    }
+  };
+
   /* 모든 읽기는 이 함수를 지난다.
      ⚠ 서버 연동(4단계) 때 이 함수 하나만 서버 호출로 바꾸면 전체가 따라온다.
         읽기가 여기저기 흩어져 있으면 한 곳이라도 빠뜨렸을 때 그 데이터만 조용히 로컬을 본다.
@@ -4519,6 +4635,14 @@ function App() {
     customers: {}
   });
   const keepsLoaded = useRef(false);
+  const keepsRef = useRef({
+    orders: [],
+    customers: {}
+  });
+  keepsRef.current = keeps;
+  presentRef.current = settleNickList;
+  const [keepSrvTick, setKeepSrvTick] = useState(0); // 서버 읽기 실패 시 다시 시도하는 신호
+
   useEffect(() => {
     (async () => {
       const k = await loadJson("saja:keeps", null);
@@ -4527,8 +4651,27 @@ function App() {
         customers: k.customers || {}
       });
       keepsLoaded.current = true;
+      setKeepSrvTick(n => n + 1);
     })();
   }, []);
+
+  /* 서버에서 킵을 읽어 화면 기준으로 삼는다.
+     ⚠ 로컬을 먼저 읽고 그 다음에 서버를 읽는다 — 서버가 느리거나 안 될 때도 킵이 보여야 한다.
+     ⚠ 실패하면 조용히 로컬만 쓴다. 킵을 못 읽었다고 화면을 비우면 그 위에 쌓인 입력이
+        나중에 서버를 덮어쓴다 (설계안 1-3 「읽기 실패 ≠ 데이터 없음」과 같은 뿌리). */
+  useEffect(() => {
+    if (!keepsLoaded.current || keepSrvOk.current || !serverOn()) return;
+    let dead = false;
+    (async () => {
+      const r = await keepsRpc("load_keeps");
+      if (dead || !r.ok) return;
+      keepSrvOk.current = true;
+      adoptServerKeeps(r);
+    })();
+    return () => {
+      dead = true;
+    };
+  }, [auth, keepSrvTick, srvRetryTick]);
 
   // 화면의 킵 상태를 목록에 반영한다.
   // ⚠ 오늘 방송에 없는 사람의 킵은 건드리지 않는다 (지난 방송에서 넘어온 것이 지워지면 안 됨).
@@ -4573,11 +4716,92 @@ function App() {
   }, [keepOrders, keepNicks, customers, settleNickList, loaded]);
   useEffect(() => {
     if (!keepsLoaded.current) return;
-    const t = setTimeout(() => {
+    const t = setTimeout(async () => {
+      // ⚠ 로컬 저장이 먼저다. 서버가 안 돼도 킵은 남아야 한다.
       saveKey("saja:keeps", JSON.stringify(keeps), "킵 주문건");
+      if (!serverOn() || !keepSrvOk.current || keepKnownAtRef.current == null) return;
+      const r = await keepsRpc("sync_keeps", {
+        p_present: presentRef.current || [],
+        p_keeps: keepsToServer(keeps),
+        p_known_at: keepKnownAtRef.current
+      });
+      if (!r.ok) return; // 조용히 넘어간다 — 다음 변경 때 다시 올라간다
+      adoptServerKeeps(r);
     }, 400);
     return () => clearTimeout(t);
   }, [keeps]);
+
+  /* ---------- 킵 목록 보기·지우기 (5-30 · 2026-07-29 4차) ----------
+     ⚠ 장기 미입금 킵이 계속 쌓이는데 보거나 지울 방법이 없었다.
+        서버로 올린 뒤에는 그 찌꺼기가 매니저 화면에도 보인다.
+     ⚠ 기간이 지나면 자동으로 지우는 기능은 「넣지 않는다」 (사장님 결정).
+        킵에는 이미 받은 돈(keepPaid)이 들어 있을 수 있고,
+        자동 삭제의 진짜 문제는 「아무도 지운 걸 모른다」는 것이다.
+     ⚠ 대신 받은 돈이 있는 사람은 고르는 순간 경고를 띄운다. 막지는 않는다. */
+  const [keepListOpen, setKeepListOpen] = useState(false);
+  const [keepPicked, setKeepPicked] = useState([]);
+  const [keepDelArm, setKeepDelArm] = useState(false);
+  const keepAll = useMemo(() => {
+    const m = {};
+    (keeps.orders || []).forEach(o => {
+      const e = m[o.nick] = m[o.nick] || {
+        nick: o.nick,
+        cnt: 0,
+        amt: 0
+      };
+      e.cnt += 1;
+      e.amt += (o.price || 0) * (o.qty || 0);
+    });
+    Object.keys(keeps.customers || {}).forEach(nk => {
+      m[nk] = m[nk] || {
+        nick: nk,
+        cnt: 0,
+        amt: 0
+      };
+    });
+    return Object.values(m).map(e => ({
+      ...e,
+      paid: Number(((keeps.customers || {})[e.nick] || {}).keepPaid) || 0
+    })).sort((a, b) => a.nick.localeCompare(b.nick));
+  }, [keeps]);
+
+  // 며칠 전에 만들어진 킵인가 (서버가 알려준 시각 기준 · 서버를 못 읽었으면 안 보여준다)
+  const keepAgeDays = nick => {
+    const at = keepAtRef.current[nick];
+    if (!at) return null;
+    const d = Math.floor((Date.now() - new Date(at).getTime()) / 864e5);
+    return d >= 0 ? d : null;
+  };
+  const keepPickedPaid = keepAll.filter(e => keepPicked.includes(e.nick) && e.paid > 0);
+  const doRemoveKeeps = async () => {
+    const nicks = [...keepPicked];
+    if (!nicks.length) return;
+    const set = new Set(nicks);
+    takeSnap(`킵 목록에서 ${nicks.length}명 지우기 직전 (${nicks.slice(0, 3).join(", ")})`);
+
+    /* ⚠ 오늘 화면에 킵으로 걸린 사람이면 화면 체크도 같이 푼다.
+          안 풀면 800ms 뒤 동기화가 그 사람을 다시 만들어 「지워도 되살아난다」. */
+    nicks.forEach(nk => {
+      if (customers[nk] && customers[nk].keep) setCust(nk, {
+        keep: false
+      });
+    });
+    setKeeps(prev => ({
+      orders: (prev.orders || []).filter(o => !set.has(o.nick)),
+      customers: Object.fromEntries(Object.entries(prev.customers || {}).filter(([nk]) => !set.has(nk)))
+    }));
+    setKeepPicked([]);
+    setKeepDelArm(false);
+    if (serverOn() && keepSrvOk.current) {
+      const r = await keepsRpc("remove_keeps", {
+        p_nicks: nicks
+      });
+      // ⚠ 서버가 실패하면 그대로 둔다. 다음에 서버를 읽으면 되살아나지만,
+      //    「지운 줄 알았는데 조용히 안 지워진 것」보다는 낫다.
+      if (r.ok) adoptServerKeeps(r);else showToast("⚠ 서버에서 지우지 못했습니다 — 인터넷 확인 후 다시 해주세요");
+    }
+    showToast(`✓ 킵 ${nicks.length}명을 목록에서 지웠습니다`);
+  };
 
   /* 오늘 화면에 아직 안 올라온 킵 (= 불러올 수 있는 것)
      ⚠ 위 동기화 effect 와 같은 이유로 settleNickList 를 쓴다. nickList 를 쓰면
@@ -5503,7 +5727,81 @@ function App() {
       }
       emptyMoveHere();
     }
-  }, moveArm ? `한 번 더 탭 — ${bdate} 로 복사` : `${bdate} 로 복사합니다`))))), moveLeft && /*#__PURE__*/React.createElement("div", {
+  }, moveArm ? `한 번 더 탭 — ${bdate} 로 복사` : `${bdate} 로 복사합니다`))))), keepListOpen && /*#__PURE__*/React.createElement("div", {
+    className: "closewrap"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closecard keeplist"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closetitle"
+  }, "🔖 킵 목록 ", keepAll.length, "명"), /*#__PURE__*/React.createElement("div", {
+    className: "sub",
+    style: {
+      marginTop: 6
+    }
+  }, "보내지 않고 보류해 둔 주문입니다 · 합계 ", won(keepAll.reduce((t, e) => t + e.amt, 0)), "원", keepAll.some(e => e.paid > 0) && /*#__PURE__*/React.createElement("b", {
+    className: "keepwarn"
+  }, " · 💰 받은 돈이 있는 사람 ", keepAll.filter(e => e.paid > 0).length, "명")), /*#__PURE__*/React.createElement("div", {
+    className: "kllist"
+  }, keepAll.map(e => {
+    const days = keepAgeDays(e.nick);
+    const on = keepPicked.includes(e.nick);
+    return /*#__PURE__*/React.createElement("label", {
+      key: e.nick,
+      className: "klrow" + (on ? " on" : "") + (e.paid > 0 ? " paid" : "")
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked: on,
+      onChange: () => {
+        setKeepDelArm(false);
+        setKeepPicked(v => v.includes(e.nick) ? v.filter(x => x !== e.nick) : [...v, e.nick]);
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      className: "klnick"
+    }, e.nick), /*#__PURE__*/React.createElement("span", {
+      className: "klcnt"
+    }, e.cnt, "건"), /*#__PURE__*/React.createElement("span", {
+      className: "klamt"
+    }, won(e.amt), "원"), e.paid > 0 ? /*#__PURE__*/React.createElement("span", {
+      className: "klpaid"
+    }, "💰 ", won(e.paid), "원 받음") : /*#__PURE__*/React.createElement("span", {
+      className: "klunpaid"
+    }, "미입금"), /*#__PURE__*/React.createElement("span", {
+      className: "klage"
+    }, days == null ? "" : `${days}일 전`));
+  })), keepPickedPaid.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "movewarn",
+    style: {
+      marginTop: 10
+    }
+  }, "⚠ 고른 사람 중 ", /*#__PURE__*/React.createElement("b", null, keepPickedPaid.length, "명은 이미 돈을 받았습니다"), " (", keepPickedPaid.map(e => `${e.nick} ${won(e.paid)}원`).join(", "), ")", /*#__PURE__*/React.createElement("br", null), "지우면 ", /*#__PURE__*/React.createElement("b", null, "받은 돈 기록도 함께 사라집니다."), " 정말 정리할 대상인지 확인해주세요."), /*#__PURE__*/React.createElement("div", {
+    className: "rpfoot",
+    style: {
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn",
+    onClick: () => {
+      setKeepListOpen(false);
+      setKeepPicked([]);
+      setKeepDelArm(false);
+    }
+  }, "닫기"), /*#__PURE__*/React.createElement("button", {
+    className: "btn danger" + (keepDelArm ? " armed" : ""),
+    disabled: !keepPicked.length,
+    onClick: () => {
+      if (!keepDelArm) {
+        setKeepDelArm(true);
+        setTimeout(() => setKeepDelArm(false), 4000);
+        return;
+      }
+      doRemoveKeeps();
+    }
+  }, keepDelArm ? `한 번 더 탭 — ${keepPicked.length}명 지우기` : `고른 ${keepPicked.length}명 지우기`)), /*#__PURE__*/React.createElement("div", {
+    className: "hint",
+    style: {
+      marginTop: 8
+    }
+  }, "지운 뒤에도 ", /*#__PURE__*/React.createElement("b", null, "↩ 되돌리기"), "로 복구할 수 있습니다. 주문 자체는 지워지지 않고 ", /*#__PURE__*/React.createElement("b", null, "킵만 풀립니다.")))), moveLeft && /*#__PURE__*/React.createElement("div", {
     className: "srvbar movebar"
   }, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("b", null, "⚠ ", moveLeft.from, " 에 같은 주문 ", moveLeft.count, "건(₩", won(moveLeft.amount), ")이 남아 있습니다."), " ", moveLeft.to, " 로 복사했습니다 — 그대로 두면 ", /*#__PURE__*/React.createElement("b", null, "두 날짜에 같은 매출"), "이 잡힙니다."), /*#__PURE__*/React.createElement("button", {
     className: "btn sm",
@@ -6508,9 +6806,9 @@ function App() {
   }, " · ⚠ 지금 보는 날짜는 ", bdate, " 입니다"), " · ", keepPendingNicks.slice(0, 4).join(", "), keepPendingNicks.length > 4 ? " 외" : "")), /*#__PURE__*/React.createElement("button", {
     className: "btn keepload" + (keepLoadArm ? " danger" : ""),
     onClick: loadKeeps
-  }, keepLoadArm ? `${bdate} 에 넣습니다 — 한 번 더` : "불러오기")), nickList.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, keepLoadArm ? `${bdate} 에 넣습니다 — 한 번 더` : "불러오기")), (nickList.length > 0 || keepAll.length > 0) && /*#__PURE__*/React.createElement("div", {
     className: "card summarycard"
-  }, /*#__PURE__*/React.createElement("span", {
+  }, nickList.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
     className: "sm-item"
   }, "총 ", /*#__PURE__*/React.createElement("b", null, nickList.length), "명"), /*#__PURE__*/React.createElement("span", {
     className: "sm-sep"
@@ -6520,7 +6818,7 @@ function App() {
     className: "sm-sep"
   }, "·"), /*#__PURE__*/React.createElement("span", {
     className: "sm-item unpaid"
-  }, "미입금 ", /*#__PURE__*/React.createElement("b", null, nickList.length - paidCount), "명"), shippedNickCount > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+  }, "미입금 ", /*#__PURE__*/React.createElement("b", null, nickList.length - paidCount), "명")), shippedNickCount > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
     className: "sm-sep"
   }, "·"), /*#__PURE__*/React.createElement("span", {
     className: "sm-item shipdone"
@@ -6528,7 +6826,15 @@ function App() {
     className: "sm-sep"
   }, "·"), /*#__PURE__*/React.createElement("span", {
     className: "sm-item keep"
-  }, "🔖 킵 ", /*#__PURE__*/React.createElement("b", null, keepNicks.length), "명")), /*#__PURE__*/React.createElement("button", {
+  }, "🔖 킵 ", /*#__PURE__*/React.createElement("b", null, keepNicks.length), "명")), keepAll.length > 0 && /*#__PURE__*/React.createElement("button", {
+    className: "btn keeplistbtn",
+    onClick: () => {
+      setKeepListOpen(true);
+      setKeepPicked([]);
+      setKeepDelArm(false);
+    },
+    title: "킵 목록을 보고 오래된 것을 지웁니다"
+  }, "🔖 킵 목록 ", keepAll.length, "명"), /*#__PURE__*/React.createElement("button", {
     className: "btn closingbtn",
     disabled: activeOrders.length === 0,
     onClick: exportClosingXlsx,
@@ -7605,6 +7911,27 @@ const CSS = `
 }
 .btn.danger.armed { background: #8f0f22; border-color: #8f0f22; }
 .movebar { background: #b3162a; }
+/* 🔖 킵 목록 (5-30 · 2026-07-29 4차) */
+.keeplist { max-width: 640px; }
+.kllist { margin-top: 12px; max-height: 46vh; overflow: auto; border: 1px solid #e6e9ee; border-radius: 12px; }
+.klrow { display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer;
+  border-bottom: 1px solid #eef1f5; font-size: 14px; }
+.klrow:last-child { border-bottom: none; }
+.klrow:hover { background: #f6f7f9; }
+.klrow.on { background: #eef4ff; }
+.klrow.paid .klnick { color: #b3162a; }
+.klnick { font-weight: 800; min-width: 96px; }
+.klcnt { color: #8a919c; font-size: 13px; }
+.klamt { font-weight: 700; margin-left: auto; }
+.klpaid { color: #b3162a; font-weight: 800; font-size: 13px; min-width: 108px; text-align: right; }
+.klunpaid { color: #8a919c; font-size: 13px; min-width: 108px; text-align: right; }
+.klage { color: #8a919c; font-size: 12px; min-width: 58px; text-align: right; }
+.keeplistbtn { background: #fff6e5; border-color: #f0d5a0; color: #8a4b00; font-weight: 800; }
+@media (max-width: 640px) {
+  .klrow { flex-wrap: wrap; gap: 6px; }
+  .klamt { margin-left: 0; }
+  .klpaid, .klunpaid, .klage { min-width: 0; text-align: left; }
+}
 .movebar .btn { color: #b3162a; }
 @media print { .movebar { display: none !important; } }
 .srvpick { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
