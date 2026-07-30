@@ -737,6 +737,19 @@ function App() {
   const [orders, setOrders] = useState([]);
   const [customers, setCustomers] = useState({});
   const [shipFee, setShipFee] = useState(4000);
+  /* 택배사 운임 원가 (0-7 1단계) — 「고객에게 받는 배송비」와 별개로 「우리가 택배사에 내는 값」이다.
+     ⚠ 그날 조건은 그날 자료에 박아둔다. 9월에 단가가 오른 뒤 7월 회계를 다시 보면
+        9월 단가로 계산되어 조용히 틀린다. 그래서 날짜 payload 에 함께 저장한다. */
+  const SHIP_COST_DEFAULT = {
+    lotte: 2800,
+    cj: 3000
+  };
+  const [shipCost, setShipCost] = useState(SHIP_COST_DEFAULT);
+  // 옛 자료(shipCost 없음)를 읽어도 기본값으로 채운다 — 빈 칸이면 운임 0이 되어 마진이 부풀려진다
+  const readShipCost = v => ({
+    lotte: Number(v && v.lotte) > 0 ? Number(v.lotte) : SHIP_COST_DEFAULT.lotte,
+    cj: Number(v && v.cj) > 0 ? Number(v.cj) : SHIP_COST_DEFAULT.cj
+  });
   const [bdate, setBdate] = useState(todayISO());
   const [pickState, setPickState] = useState({});
   /* ⚠ 「오늘」을 상태로 들고 시계를 따라간다. todayISO() 를 화면에서 바로 부르면
@@ -1460,6 +1473,7 @@ function App() {
           setOrders(d.orders || []);
           setCustomers(m.customers);
           setShipFee(typeof d.shipFee === "number" ? d.shipFee : 4000);
+          setShipCost(readShipCost(d.shipCost));
           setBdate(d.bdate || todayISO());
           setPickState(d.pickState || {});
           setSettleHeader(d.settleHeader || SETTLE_HEADER);
@@ -1509,6 +1523,7 @@ function App() {
       orders,
       customers,
       shipFee,
+      shipCost,
       bdate,
       pickState,
       settleHeader,
@@ -1593,7 +1608,7 @@ function App() {
       if (srvPendingRef.current) setSrvRetryTick(n => n + 1);
     }, 700); // 서버 요청이 붙으므로 로컬(400ms)보다 조금 여유를 둔다
     return () => clearTimeout(t);
-  }, [products, orders, customers, shipFee, bdate, pickState, settleHeader, trackHeader, shipData, loaded, auth, srvPick, srvSyncedDate, srvRetryTick]);
+  }, [products, orders, customers, shipFee, shipCost, bdate, pickState, settleHeader, trackHeader, shipData, loaded, auth, srvPick, srvSyncedDate, srvRetryTick]);
 
   /* 앱을 열거나 날짜를 바꾸면 서버를 먼저 확인한다.
      ⚠ 서버에 그 날짜가 있으면 서버 것이 기준이다. 매니저 PC 의 옛 데이터가
@@ -1611,6 +1626,7 @@ function App() {
     setOrders(d.orders || []);
     setCustomers(m.customers);
     setShipFee(typeof d.shipFee === "number" ? d.shipFee : 4000);
+    setShipCost(readShipCost(d.shipCost));
     setPickState(d.pickState || {});
     if (d.settleHeader) setSettleHeader(d.settleHeader);
     if (d.trackHeader) setTrackHeader(d.trackHeader);
@@ -1682,6 +1698,7 @@ function App() {
         orders,
         customers,
         shipFee,
+        shipCost,
         bdate,
         pickState,
         settleHeader,
@@ -1766,6 +1783,7 @@ function App() {
         orders,
         customers,
         shipFee,
+        shipCost,
         bdate,
         pickState,
         settleHeader,
@@ -1935,12 +1953,14 @@ function App() {
     const d = r.payload || {};
     const m = migrateTrk(d.shipData, d.customers);
     const nextShipFee = typeof d.shipFee === "number" ? d.shipFee : 4000;
+    const nextShipCost = readShipCost(d.shipCost);
     const nextSettle = d.settleHeader ? d.settleHeader : settleHeader;
     const nextTrack = d.trackHeader ? d.trackHeader : trackHeader;
     setProducts(d.products || []);
     setOrders(d.orders || []);
     setCustomers(m.customers);
     setShipFee(nextShipFee);
+    setShipCost(nextShipCost);
     setPickState(d.pickState || {});
     if (d.settleHeader) setSettleHeader(d.settleHeader);
     if (d.trackHeader) setTrackHeader(d.trackHeader);
@@ -1954,6 +1974,7 @@ function App() {
       orders: d.orders || [],
       customers: m.customers,
       shipFee: nextShipFee,
+      shipCost: nextShipCost,
       bdate,
       pickState: d.pickState || {},
       settleHeader: nextSettle,
@@ -1992,6 +2013,7 @@ function App() {
       orders,
       customers,
       shipFee,
+      shipCost,
       bdate,
       pickState,
       settleHeader,
@@ -3075,6 +3097,15 @@ function App() {
       const c = String(d.carrier || "");
       if (c.includes("롯데")) lotteCount++;else if (c.includes("CJ")) cjCount++;
     });
+    /* 배송 손익 (0-7 1단계) — 「받은 배송비」 − 「택배사에 낸 운임」
+       ⚠ 운송장을 안 올리면 carrier 가 비어 lotteCount·cjCount 가 0이 된다.
+          운임 0으로 계산하면 손익이 부풀려지므로 「모른다」를 따로 알려준다. */
+    const lotteCost = lotteCount * (Number(shipCost.lotte) || 0);
+    const cjCost = cjCount * (Number(shipCost.cj) || 0);
+    const shipCostSum = lotteCost + cjCost;
+    const shipProfit = feeSum - shipCostSum;
+    const trkKnown = lotteCount + cjCount; // 택배사가 파악된 건수
+    const shipCostUnknown = trkKnown === 0 && feeList.length > 0;
     return {
       closingOrders,
       doneFeeOf,
@@ -3101,9 +3132,15 @@ function App() {
       totalQty,
       canceledCnt,
       lotteCount,
-      cjCount
+      cjCount,
+      lotteCost,
+      cjCost,
+      shipCostSum,
+      shipProfit,
+      trkKnown,
+      shipCostUnknown
     };
-  }, [activeOrders, doneOrders, orders, customers, settleNickList, shipFee, shipData]);
+  }, [activeOrders, doneOrders, orders, customers, settleNickList, shipFee, shipCost, shipData]);
 
   /* ===== 서버 요약본 ⭐ 0-5
      ⚠ 숫자를 여기서 새로 세지 않는다. 전부 위 closing 에서 가져온다.
@@ -3120,9 +3157,19 @@ function App() {
     refundShipFee: closing.refundAllList.length * shipFee,
     lotteCount: closing.lotteCount,
     cjCount: closing.cjCount,
-    /* ⚠ 택배비 원가는 앱에 아직 없다 (costBook 은 「상품」 원가라 별개다).
-          없는 값을 지어내면 회계가 틀리므로 빈 값을 보낸다. 0-11 에서 채운다. */
-    shipCost: {},
+    /* 택배비 원가 (0-7 1단계) — 「그날 단가」를 요약본에도 박아둔다.
+       ⚠ 나중에 단가를 올려도 지난 달 회계가 새 단가로 계산되면 안 된다.
+       ⚠ trkKnown 0 이면 운임을 모르는 상태다. 0원과 구분되도록 함께 보낸다. */
+    shipCost: {
+      lotte: Number(shipCost.lotte) || 0,
+      cj: Number(shipCost.cj) || 0,
+      lotteCount: closing.lotteCount,
+      cjCount: closing.cjCount,
+      lotteCost: closing.lotteCost,
+      cjCost: closing.cjCost,
+      shipProfit: closing.shipProfit,
+      unknown: closing.shipCostUnknown
+    },
     paidOrders: closing.closingOrders.filter(o => closing.paidOf(o.nick)).length,
     paidCusts: closing.paidList.length,
     totalOrders: closing.closingOrders.length,
@@ -3160,7 +3207,14 @@ function App() {
       paidGoods,
       paidTotal,
       totalQty,
-      canceledCnt
+      canceledCnt,
+      lotteCount,
+      cjCount,
+      lotteCost,
+      cjCost,
+      shipCostSum,
+      shipProfit,
+      shipCostUnknown
     } = closing;
     if (closingOrders.length === 0) {
       showToast("결산할 주문이 없습니다.");
@@ -3169,7 +3223,11 @@ function App() {
     const wb = XLSX.utils.book_new();
 
     // 1) 총괄 요약
-    const s1 = [[`사자창고 라이브 결산`, bdate], [], ["[매출]", ""], ["상품 매출", goods, "환불분 제외 · 실제로 판 것만"], ["배송비 수입", feeSum, `${feeList.length}명 × ${shipFee}원 (픽업 ${pickList.length}명 · 무료배송 ${freeList.length}명 · 전체환불 ${refundAllList.length}명 제외)`], ["총 매출", total], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["미수금", total - paidTotal, `${nicks.length - paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0], ["입금률 (금액)", total ? Math.round(paidTotal / total * 100) / 100 : 0], [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", closingOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length, "주문만 취소 (돈이 오가지 않음)"], [], ["[킵 보류]", "", "이번에 발송하지 않는 주문 — 위 매출에 포함되지 않음"], ["킵 인원", keepNicks.length], ["킵 건수", keepOrders.length], ["킵 상품금액", keepOrders.reduce((t, o) => t + o.price * o.qty, 0)], ["킵 입금액", keepNicks.reduce((t, nk) => t + (Number(cust(nk).keepPaid) || 0), 0), "받았지만 아직 매출이 아님 (배송비 포함)"], [], ["[환불]", ""], ["환불 건수", refundOrders.length, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 부분환불 ${refundNickCount - refundAllList.length}명` : refundOrders.length ? `부분환불 ${refundNickCount}명` : ""], ["환불 상품금액", refundAmt], ["환불 배송비", refundAllList.length * shipFee, refundAllList.length ? `전체환불 ${refundAllList.length}명 × ${shipFee}원` : ""], ["환불 합계", refundAmt + refundAllList.length * shipFee, "실제로 돌려준 돈 · 위 매출에는 포함되어 있지 않음"], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(closingOrders.map(o => `${o.name}\u241f${o.price}`)).size, "같은 상품도 가격이 다르면 별개로 셈"], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
+    const s1 = [[`사자창고 라이브 결산`, bdate], [], ["[매출]", ""], ["상품 매출", goods, "환불분 제외 · 실제로 판 것만"], ["배송비 수입", feeSum, `${feeList.length}명 × ${shipFee}원 (픽업 ${pickList.length}명 · 무료배송 ${freeList.length}명 · 전체환불 ${refundAllList.length}명 제외)`], ["총 매출", total], [],
+    /* [배송 손익] 0-7 1단계 — 받은 배송비에서 택배사 운임을 뺀 것.
+       ⚠ 운임은 음수로 적는다. 「수입 + 운임 = 손익」이 엑셀에서 눈으로 검산된다.
+       ⚠ 운송장을 안 올리면 운임을 모른다. 0원으로 적으면 손익이 부풀려지므로 말로 알려준다. */
+    ["[배송 손익]", ""], ["롯데 운임", -lotteCost, lotteCount ? `${lotteCount}건 × ${won(shipCost.lotte)}원` : shipCostUnknown ? "운송장 미업로드 — 배송 운임 계산 불가" : "0건"], ["CJ 운임", -cjCost, cjCount ? `${cjCount}건 × ${won(shipCost.cj)}원` : shipCostUnknown ? "운송장 미업로드 — 배송 운임 계산 불가" : "0건"], ["배송 손익", shipProfit, shipCostUnknown ? "⚠ 운송장 미업로드 — 운임을 모르는 상태입니다. 실제 손익은 이보다 낮습니다" : `배송비 수입 ${won(feeSum)} − 운임 ${won(shipCostSum)}`], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["미수금", total - paidTotal, `${nicks.length - paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0], ["입금률 (금액)", total ? Math.round(paidTotal / total * 100) / 100 : 0], [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", closingOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length, "주문만 취소 (돈이 오가지 않음)"], [], ["[킵 보류]", "", "이번에 발송하지 않는 주문 — 위 매출에 포함되지 않음"], ["킵 인원", keepNicks.length], ["킵 건수", keepOrders.length], ["킵 상품금액", keepOrders.reduce((t, o) => t + o.price * o.qty, 0)], ["킵 입금액", keepNicks.reduce((t, nk) => t + (Number(cust(nk).keepPaid) || 0), 0), "받았지만 아직 매출이 아님 (배송비 포함)"], [], ["[환불]", ""], ["환불 건수", refundOrders.length, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 부분환불 ${refundNickCount - refundAllList.length}명` : refundOrders.length ? `부분환불 ${refundNickCount}명` : ""], ["환불 상품금액", refundAmt], ["환불 배송비", refundAllList.length * shipFee, refundAllList.length ? `전체환불 ${refundAllList.length}명 × ${shipFee}원` : ""], ["환불 합계", refundAmt + refundAllList.length * shipFee, "실제로 돌려준 돈 · 위 매출에는 포함되어 있지 않음"], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(closingOrders.map(o => `${o.name}\u241f${o.price}`)).size, "같은 상품도 가격이 다르면 별개로 셈"], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
     const ws1 = XLSX.utils.aoa_to_sheet(s1);
     ws1["!cols"] = [{
       wch: 20
@@ -3587,6 +3645,7 @@ function App() {
       orders,
       customers,
       shipFee,
+      shipCost,
       bdate,
       pickState,
       settleHeader,
@@ -3611,6 +3670,7 @@ function App() {
     setOrders(d.orders || []);
     setCustomers(m.customers);
     setShipFee(typeof d.shipFee === "number" ? d.shipFee : 4000);
+    setShipCost(readShipCost(d.shipCost));
     // ⚠ 파일에서 온 것이라 「앞 날짜」가 없다. 지우지 않으면 엉뚱한 날짜가 확인 카드에 찍힌다.
     fromDateRef.current = null;
     setBdate(d.bdate || todayISO());
@@ -4405,6 +4465,7 @@ function App() {
       products: JSON.parse(JSON.stringify(products)),
       pickState: JSON.parse(JSON.stringify(pickState)),
       shipFee,
+      shipCost,
       cnt: orders.filter(o => !o.canceled).length
     };
     /* ⚠ 날짜 한도만이 아니라 용량 한도도 함께 건다 (pruneSnaps).
@@ -4424,6 +4485,7 @@ function App() {
     setProducts(sp.products || []);
     setPickState(sp.pickState || {});
     if (typeof sp.shipFee === "number") setShipFee(sp.shipFee);
+    if (sp.shipCost) setShipCost(readShipCost(sp.shipCost));
     setUndoArm(null);
     setUndoOpen(false);
     showToast(`✓ ${new Date(sp.at).toLocaleTimeString("ko-KR", {
@@ -7676,6 +7738,21 @@ function App() {
     className: "setarrow"
   }, "›"))), /*#__PURE__*/React.createElement("button", {
     className: "setrow",
+    onClick: () => setSettingEdit("shipcost")
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "setinfo"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "setname"
+  }, "택배 운임 (원가)"), /*#__PURE__*/React.createElement("span", {
+    className: "setdesc"
+  }, "우리가 택배사에 내는 값 · 결산 엑셀 「배송 손익」에 쓰입니다")), /*#__PURE__*/React.createElement("span", {
+    className: "setright"
+  }, (shipCost.lotte !== SHIP_COST_DEFAULT.lotte || shipCost.cj !== SHIP_COST_DEFAULT.cj) && /*#__PURE__*/React.createElement("span", {
+    className: "setchanged"
+  }, "수정됨"), /*#__PURE__*/React.createElement("span", {
+    className: "setarrow"
+  }, "›"))), /*#__PURE__*/React.createElement("button", {
+    className: "setrow",
     onClick: () => setSettingEdit("trace")
   }, /*#__PURE__*/React.createElement("span", {
     className: "setinfo"
@@ -7782,7 +7859,66 @@ function App() {
     style: {
       marginTop: 10
     }
-  }, `${trackHeader}\n\n[운송장 정보]\nCJ대한통운 661234567890`))), settingEdit === "trace" && (() => {
+  }, `${trackHeader}\n\n[운송장 정보]\nCJ대한통운 661234567890`))), settingEdit === "shipcost" && /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "rowbetween"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
+  }, "택배 운임 (원가)"), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost",
+    onClick: () => setSettingEdit(null)
+  }, "‹ 설정으로")), /*#__PURE__*/React.createElement("div", {
+    className: "hint",
+    style: {
+      marginTop: 8
+    }
+  }, "손님에게 ", /*#__PURE__*/React.createElement("b", null, "받는"), " 합배송비(", won(shipFee), "원)와는 다릅니다. 여기는 우리가 택배사에 ", /*#__PURE__*/React.createElement("b", null, "내는"), " 값입니다."), /*#__PURE__*/React.createElement("div", {
+    className: "tracerow"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "tracelabel"
+  }, "롯데택배 1건당"), /*#__PURE__*/React.createElement("input", {
+    className: "in costlotte",
+    type: "number",
+    min: "0",
+    value: shipCost.lotte,
+    onChange: e => setShipCost(v => ({
+      ...v,
+      lotte: Number(e.target.value) || 0
+    })),
+    onKeyDown: endEdit
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "tracerow"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "tracelabel"
+  }, "CJ대한통운 1건당"), /*#__PURE__*/React.createElement("input", {
+    className: "in costcj",
+    type: "number",
+    min: "0",
+    value: shipCost.cj,
+    onChange: e => setShipCost(v => ({
+      ...v,
+      cj: Number(e.target.value) || 0
+    })),
+    onKeyDown: endEdit
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "tracefoot",
+    style: {
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn sm ghost",
+    disabled: shipCost.lotte === SHIP_COST_DEFAULT.lotte && shipCost.cj === SHIP_COST_DEFAULT.cj,
+    onClick: () => setShipCost(SHIP_COST_DEFAULT)
+  }, "기본값")), /*#__PURE__*/React.createElement("div", {
+    className: "hint",
+    style: {
+      marginTop: 10
+    }
+  }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "단가는 그날 자료에 함께 저장됩니다."), " 나중에 단가가 올라도 지난 방송 결산은 그때 단가로 계산됩니다.", /*#__PURE__*/React.createElement("br", null), "⚠ ", /*#__PURE__*/React.createElement("b", null, "운송장을 안 올린 날은 운임을 알 수 없습니다."), " 그런 날 결산 엑셀에는 「운송장 미업로드 — 배송 운임 계산 불가」로 표시됩니다.")), settingEdit === "trace" && (() => {
     const SAMPLE = {
       lotte: "268335665651",
       cj: "596074758406"
