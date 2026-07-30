@@ -2584,6 +2584,14 @@ function App() {
      ⚠ paid 는 건드리지 않는다 — 「입금받았다가 환불함」이 사실이고, 출고·정산·결산이 전부 paid 기준이다. */
   const [refundFor, setRefundFor] = useState(null); // { nick, sel: {orderId:true} }
   const [promoteAsk, setPromoteAsk] = useState(null); // 상품이 전부 환불됐을 때 배송비 확인
+  const [keepAsk, setKeepAsk] = useState(null); // 입금 표시가 있는 손님을 킵으로 돌릴 때 확인 (5-31)
+
+  /* ⭐ 「킵 상태에서 받는 금액」 판정은 여기 한 곳에서만 한다 (5-31 · money-rules §1).
+        입금 칩과 킵 칩이 각자 판정하고 있었고, 그래서 누른 순서에 따라 결과가 달라졌다.
+          킵 → 입금  keepPaid 기록됨
+          입금 → 킵  keepPaid 0        ← 받은 돈이 결산·요약본 어디에도 안 남았다
+        실서버 2026-07-27 「가나」가 실제로 그 상태였다 (paid=true · keep=true · keepPaid=0). */
+  const keepGot = (c, sum) => sum + (noFee(c) ? 0 : shipFee);
 
   // "" 없음 / "part" 부분환불 / "allpart" 상품은 다 환불했지만 배송비는 받는 중 / "all" 전체환불
   const refundStateOf = n => {
@@ -6933,7 +6941,7 @@ function App() {
         // ⚠ 킵 상태에서 입금하면 상품값 + 배송비를 함께 받는다.
         //    그 금액을 기록해둬야 다음에 배송비를 또 받지 않고, 추가분만 청구할 수 있다 (5-19).
         if (on && c.keep) {
-          const got = sum + (noFee(c) ? 0 : shipFee);
+          const got = keepGot(c, sum); // ⭐ 킵 칩과 같은 계산을 쓴다 (5-31)
           setCust(n, {
             paid: true,
             keepPaid: (Number(c.keepPaid) || 0) + got,
@@ -6958,9 +6966,26 @@ function App() {
     }, "입금"), /*#__PURE__*/React.createElement("button", {
       className: "chip keep" + (c.keep ? " on" : ""),
       title: c.keep ? "킵 해제 — 이번 방송에 발송" : "킵 — 이번엔 보내지 않고 다음에 합쳐서 발송",
-      onClick: () => setCust(n, {
-        keep: !c.keep
-      })
+      onClick: () => {
+        const on = !c.keep;
+        /* ⚠ 입금 표시가 있는데 킵 입금액이 0이면 「받았는지 안 받았는지 알 수 없는 상태」가 된다.
+              킵은 매출 집계에서 빠지므로 받은 돈이 결산·요약본 어디에도 안 남는다 (5-31).
+              묻지 않고 자동 기록하면 실제로 안 받은 돈이 잡힐 수 있어 반드시 사람에게 묻는다.
+           ⚠ keepPaid 가 이미 0이 아니면 묻지 않는다 — 두 번 기록되면 받은 돈이 부풀려진다. */
+        if (on && c.paid && (Number(c.keepPaid) || 0) === 0) {
+          setKeepAsk({
+            nick: n,
+            date: bdate,
+            goods: sum,
+            fee: noFee(c) ? 0 : shipFee,
+            got: keepGot(c, sum)
+          });
+          return; // ⭐ 확인 전에는 킵을 켜지 않는다
+        }
+        setCust(n, {
+          keep: on
+        });
+      }
     }, "킵"), rs === "all" && /*#__PURE__*/React.createElement("button", {
       className: "btn ghost sm refundbtn",
       onClick: () => undoRefund(n)
@@ -6981,7 +7006,41 @@ function App() {
         pickup: !c.pickup,
         freeShip: c.pickup ? c.freeShip : false
       })
-    }, "픽업"))), list.length === 0 && /*#__PURE__*/React.createElement("div", {
+    }, "픽업"))), keepAsk && keepAsk.nick === n && keepAsk.date === bdate && c.paid && !c.keep && /*#__PURE__*/React.createElement("div", {
+      className: "refundpanel keeppaidpanel"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "rptitle"
+    }, "⚠ 「", n, "」 은 입금 표시가 있는데 킵 입금액이 0원입니다"), /*#__PURE__*/React.createElement("div", {
+      className: "sub"
+    }, "킵으로 두면 이 돈이 결산·요약본에서 빠집니다. 받으신 금액을 기록해 둘까요?", /*#__PURE__*/React.createElement("br", null), "상품 ", won(keepAsk.goods), " + 배송비 ", won(keepAsk.fee), " = ", /*#__PURE__*/React.createElement("b", null, won(keepAsk.got), "원")), /*#__PURE__*/React.createElement("div", {
+      className: "rpfoot"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn primary",
+      onClick: () => {
+        setCust(n, {
+          keep: true,
+          paid: true,
+          keepPaid: (Number(c.keepPaid) || 0) + keepAsk.got,
+          shipPaid: true
+        });
+        setKeepAsk(null);
+        showToast(`✓ 「${n}」 킵 입금 ${won(keepAsk.got)}원 기록 — 다음 발송 때 배송비는 받지 않습니다`);
+      }
+    }, won(keepAsk.got), "원 받았습니다 — 킵 입금으로 기록"), /*#__PURE__*/React.createElement("button", {
+      className: "btn",
+      onClick: () => {
+        // ⚠ 「입금 표시 + 킵 입금 0」이라는 애매한 상태를 남기지 않는다 (사장님 결정 · 5차)
+        setCust(n, {
+          keep: true,
+          paid: false
+        });
+        setKeepAsk(null);
+        showToast(`「${n}」 아직 안 받은 것으로 두고 입금 표시를 껐습니다`);
+      }
+    }, "아직 안 받았습니다 — 입금 표시를 끕니다"), /*#__PURE__*/React.createElement("button", {
+      className: "btn ghost",
+      onClick: () => setKeepAsk(null)
+    }, "취소 — 킵을 켜지 않습니다"))), list.length === 0 && /*#__PURE__*/React.createElement("div", {
       className: "empty small"
     }, rs ? "환불 처리됨 — 상품 금액과 배송비가 매출에서 빠졌습니다" : doneOrders.some(o => o.nick === n) ? "이미 다 보낸 손님입니다 — 새 주문이 들어오면 여기에 다시 잡힙니다" : "유효 주문 없음 (전체 취소됨)"), list.length > 0 && openMsg[n] && /*#__PURE__*/React.createElement("pre", {
       className: "msg"
@@ -8319,6 +8378,7 @@ const CSS = `
 .btn.refundbtn:hover { background: #fdf0ef; }
 .refundpanel { margin: 4px 0 10px; padding: 12px 14px; border: 1px solid #e0a6a0; border-radius: 12px; background: #fdf6f5; }
 .refundpanel.promote { border-color: #c0392b; background: #fbe0e0; }
+.refundpanel.keeppaidpanel { border-color: #b7791f; background: #fdf6e3; }
 .rptitle { font-weight: 800; margin-bottom: 8px; }
 .rpitem { display: flex; align-items: center; gap: 10px; padding: 7px 9px; border-radius: 9px; cursor: pointer; }
 .rpitem:hover { background: #fbe9e7; }
