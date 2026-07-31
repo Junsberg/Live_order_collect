@@ -1850,6 +1850,23 @@ function App() {
         }
       };
     }));
+    /* ⭐ 손님 상태도 되돌린다 (2026-07-31 5차).
+       ⚠ 차수 마감은 paid·notified 를 리셋한다. 운송장이 사라져 자동 해제될 때는 doneCust 로
+          되돌리는데, **손으로 누르는 잠금해제만 그걸 안 했다.**
+          출고 목록은 paid 기준이라 주문은 살아나도 출고 탭에 안 떴다.
+       ⚠ 그 차수의 doneCust 는 「머리 주문」에만 붙어 있다. 지금 푸는 주문에 없으면 같은 차수에서 찾는다.
+       ⚠ 「잠금해제 말고 열린 주문」이 이미 있으면 손대지 않는다 — 그 사람의 paid 는 이미
+          그 새 주문 기준으로 관리되고 있다. 덮으면 미입금이 입금으로 보인다. */
+    const seq = Number(o.doneSeq) || 1;
+    const dc = o.doneCust || (orders.find(x => x.nick === o.nick && x.done && (Number(x.doneSeq) || 1) === seq && x.doneCust) || {}).doneCust;
+    const hasOther = orders.some(x => x.nick === o.nick && x.id !== orderId && !x.canceled && !x.done && !x.wasDone);
+    if (dc && !hasOther) setCustomers(prev => ({
+      ...prev,
+      [o.nick]: {
+        ...(prev[o.nick] || EMPTY_CUST),
+        ...dc
+      }
+    }));
     showToast(`🔓 「${o.nick}」 ${o.name} — 다시 이번 정산에 들어갑니다`);
   };
 
@@ -2143,12 +2160,29 @@ function App() {
   const noFee = c => !!(c && (c.pickup || c.freeShip || c.refundAll || c.shipPaid));
   // ⚠ 마감만 남은 사람은 이번에 보낼 게 없으므로 배송비도 0이다.
   const hasOpenOrder = n => orders.some(o => o.nick === n && !o.canceled && !o.done);
-  const feeOf = nick => noFee(customers[nick]) || !hasOpenOrder(nick) ? 0 : shipFee;
+  /* ⭐ 「진짜 새 발송」이 있는가 (2026-07-31 5차 · 사장님 실사용에서 나옴)
+     ⚠ 출고완료 잠금해제로 되돌린 주문(wasDone)은 **같은 발송 건**이다. 택배가 또 나가지 않는다.
+        그런데 feeOfAll = feeOf(이번 차수) + doneFeeOf(마감분) 이라, 열린 주문이 다시 생기면
+        배송비가 두 번 잡힌다. 누락분을 되돌렸을 뿐인데 상단바가 배송비만큼 늘어난다.
+        (실제 사례: 매니저가 상품 1개를 누락 출고 → 잠금해제 → 주문 19,000 이 23,000 이 됨)
+     ⚠ 진짜 새 주문이 하나라도 섞이면 배송비를 매긴다 — 그때는 택배가 정말 또 나간다. */
+  const hasNewShipment = n => orders.some(o => o.nick === n && !o.canceled && !o.done && !o.wasDone);
+  /* ⭐ 잠금해제로 되돌린 주문에 붙어 있던 배송비 (2026-07-31 5차)
+     ⚠ doneFee 는 그 차수의 「머리 주문」에만 붙는다. 하필 그걸 풀면 doneFee 가 사라지고
+        열린 쪽은 wasDone 이라 배송비를 안 매기므로 **받은 배송비가 통째로 증발한다.**
+        unlockDone 이 wasDone.fee 에 보관해 둔 값을 되살려 쓴다. */
+  const unlockedFeeOf = n => orders.filter(o => o.nick === n && !o.canceled && !o.done && o.wasDone).reduce((t, o) => t + (Number(o.wasDone.fee) || 0), 0);
+  /* ⚠ 상단바·정산서·결산이 **같은 값**을 써야 한다. 한 곳만 고치면 나머지가 어긋난 채 통과한다
+        (역검증에서 실제로 그랬다 — feeOf 만 되돌려도 검사가 통과했다). */
+  const feeOf = nick => noFee(customers[nick]) ? 0 : hasNewShipment(nick) ? shipFee : unlockedFeeOf(nick);
   // 배송비를 실제로 내는 사람 수
-  const shipPayNickCount = useMemo(() => new Set(activeOrders.filter(o => !noFee(customers[o.nick])).map(o => o.nick)).size, [activeOrders, customers]);
+  /* ⚠ 상단바 배송비도 「진짜 새 발송」 기준이다 (2026-07-31 5차).
+        잠금해제로 되돌린 주문(wasDone)만 열려 있으면 택배가 또 나가지 않으므로 배송비도 없다.
+        여기를 빼먹으면 정산·결산은 맞는데 상단바만 배송비가 더 잡혀 더 헷갈린다. */
+  const shipPayNickCount = useMemo(() => new Set(activeOrders.filter(o => !noFee(customers[o.nick]) && feeOf(o.nick) > 0).map(o => o.nick)).size, [activeOrders, customers, orders, shipFee]);
   const paidShipPayNickCount = useMemo(() => new Set(activeOrders.filter(o => {
     const c = customers[o.nick];
-    return c && c.paid && !noFee(c);
+    return c && c.paid && !noFee(c) && feeOf(o.nick) > 0;
   }).map(o => o.nick)).size, [activeOrders, customers]);
   // ⚠ 마감된 차수도 오늘의 매출이다. 현재 차수 금액에 더해 상단바·결산이 하루 전체를 보이게 한다.
   const totalWithShip = totalSales + shipPayNickCount * shipFee + doneSales + doneFees;
@@ -2622,7 +2656,11 @@ function App() {
           킵 → 입금  keepPaid 기록됨
           입금 → 킵  keepPaid 0        ← 받은 돈이 결산·요약본 어디에도 안 남았다
         실서버 2026-07-27 「가나」가 실제로 그 상태였다 (paid=true · keep=true · keepPaid=0). */
-  const keepGot = (c, sum) => sum + (noFee(c) ? 0 : shipFee);
+  /* ⚠ 배송비 판정은 feeOf 와 같아야 한다 (2026-07-31 5차).
+        잠금해제로 되돌린 주문만 열려 있으면 배송비는 이미 1차에 받았다.
+        여기서 또 더하면 「킵으로 받은 돈」이 배송비만큼 부풀려지고,
+        shipPaid 가 켜져 다음 발송 때 배송비를 못 받는다. */
+  const keepGot = (c, sum, nick) => sum + (noFee(c) || nick && !hasNewShipment(nick) ? 0 : shipFee);
 
   // "" 없음 / "part" 부분환불 / "allpart" 상품은 다 환불했지만 배송비는 받는 중 / "all" 전체환불
   const refundStateOf = n => {
@@ -3071,6 +3109,10 @@ function App() {
      ⚠ 결산에는 「이미 보낸 차수(출고완료)」도 넣는다. 빼면 오전 출고분이 사라진다. */
   const closing = useMemo(() => {
     const closingOrders = [...activeOrders, ...doneOrders];
+    /* ⚠ 잠금해제된 주문의 배송비를 잃지 않는다 (2026-07-31 5차).
+          doneFee 는 그 차수의 「머리 주문」에만 붙는다. 하필 머리 주문을 잠금해제하면
+          doneFee 가 사라지고, 열린 쪽은 wasDone 이라 배송비를 안 매기므로
+          **받은 배송비가 통째로 증발한다.** unlockDone 이 wasDone.fee 에 보관해 둔 값을 쓴다. */
     const doneFeeOf = n => doneOrders.filter(o => o.nick === n).reduce((t, o) => t + (Number(o.doneFee) || 0), 0);
     const feeOfAll = n => feeOf(n) + doneFeeOf(n);
     const paidOf = n => cust(n).paid || doneOrders.some(o => o.nick === n && o.donePaid !== false);
@@ -5123,6 +5165,7 @@ function App() {
      ⚠ 입력 화면은 0-7 회계에서 만든다. 0-4는 저장·복원 경로만 확보한다. */
   const [costBook, setCostBook] = useState({});
   const costLoaded = useRef(false);
+  const [costReady, setCostReady] = useState(0); // 로컬 사전을 읽고 나서 1 이 된다
   const costKey = (name, price) => `${String(name || "").trim()}|${Number(price) || 0}`;
   useEffect(() => {
     (async () => {
@@ -5131,12 +5174,133 @@ function App() {
       const cb = await loadJson("saja:costbook", null);
       if (cb) setCostBook(cb);
       costLoaded.current = true;
+      /* ⚠ costLoaded 는 ref 라 바뀌어도 effect 가 다시 돌지 않는다.
+            로컬 사전이 비어 있으면 setCostBook 도 안 불려, 서버 읽기가 auth 타이밍에만
+            기대게 된다. 눈에 보이는 신호를 하나 올려 확실히 깨운다. */
+      setCostReady(1);
     })();
   }, []);
   useEffect(() => {
     if (!costLoaded.current) return;
     const t = setTimeout(() => {
       saveKey("saja:costbook", JSON.stringify(costBook), "원가 사전");
+    }, 400);
+    return () => clearTimeout(t);
+  }, [costBook]);
+
+  /* ---------- 원가 사전 서버 연동 (2026-07-31 5차) ----------
+     ⚠ 0-7 2단계에서 입력칸을 만들었는데 사전이 로컬에만 있었다. 매니저가 넣은 공급가를
+        사장님이 못 봤고, 브라우저 자료를 지우면 원가가 통째로 사라져 마진이 100% 로 잡혔다.
+     ⚠ keeps 승격과 같은 골격이지만 **삭제가 없다.** 사전은 화면에 없는 항목이 대부분이라
+        「목록에 없으면 지움」 규칙을 쓰면 방송 한 번에 사전이 통째로 날아간다.
+        지우는 것은 사람이 고른 것만 (remove_costs).
+     ⚠ 기준 시각(at)은 「서버가 주고 앱이 그대로 돌려주는」 값이다. PC 시계를 쓰면
+        시계가 빠를 때 「서버가 더 최신인데도 덮어버리는」 쪽으로 틀린다.
+     ⚠ 서버가 안 되면 조용히 로컬만 쓴다. 못 읽었다고 화면을 비우면 그 위에 쌓인 입력이
+        나중에 서버를 덮어쓴다 (설계안 1-3 「읽기 실패 ≠ 데이터 없음」과 같은 뿌리). */
+  const costAtRef = useRef({}); // key → 서버가 알려준 그 행의 시각
+  const costKnownAtRef = useRef(null); // 마지막으로 서버를 읽은 시각
+  const costSrvOk = useRef(false); // 서버에서 한 번이라도 읽는 데 성공했나
+  const costBookRef = useRef({});
+  useEffect(() => {
+    costBookRef.current = costBook;
+  }, [costBook]);
+  const costsRpc = async (name, params) => {
+    const c = sb();
+    if (!c) return {
+      ok: false
+    };
+    try {
+      const {
+        data,
+        error
+      } = await c.rpc(name, params || {});
+      if (error) return {
+        ok: false,
+        err: error.message
+      };
+      const d = Array.isArray(data) ? data[0] : data;
+      if (!d) return {
+        ok: false,
+        err: "no result"
+      };
+      return {
+        ok: true,
+        at: d.at,
+        list: d.list || {},
+        skipped: d.skipped || []
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        err: e && e.message || name + " failed"
+      };
+    }
+  };
+  const adoptServerCosts = r => {
+    costKnownAtRef.current = r.at || costKnownAtRef.current;
+    const atMap = {};
+    const next = {};
+    Object.entries(r.list || {}).forEach(([k, v]) => {
+      atMap[k] = v.at;
+      const one = {};
+      if (Number(v.cost) > 0) one.cost = Number(v.cost);
+      if (Number(v.feeRate) > 0) one.feeRate = Number(v.feeRate);
+      if (Object.keys(one).length) next[k] = one;
+    });
+    costAtRef.current = atMap;
+    /* ⚠ 로컬에만 있는 항목은 지우지 않고 합친다. 서버가 아직 못 받은 값일 수 있다.
+          (첫 연동 때 사장님 PC 의 사전이 화면에서 사라지면 안 된다) */
+    setCostBook(prev => {
+      const merged = {
+        ...next
+      };
+      Object.entries(prev || {}).forEach(([k, v]) => {
+        if (!merged[k]) merged[k] = v;
+      });
+      return JSON.stringify(merged) === JSON.stringify(prev) ? prev : merged;
+    });
+  };
+
+  // 서버에서 원가 사전을 읽는다 (로컬을 먼저 읽은 뒤)
+  useEffect(() => {
+    if (!costLoaded.current || costSrvOk.current || !serverOn()) return;
+    let dead = false;
+    (async () => {
+      const r = await costsRpc("load_costs");
+      if (dead || !r.ok) return;
+      costSrvOk.current = true;
+      adoptServerCosts(r);
+    })();
+    return () => {
+      dead = true;
+    };
+  }, [auth, srvRetryTick, costBook, costReady]);
+
+  // 원가가 바뀌면 서버로 올린다
+  useEffect(() => {
+    if (!costLoaded.current) return;
+    const t = setTimeout(async () => {
+      if (!serverOn() || !costSrvOk.current || costKnownAtRef.current == null) return;
+      const payload = {};
+      Object.entries(costBookRef.current || {}).forEach(([k, v]) => {
+        const cost = Number(v && v.cost) || 0,
+          fee = Number(v && v.feeRate) || 0;
+        if (!(cost > 0) && !(fee > 0)) return;
+        // ⚠ at 이 없으면 서버는 「본 적 없는 항목」으로 보고 이미 있으면 손대지 않는다
+        payload[k] = {
+          cost,
+          feeRate: fee,
+          at: costAtRef.current[k] || null
+        };
+      });
+      if (!Object.keys(payload).length) return;
+      const r = await costsRpc("sync_costs", {
+        p_costs: payload,
+        p_known_at: costKnownAtRef.current
+      });
+      if (!r.ok) return; // 조용히 넘어간다 — 다음 변경 때 다시 올라간다
+      adoptServerCosts(r);
     }, 400);
     return () => clearTimeout(t);
   }, [costBook]);
@@ -7232,7 +7396,7 @@ function App() {
         // ⚠ 킵 상태에서 입금하면 상품값 + 배송비를 함께 받는다.
         //    그 금액을 기록해둬야 다음에 배송비를 또 받지 않고, 추가분만 청구할 수 있다 (5-19).
         if (on && c.keep) {
-          const got = keepGot(c, sum); // ⭐ 킵 칩과 같은 계산을 쓴다 (5-31)
+          const got = keepGot(c, sum, n); // ⭐ 킵 칩과 같은 계산을 쓴다 (5-31)
           setCust(n, {
             paid: true,
             keepPaid: (Number(c.keepPaid) || 0) + got,
@@ -7275,8 +7439,8 @@ function App() {
             nick: n,
             date: bdate,
             goods: sum,
-            fee: noFee(c) ? 0 : shipFee,
-            got: keepGot(c, sum)
+            fee: keepGot(c, sum, n) - sum,
+            got: keepGot(c, sum, n)
           });
           return; // ⭐ 확인 전에는 킵을 켜지 않는다
         }
