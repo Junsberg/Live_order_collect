@@ -4800,7 +4800,11 @@ function App() {
       ...x,
       nkText: nk(x.names || [])
     }));
-  }, [nickList, customers, paidNicks, paidLines, shipData, cashList, lastExcelAt, products, activeOrders]);
+    /* ⚠ doneOrders 가 빠져 있었다 (2026-07-31 5차).
+          「운송장은 있는데 주문 없음」이 doneOrders 를 쓰는데 의존성에 없어서,
+          출고완료된 사람이 **유령 송장으로 잘못 잡혔다.**
+          보낸 손님마다 헛경고가 떠서 사장님이 경고 자체를 무시하게 된다 — 그게 진짜 위험이다. */
+  }, [nickList, customers, paidNicks, paidLines, shipData, cashList, lastExcelAt, products, activeOrders, doneOrders]);
   const closeLeft = closeChecks.filter(c => !c.ok).length;
 
   /* ---------- 킵 (보류 주문) 5-19 ----------
