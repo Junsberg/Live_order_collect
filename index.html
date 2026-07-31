@@ -740,15 +740,19 @@ function App() {
   /* 택배사 운임 원가 (0-7 1단계) — 「고객에게 받는 배송비」와 별개로 「우리가 택배사에 내는 값」이다.
      ⚠ 그날 조건은 그날 자료에 박아둔다. 9월에 단가가 오른 뒤 7월 회계를 다시 보면
         9월 단가로 계산되어 조용히 틀린다. 그래서 날짜 payload 에 함께 저장한다. */
+  /* consign = 위탁출고 운임. 택배사와 무관하게 이 값으로 계산한다 (2026-07-30 사장님 지정 3,000원).
+     ⚠ 위탁이어도 택배사 집계(lotteCount·cjCount)에서는 빼지 않는다 — 운임만 바뀐다. */
   const SHIP_COST_DEFAULT = {
     lotte: 2800,
-    cj: 3000
+    cj: 3000,
+    consign: 3000
   };
   const [shipCost, setShipCost] = useState(SHIP_COST_DEFAULT);
   // 옛 자료(shipCost 없음)를 읽어도 기본값으로 채운다 — 빈 칸이면 운임 0이 되어 마진이 부풀려진다
   const readShipCost = v => ({
     lotte: Number(v && v.lotte) > 0 ? Number(v.lotte) : SHIP_COST_DEFAULT.lotte,
-    cj: Number(v && v.cj) > 0 ? Number(v.cj) : SHIP_COST_DEFAULT.cj
+    cj: Number(v && v.cj) > 0 ? Number(v.cj) : SHIP_COST_DEFAULT.cj,
+    consign: Number(v && v.consign) > 0 ? Number(v.consign) : SHIP_COST_DEFAULT.consign
   });
   const [bdate, setBdate] = useState(todayISO());
   const [pickState, setPickState] = useState({});
@@ -3091,13 +3095,26 @@ function App() {
     const paidTotal = paidGoods + paidShipFee;
     const totalQty = closingOrders.reduce((s, o) => s + o.qty, 0);
     const canceledCnt = orders.filter(o => o.canceled).length;
-    // 택배사별 건수 — 운송장이 조회된 사람 기준 (미입력은 어느 쪽도 아니다)
+    /* 택배사별 건수 — 운송장이 조회된 사람 기준 (미입력은 어느 쪽도 아니다)
+       ⚠ 위탁 건도 택배사 집계에는 그대로 남긴다 (2026-07-30 사장님 결정).
+          「몇 건을 롯데로 보냈나」는 위탁 여부와 무관한 사실이다. 바뀌는 것은 운임뿐이다. */
     let lotteCount = 0,
-      cjCount = 0;
+      cjCount = 0,
+      consignCount = 0;
+    let lotteBilled = 0,
+      cjBilled = 0; // 택배사 단가로 계산할 건수 (위탁 제외)
     shipData.forEach(d => {
       if (!normTrk(d.tracking)) return;
       const c = String(d.carrier || "");
-      if (c.includes("롯데")) lotteCount++;else if (c.includes("CJ")) cjCount++;
+      const isConsign = !!d.consign;
+      if (isConsign) consignCount++;
+      if (c.includes("롯데")) {
+        lotteCount++;
+        if (!isConsign) lotteBilled++;
+      } else if (c.includes("CJ")) {
+        cjCount++;
+        if (!isConsign) cjBilled++;
+      } else if (isConsign) {/* 택배사 미상 위탁 — 위탁 운임으로만 잡힌다 */}
     });
     /* 배송 손익 (0-7 1단계) — 「받은 배송비」 − 「택배사에 낸 운임」
        ⚠ 운송장을 안 올리면 carrier 가 비어 lotteCount·cjCount 가 0이 된다.
@@ -3126,12 +3143,22 @@ function App() {
       pmap[k].buyers.add(o.nick);
     });
     const prodList = Object.values(pmap).sort((a, b) => b.amt - a.amt || a.name.localeCompare(b.name, "ko") || b.price - a.price);
-    const lotteCost = lotteCount * (Number(shipCost.lotte) || 0);
-    const cjCost = cjCount * (Number(shipCost.cj) || 0);
-    const shipCostSum = lotteCost + cjCost;
+    const lotteCost = lotteBilled * (Number(shipCost.lotte) || 0);
+    const cjCost = cjBilled * (Number(shipCost.cj) || 0);
+    const consignCost = consignCount * (Number(shipCost.consign) || 0);
+    const shipCostSum = lotteCost + cjCost + consignCost;
     const shipProfit = feeSum - shipCostSum;
-    const trkKnown = lotteCount + cjCount; // 택배사가 파악된 건수
-    const shipCostUnknown = trkKnown === 0 && feeList.length > 0;
+    /* ⚠ 운송장을 「일부만」 올린 날이 문제다 (2026-07-30 5차).
+          예전에는 0건일 때만 「모른다」로 봤다. 그래서 2026-07-21(주문 113건 · 운송장 22건)이
+          경고 없이 운임 22건분만 잡혀 **손익이 부풀려져 있었다.**
+       ⚠ 발송 대상 = 배송비 내는 사람 + 무료배송 사람. 픽업·킵·전체환불은 안 보내므로 뺀다. */
+    const sendList = nicks.filter(n => {
+      const c = cust(n);
+      return !c.pickup && !c.keep && !c.refundAll;
+    });
+    const trkKnown = lotteCount + cjCount + consignCount; // 운임을 아는 건수
+    const trkMissing = Math.max(0, sendList.length - trkKnown);
+    const shipCostUnknown = trkMissing > 0;
     return {
       closingOrders,
       doneFeeOf,
@@ -3159,11 +3186,17 @@ function App() {
       canceledCnt,
       lotteCount,
       cjCount,
+      consignCount,
+      lotteBilled,
+      cjBilled,
       lotteCost,
       cjCost,
+      consignCost,
       shipCostSum,
       shipProfit,
       trkKnown,
+      trkMissing,
+      sendList,
       shipCostUnknown,
       prodList
     };
@@ -3190,11 +3223,15 @@ function App() {
     shipCost: {
       lotte: Number(shipCost.lotte) || 0,
       cj: Number(shipCost.cj) || 0,
+      consign: Number(shipCost.consign) || 0,
       lotteCount: closing.lotteCount,
       cjCount: closing.cjCount,
+      consignCount: closing.consignCount,
       lotteCost: closing.lotteCost,
       cjCost: closing.cjCost,
+      consignCost: closing.consignCost,
       shipProfit: closing.shipProfit,
+      trkMissing: closing.trkMissing,
       unknown: closing.shipCostUnknown
     },
     paidOrders: closing.closingOrders.filter(o => closing.paidOf(o.nick)).length,
@@ -3237,10 +3274,16 @@ function App() {
       canceledCnt,
       lotteCount,
       cjCount,
+      consignCount,
+      lotteBilled,
+      cjBilled,
       lotteCost,
       cjCost,
+      consignCost,
       shipCostSum,
       shipProfit,
+      trkMissing,
+      sendList,
       shipCostUnknown
     } = closing;
     // ⚠ 상품별 집계는 closing.prodList 를 그대로 쓴다 — 여기서 다시 세지 않는다 (money-rules §1)
@@ -3248,6 +3291,13 @@ function App() {
       showToast("결산할 주문이 없습니다.");
       return;
     }
+
+    /* 운임 줄 문구 — 회계 화면과 같은 규칙을 쓴다 (문구가 갈리면 어느 쪽이 맞는지 헷갈린다) */
+    const carrierNote = (cnt, billed, unit) => {
+      if (!cnt) return shipCostUnknown ? `운송장 ${trkMissing}건 미업로드 — 그만큼 운임이 빠져 있다` : "0건";
+      return cnt === billed ? `${cnt}건 × ${won(unit)}원` : `${cnt}건 중 위탁 ${cnt - billed}건 제외 ${billed}건 × ${won(unit)}원`;
+    };
+    const shipWarn = shipCostUnknown ? `⚠ 보낼 ${sendList.length}명 중 운송장 ${trkMissing}건이 없습니다 — 그만큼 운임이 빠져 실제 손익은 이보다 낮습니다` : `배송비 수입 ${won(feeSum)} − 운임 ${won(shipCostSum)}`;
     const wb = XLSX.utils.book_new();
 
     // 1) 총괄 요약
@@ -3255,7 +3305,7 @@ function App() {
     /* [배송 손익] 0-7 1단계 — 받은 배송비에서 택배사 운임을 뺀 것.
        ⚠ 운임은 음수로 적는다. 「수입 + 운임 = 손익」이 엑셀에서 눈으로 검산된다.
        ⚠ 운송장을 안 올리면 운임을 모른다. 0원으로 적으면 손익이 부풀려지므로 말로 알려준다. */
-    ["[배송 손익]", ""], ["롯데 운임", -lotteCost, lotteCount ? `${lotteCount}건 × ${won(shipCost.lotte)}원` : shipCostUnknown ? "운송장 미업로드 — 배송 운임 계산 불가" : "0건"], ["CJ 운임", -cjCost, cjCount ? `${cjCount}건 × ${won(shipCost.cj)}원` : shipCostUnknown ? "운송장 미업로드 — 배송 운임 계산 불가" : "0건"], ["배송 손익", shipProfit, shipCostUnknown ? "⚠ 운송장 미업로드 — 운임을 모르는 상태입니다. 실제 손익은 이보다 낮습니다" : `배송비 수입 ${won(feeSum)} − 운임 ${won(shipCostSum)}`], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["미수금", total - paidTotal, `${nicks.length - paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0], ["입금률 (금액)", total ? Math.round(paidTotal / total * 100) / 100 : 0], [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", closingOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length, "주문만 취소 (돈이 오가지 않음)"], [], ["[킵 보류]", "", "이번에 발송하지 않는 주문 — 위 매출에 포함되지 않음"], ["킵 인원", keepNicks.length], ["킵 건수", keepOrders.length], ["킵 상품금액", keepOrders.reduce((t, o) => t + o.price * o.qty, 0)], ["킵 입금액", keepNicks.reduce((t, nk) => t + (Number(cust(nk).keepPaid) || 0), 0), "받았지만 아직 매출이 아님 (배송비 포함)"], [], ["[환불]", ""], ["환불 건수", refundOrders.length, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 부분환불 ${refundNickCount - refundAllList.length}명` : refundOrders.length ? `부분환불 ${refundNickCount}명` : ""], ["환불 상품금액", refundAmt], ["환불 배송비", refundAllList.length * shipFee, refundAllList.length ? `전체환불 ${refundAllList.length}명 × ${shipFee}원` : ""], ["환불 합계", refundAmt + refundAllList.length * shipFee, "실제로 돌려준 돈 · 위 매출에는 포함되어 있지 않음"], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(closingOrders.map(o => `${o.name}\u241f${o.price}`)).size, "같은 상품도 가격이 다르면 별개로 셈"], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
+    ["[배송 손익]", ""], ["롯데 운임", -lotteCost, carrierNote(lotteCount, lotteBilled, shipCost.lotte)], ["CJ 운임", -cjCost, carrierNote(cjCount, cjBilled, shipCost.cj)], ["위탁 운임", -consignCost, consignCount ? `${consignCount}건 × ${won(shipCost.consign)}원 (택배사 무관)` : "0건"], ["배송 손익", shipProfit, shipWarn], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["미수금", total - paidTotal, `${nicks.length - paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0], ["입금률 (금액)", total ? Math.round(paidTotal / total * 100) / 100 : 0], [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", closingOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length, "주문만 취소 (돈이 오가지 않음)"], [], ["[킵 보류]", "", "이번에 발송하지 않는 주문 — 위 매출에 포함되지 않음"], ["킵 인원", keepNicks.length], ["킵 건수", keepOrders.length], ["킵 상품금액", keepOrders.reduce((t, o) => t + o.price * o.qty, 0)], ["킵 입금액", keepNicks.reduce((t, nk) => t + (Number(cust(nk).keepPaid) || 0), 0), "받았지만 아직 매출이 아님 (배송비 포함)"], [], ["[환불]", ""], ["환불 건수", refundOrders.length, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 부분환불 ${refundNickCount - refundAllList.length}명` : refundOrders.length ? `부분환불 ${refundNickCount}명` : ""], ["환불 상품금액", refundAmt], ["환불 배송비", refundAllList.length * shipFee, refundAllList.length ? `전체환불 ${refundAllList.length}명 × ${shipFee}원` : ""], ["환불 합계", refundAmt + refundAllList.length * shipFee, "실제로 돌려준 돈 · 위 매출에는 포함되어 있지 않음"], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(closingOrders.map(o => `${o.name}\u241f${o.price}`)).size, "같은 상품도 가격이 다르면 별개로 셈"], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
     const ws1 = XLSX.utils.aoa_to_sheet(s1);
     ws1["!cols"] = [{
       wch: 20
@@ -6096,6 +6146,12 @@ function App() {
     const net = marginSum + closing.shipProfit - refundSum;
     const keepNicks = settleNickList.filter(n => cust(n).keep);
     const keepPaidSum = keepNicks.reduce((t, n) => t + (Number(cust(n).keepPaid) || 0), 0);
+    /* 운임 줄 문구 — 결산 엑셀과 같은 규칙을 쓴다 (문구가 갈리면 어느 쪽이 맞는지 헷갈린다) */
+    const cNote = (cnt, billed, unit) => {
+      if (!cnt) return closing.shipCostUnknown ? `운송장 ${closing.trkMissing}건 미업로드 — 그만큼 운임이 빠져 있다` : "0건";
+      return cnt === billed ? `${cnt}건 × ${won(unit)}원` : `${cnt}건 중 위탁 ${cnt - billed}건 제외 ${billed}건 × ${won(unit)}원`;
+    };
+    const sWarn = closing.shipCostUnknown ? `⚠ 보낼 ${closing.sendList.length}명 중 운송장 ${closing.trkMissing}건이 없습니다 — 그만큼 운임이 빠져 실제 손익은 이보다 낮습니다` : `배송비 수입 ${won(closing.feeSum)} − 운임 ${won(closing.shipCostSum)}`;
     const arow = (label, val, note, cls) => /*#__PURE__*/React.createElement("div", {
       className: "arow" + (cls ? " " + cls : ""),
       key: label
@@ -6121,7 +6177,7 @@ function App() {
       className: "acctcard"
     }, /*#__PURE__*/React.createElement("div", {
       className: "acctcaption"
-    }, "총 손익"), arow("상품 마진", marginSum, missing.length ? `⚠ 원가 미입력 ${missing.length}종 포함` : ""), arow("배송 손익", closing.shipProfit, closing.shipCostUnknown ? "⚠ 운송장 미업로드 — 운임을 모릅니다" : `배송비 ${won(closing.feeSum)} − 운임 ${won(closing.shipCostSum)}`), arow("환불", -refundSum, refundSum ? `전체환불 ${closing.refundAllList.length}명 · 부분환불 ${closing.refundNickCount}명` : ""), arow("순이익", net, "", "anet"), /*#__PURE__*/React.createElement("div", {
+    }, "총 손익"), arow("상품 마진", marginSum, missing.length ? `⚠ 원가 미입력 ${missing.length}종 포함` : ""), arow("배송 손익", closing.shipProfit, sWarn), arow("환불", -refundSum, refundSum ? `전체환불 ${closing.refundAllList.length}명 · 부분환불 ${closing.refundNickCount}명` : ""), arow("순이익", net, "", "anet"), /*#__PURE__*/React.createElement("div", {
       className: "hint",
       style: {
         marginTop: 8
@@ -6193,7 +6249,7 @@ function App() {
       className: "acctcard"
     }, /*#__PURE__*/React.createElement("div", {
       className: "acctcaption"
-    }, "배송 손익"), arow("배송비 수입", closing.feeSum, `${closing.feeList.length}명 × ${won(shipFee)}원 (픽업 ${closing.pickList.length}명 · 무료배송 ${closing.freeList.length}명 제외)`), arow("롯데 운임", -closing.lotteCost, closing.lotteCount ? `${closing.lotteCount}건 × ${won(shipCost.lotte)}원` : closing.shipCostUnknown ? "운송장 미업로드 — 계산 불가" : "0건"), arow("CJ 운임", -closing.cjCost, closing.cjCount ? `${closing.cjCount}건 × ${won(shipCost.cj)}원` : closing.shipCostUnknown ? "운송장 미업로드 — 계산 불가" : "0건"), arow("배송 손익", closing.shipProfit, "", "anet")), /*#__PURE__*/React.createElement("div", {
+    }, "배송 손익"), arow("배송비 수입", closing.feeSum, `${closing.feeList.length}명 × ${won(shipFee)}원 (픽업 ${closing.pickList.length}명 · 무료배송 ${closing.freeList.length}명 제외)`), arow("롯데 운임", -closing.lotteCost, cNote(closing.lotteCount, closing.lotteBilled, shipCost.lotte)), arow("CJ 운임", -closing.cjCost, cNote(closing.cjCount, closing.cjBilled, shipCost.cj)), arow("위탁 운임", -closing.consignCost, closing.consignCount ? `${closing.consignCount}건 × ${won(shipCost.consign)}원 (택배사 무관)` : "0건"), arow("배송 손익", closing.shipProfit, sWarn, "anet")), /*#__PURE__*/React.createElement("div", {
       className: "acctcard"
     }, /*#__PURE__*/React.createElement("div", {
       className: "acctcaption"
@@ -7915,7 +7971,7 @@ function App() {
     className: "setdesc"
   }, "우리가 택배사에 내는 값 · 결산 엑셀 「배송 손익」에 쓰입니다")), /*#__PURE__*/React.createElement("span", {
     className: "setright"
-  }, (shipCost.lotte !== SHIP_COST_DEFAULT.lotte || shipCost.cj !== SHIP_COST_DEFAULT.cj) && /*#__PURE__*/React.createElement("span", {
+  }, (shipCost.lotte !== SHIP_COST_DEFAULT.lotte || shipCost.cj !== SHIP_COST_DEFAULT.cj || shipCost.consign !== SHIP_COST_DEFAULT.consign) && /*#__PURE__*/React.createElement("span", {
     className: "setchanged"
   }, "수정됨"), /*#__PURE__*/React.createElement("span", {
     className: "setarrow"
@@ -8073,20 +8129,34 @@ function App() {
     })),
     onKeyDown: endEdit
   })), /*#__PURE__*/React.createElement("div", {
+    className: "tracerow"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "tracelabel"
+  }, "위탁출고 1건당"), /*#__PURE__*/React.createElement("input", {
+    className: "in costconsign",
+    type: "number",
+    min: "0",
+    value: shipCost.consign,
+    onChange: e => setShipCost(v => ({
+      ...v,
+      consign: Number(e.target.value) || 0
+    })),
+    onKeyDown: endEdit
+  })), /*#__PURE__*/React.createElement("div", {
     className: "tracefoot",
     style: {
       marginTop: 10
     }
   }, /*#__PURE__*/React.createElement("button", {
     className: "btn sm ghost",
-    disabled: shipCost.lotte === SHIP_COST_DEFAULT.lotte && shipCost.cj === SHIP_COST_DEFAULT.cj,
+    disabled: shipCost.lotte === SHIP_COST_DEFAULT.lotte && shipCost.cj === SHIP_COST_DEFAULT.cj && shipCost.consign === SHIP_COST_DEFAULT.consign,
     onClick: () => setShipCost(SHIP_COST_DEFAULT)
   }, "기본값")), /*#__PURE__*/React.createElement("div", {
     className: "hint",
     style: {
       marginTop: 10
     }
-  }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "단가는 그날 자료에 함께 저장됩니다."), " 나중에 단가가 올라도 지난 방송 결산은 그때 단가로 계산됩니다.", /*#__PURE__*/React.createElement("br", null), "⚠ ", /*#__PURE__*/React.createElement("b", null, "운송장을 안 올린 날은 운임을 알 수 없습니다."), " 그런 날 결산 엑셀에는 「운송장 미업로드 — 배송 운임 계산 불가」로 표시됩니다.")), settingEdit === "trace" && (() => {
+  }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "단가는 그날 자료에 함께 저장됩니다."), " 나중에 단가가 올라도 지난 방송 결산은 그때 단가로 계산됩니다.", /*#__PURE__*/React.createElement("br", null), "⚠ ", /*#__PURE__*/React.createElement("b", null, "위탁출고는 택배사와 무관하게"), " 위 위탁 단가로 계산됩니다. ⑤ 업로드 탭에서 「위탁」에 체크한 건이 대상입니다. 택배사별 ", /*#__PURE__*/React.createElement("b", null, "건수"), "에는 그대로 남습니다.", /*#__PURE__*/React.createElement("br", null), "⚠ ", /*#__PURE__*/React.createElement("b", null, "운송장을 안 올린 만큼 운임이 빠집니다."), " 결산 엑셀·회계 화면에 「보낼 N명 중 운송장 M건이 없습니다」로 몇 건이 빠졌는지 표시됩니다.")), settingEdit === "trace" && (() => {
     const SAMPLE = {
       lotte: "268335665651",
       cj: "596074758406"
