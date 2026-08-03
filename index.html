@@ -4563,7 +4563,18 @@ function App() {
       showToast("❌ 업로드 실패: " + (e.message || "파일을 읽을 수 없습니다."));
     }
   };
+  /* ⚠⚠ 초기화는 «전부» 지운다 — 앱에서 가장 위험한 버튼 중 하나인데
+        2026-08-03 까지 **2단 확인이 없었다.** 한 번 누르면 그 자리에서 12줄이 사라졌다.
+        주문 초기화·킵 지우기·줄 삭제는 전부 「한 번 더」를 받는데 여기만 빠져 있었다.
+        (사장님이 실사용 중 「확인 있는지 봐달라」고 하셔서 발견) */
+  const [shipClearArm, setShipClearArm] = useState(false);
   const clearShipData = () => {
+    if (!shipClearArm) {
+      setShipClearArm(true);
+      setTimeout(() => setShipClearArm(false), 4000);
+      return;
+    }
+    setShipClearArm(false);
     takeSnap("운송장 조회 초기화 직전");
     setShipData([]);
     setShipSearch("");
@@ -4578,7 +4589,9 @@ function App() {
       });
       return next;
     });
-    showToast("⚠ 운송장 조회 목록을 전부 비웠습니다 — 되돌릴 수 없습니다");
+    /* ⚠ 스냅샷을 찍어두고 「되돌릴 수 없습니다」라고 쓰고 있었다 — 문구가 거짓말이었다.
+          하단 상태 문구는 거짓말하지 않는다 (project-map 4-3). */
+    showToast("⚠ 운송장 조회 목록을 전부 비웠습니다 — ↩ 되돌리기로 되살릴 수 있습니다");
   };
 
   /* ---------- 운송장 줄 선택 삭제 (2026-08-03 6차 · 사장님 결정 「라」) ----------
@@ -7949,9 +7962,9 @@ function App() {
   }, "누적 ", shipData.length, "명 · 송장 ", shipData.filter(d => d.tracking).length, "명")), /*#__PURE__*/React.createElement("div", {
     className: "sub"
   }, "택배사별 운송장 파일을 올리면 고객별 송장번호가 조회됩니다 (롯데·CJ 섞어서 누적 가능) · 운송장번호는 ✎ 로 직접 고칠 수 있습니다", " · ", /*#__PURE__*/React.createElement("b", null, "위탁출고"), "로 나간 건은 「위탁」에 체크해두세요", consignCount > 0 ? ` (${consignCount}건)` : "")), shipData.length > 0 && /*#__PURE__*/React.createElement("button", {
-    className: "btn ghost",
+    className: "btn " + (shipClearArm ? "danger" : "ghost"),
     onClick: clearShipData
-  }, "초기화")), /*#__PURE__*/React.createElement("div", {
+  }, shipClearArm ? `한 번 더 누르면 ${shipData.length}줄 전부 삭제` : "초기화")), /*#__PURE__*/React.createElement("div", {
     className: "uprow"
   }, /*#__PURE__*/React.createElement("button", {
     className: "btn primary",
@@ -7987,10 +8000,7 @@ function App() {
     className: "btn sm " + (trkDelArm ? "danger" : ""),
     disabled: trkPickedList.length === 0,
     onClick: deletePickedTrk
-  }, trkDelArm ? `한 번 더 누르면 ${trkPickedList.length}줄 삭제` : `선택 삭제 (${trkPickedList.length}줄)`), trkEditMode && /*#__PURE__*/React.createElement("button", {
-    className: "btn ghost",
-    onClick: clearShipData
-  }, "초기화 (전부)")), trkEditMode && /*#__PURE__*/React.createElement("div", {
+  }, trkDelArm ? `한 번 더 누르면 ${trkPickedList.length}줄 삭제` : `선택 삭제 (${trkPickedList.length}줄)`)), trkEditMode && /*#__PURE__*/React.createElement("div", {
     className: "hint"
   }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "출고완료된 줄은 지울 수 없습니다"), " — 실제로 나간 기록입니다. 꼭 지우셔야 하면 ④ 출고에서 ", /*#__PURE__*/React.createElement("b", null, "잠금해제"), "를 먼저 하세요. 번호가 잘못된 것은 지우지 말고 ", /*#__PURE__*/React.createElement("b", null, "✎"), " 로 고치시면 됩니다."), shipData.length > 0 && /*#__PURE__*/React.createElement("input", {
     className: "in search",
