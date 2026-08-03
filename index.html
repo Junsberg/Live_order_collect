@@ -3173,8 +3173,23 @@ function App() {
       consignCount = 0;
     let lotteBilled = 0,
       cjBilled = 0; // 택배사 단가로 계산할 건수 (위탁 제외)
+    /* ⚠⚠ 이 날짜에 주문이 없는 사람의 운송장은 운임에서 뺀다 (2026-08-03 6차 · 사장님 결정 「다」).
+          업로드가 날짜를 가리지 않아 **다른 날짜 방송분이 섞여 들어온 적이 있다**
+          (07-27 을 열어둔 채 07-31 롯데 파일을 올려 3건이 붙었고, 운임이 8,400원 과다였다).
+          섞인 건까지 세면 그 날 배송 손익이 조용히 틀린다.
+       ⚠ 표에서는 지우지 않는다. 사람이 보고 판단해야 한다 (업로드 탭에 「주문 삭제됨」으로 뜬다). */
+    const dateNicks = new Set(orders.filter(o => !o.canceled).map(o => o.nick));
+    /* ⚠⚠ **같은 운송장 번호는 한 번만 센다** (2026-08-03 6차 · 실사고).
+          1차를 출고완료 처리한 뒤 같은 파일을 다시 올리면 `curSeq` 가 2를 내주어
+          «같은 번호가 2차로 또» 붙는다. 택배는 한 건만 나갔는데 운임을 두 번 낸 것으로 계산된다.
+          (실서버 2026-07-31: 롯데 9건으로 잡혔지만 실제 발송은 5건 — 11,200원 과다) */
+    const seenTrk = new Set();
     shipData.forEach(d => {
-      if (!normTrk(d.tracking)) return;
+      const trk = normTrk(d.tracking);
+      if (!trk) return;
+      if (!dateNicks.has(d.nick)) return;
+      if (seenTrk.has(trk)) return;
+      seenTrk.add(trk);
       const c = String(d.carrier || "");
       const isConsign = !!d.consign;
       if (isConsign) consignCount++;
@@ -4224,10 +4239,32 @@ function App() {
       apply = [],
       similar = [],
       renotify = [];
+    /* ⚠⚠ 새 «차수 줄»은 아무에게나 만들지 않는다 (2026-08-03 6차 · 실사고).
+          지금까지는 파일에 닉네임만 있으면 무조건 새 줄을 만들었다. 그래서
+          **다른 날짜 방송분이 섞인 파일을 올렸을 때** 그 사람들이 이 날짜에 2차로 붙었다.
+          (07-27 을 열어둔 채 07-31 롯데 파일 → 사남매맘·한정숙·종우 2차 줄 3건)
+          ⚠ 그 사람들도 07-27 에 «주문은 있었다» — 전부 출고완료였을 뿐이다.
+             그래서 「이 날짜에 주문이 있는가」로는 못 막는다. **「아직 안 보낸 주문이 있는가」**로 본다.
+          ⚠ 「출고 탭 목록(입금 완료)」으로 좁히지는 않는다 (사장님 결정) —
+             미입금인데 먼저 보내드리는 건이 막힌다.
+       ⚠⚠ 이미 붙어 있는 번호로는 새 줄을 만들지 않는다.
+          1차를 마감한 뒤 같은 파일을 다시 올리면 curSeq 가 2를 내주어
+          «같은 번호가 2차로 또» 붙는다 (07-31 에서 4건 발생 · 운임 11,200원 과다). */
+    const rejectNoOpen = [],
+      rejectDupTrk = [];
+    const trkOwned = new Set(shipData.map(x => normTrk(x.tracking)).filter(Boolean));
     const ciKey = x => nickKey(x).toLowerCase();
     data.forEach(d => {
       const p = byNick[d.nick];
       if (!p) {
+        if (!activeNickSet.has(d.nick)) {
+          if (!rejectNoOpen.includes(d.nick)) rejectNoOpen.push(d.nick);
+          return;
+        }
+        if (d.tracking && trkOwned.has(normTrk(d.tracking))) {
+          if (!rejectDupTrk.includes(d.nick)) rejectDupTrk.push(d.nick);
+          return;
+        }
         added++;
         // 대소문자만 다른 주문자가 이미 있으면 같은 사람일 수 있다. 합치지는 않고 알린다.
         const alt = nickList.find(x => x !== d.nick && ciKey(x) === ciKey(d.nick));
@@ -4240,6 +4277,7 @@ function App() {
           seq: curSeq(d.nick),
           manual: false
         });
+        if (d.tracking) trkOwned.add(normTrk(d.tracking));
         return;
       }
       if (!d.tracking) {
@@ -4298,6 +4336,14 @@ function App() {
       return next;
     });
     showToast(`✓ ${label} 반영 · 추가 ${added}명` + (changed ? ` · 변경 ${changed}명` : "") + ` · 동일 ${same}명`);
+    /* ⚠ 거부한 줄은 조용히 버리지 않는다 — 「올렸는데 왜 없지?」가 제일 위험하다.
+          어느 날짜에 올려야 하는지까지 알려준다. */
+    if (rejectNoOpen.length) {
+      showToast(`⚠ 아직 안 보낸 주문이 없어 넣지 않았습니다 ${rejectNoOpen.length}명: ` + rejectNoOpen.slice(0, 3).join(", ") + (rejectNoOpen.length > 3 ? " 외" : "") + ` — 다른 날짜 방송분이면 그 날짜로 옮겨 다시 올려주세요 (지금 ${bdate})`);
+    }
+    if (rejectDupTrk.length) {
+      showToast(`⚠ 이미 붙어 있는 운송장번호라 새 줄을 만들지 않았습니다 ${rejectDupTrk.length}명: ` + rejectDupTrk.slice(0, 3).join(", ") + (rejectDupTrk.length > 3 ? " 외" : ""));
+    }
     if (renotify.length) {
       showToast(`⚠ 안내 보낸 뒤 운송장이 바뀐 사람 ${renotify.length}명 — 다시 안내해주세요: ` + renotify.slice(0, 3).map(x => x.nick).join(", ") + (renotify.length > 3 ? " 외" : ""));
     }
@@ -4533,6 +4579,62 @@ function App() {
       return next;
     });
     showToast("⚠ 운송장 조회 목록을 전부 비웠습니다 — 되돌릴 수 없습니다");
+  };
+
+  /* ---------- 운송장 줄 선택 삭제 (2026-08-03 6차 · 사장님 결정 「라」) ----------
+     ⚠ 지금까지는 「초기화」(전부 삭제) 말고는 잘못 들어온 줄을 지울 방법이 없었다.
+        그래서 실제로 되돌리기까지 가야 했다 (07-27 사고).
+     ⚠⚠ **마감된 줄은 못 지운다.** 실제로 물건이 나간 기록이라 삭제 대상이 아니다 (사장님 결정).
+        꼭 지워야 하면 「잠금해제」를 먼저 한다. 번호가 틀린 것은 ✎ 로 고친다.
+     ⚠ 사장·매니저 공통 기능이다 (권한 구분 없음).
+     ⚠ 지울 때 `customers.tracking` 까지 정리한다 — 안 지우면 출고 시트가 그 값을 폴백으로
+        읽어 **유령 송장으로 되살아난다** (안전장치 1~3). */
+  const [trkEditMode, setTrkEditMode] = useState(false);
+  const [trkPicked, setTrkPicked] = useState({}); // "닉#차수" → true
+  const [trkDelArm, setTrkDelArm] = useState(false);
+  const trkKey = d => `${d.nick}#${seqOf(d)}`;
+  const isClosedRow = d => orders.some(o => o.nick === d.nick && o.done && (Number(o.doneSeq) || 1) === seqOf(d));
+  const trkPickedList = useMemo(() => shipData.filter(d => trkPicked[trkKey(d)] && !isClosedRow(d)), [shipData, trkPicked, orders]);
+  const toggleTrkPick = d => setTrkPicked(s => ({
+    ...s,
+    [trkKey(d)]: !s[trkKey(d)]
+  }));
+  const deletePickedTrk = () => {
+    const gone = trkPickedList;
+    if (!gone.length) {
+      showToast("지울 줄을 먼저 골라주세요.");
+      return;
+    }
+    if (!trkDelArm) {
+      setTrkDelArm(true);
+      setTimeout(() => setTrkDelArm(false), 4000);
+      return;
+    }
+    setTrkDelArm(false);
+    // 화면에서 사라지는 작업이므로 스냅샷을 찍는다 (설계안 4장)
+    takeSnap(`운송장 줄 삭제 직전 (${gone.slice(0, 3).map(d => `${d.nick}${seqOf(d) > 1 ? ` ${seqOf(d)}차` : ""}`).join(", ")}${gone.length > 3 ? " 외" : ""})`);
+    const goneKeys = new Set(gone.map(trkKey));
+    const rest = shipData.filter(d => !goneKeys.has(trkKey(d)));
+    setShipData(rest);
+    /* ⚠ 고객정보에 남은 운송장을 정리한다.
+          그 사람의 «지금 차수» 줄이 남아 있으면 그 번호로, 없으면 비운다. */
+    const nicks = [...new Set(gone.map(d => d.nick))];
+    setCustomers(prev => {
+      const next = {
+        ...prev
+      };
+      nicks.forEach(nk => {
+        const keepRow = rest.find(d => d.nick === nk && seqOf(d) === curSeq(nk));
+        const val = keepRow ? keepRow.tracking || "" : "";
+        if (next[nk] && normTrk(next[nk].tracking) !== normTrk(val)) next[nk] = {
+          ...next[nk],
+          tracking: val
+        };
+      });
+      return next;
+    });
+    setTrkPicked({});
+    showToast(`✓ 운송장 ${gone.length}줄을 지웠습니다 — 되돌리기로 되살릴 수 있습니다`);
   };
 
   /* ---------- 상품목록 파일 (방송 장소별 세팅) ---------- */
@@ -4894,13 +4996,14 @@ function App() {
     if (!keepsLoaded.current || !loaded) return;
     const t = setTimeout(() => {
       setKeeps(prev => {
-        const today = new Set(settleNickList);
-        // 오늘 화면에 있는 사람 중 킵이 아닌 사람은 목록에서 뺀다 (= 킵 해제)
-        const keptOrders = (prev.orders || []).filter(o => !today.has(o.nick) || isKeep(o.nick));
-        const keptCusts = {};
-        Object.entries(prev.customers || {}).forEach(([nk, c]) => {
-          if (!today.has(nk) || isKeep(nk)) keptCusts[nk] = c;
-        });
+        /* ⚠⚠ 「킵을 해제했다」를 **닉네임**으로 판정하면 안 된다 (2026-08-03 6차).
+              그 사람이 오늘 **새로 주문만 해도** 목록에 들어오는데, 오늘 화면에서는 킵이 아니므로
+              해제로 오판해 **아무도 안 눌렀는데 지난 킵이 지워진다.** 받은 돈(keepPaid)까지 사라진다.
+              (실제 사고: 2026-07-27 「사남매맘」 킵이 07-31 새 주문 때문에 사라짐)
+           ⭐ 해제 판정은 **그 킵 주문(id)이 이 날짜 화면에 올라와 있는가**로 본다.
+              화면에 없는 킵은 «아직 안 불러온 것»이지 «해제한 것»이 아니다. */
+        const onScreen = new Set(orders.map(o => o.id));
+        const keptOrders = (prev.orders || []).filter(o => !onScreen.has(o.id) || isKeep(o.nick));
         // 오늘 킵으로 체크된 것을 넣는다 (같은 주문 id 는 덮어씀)
         const byId = {};
         keptOrders.forEach(o => {
@@ -4909,20 +5012,73 @@ function App() {
         keepOrders.forEach(o => {
           byId[o.id] = o;
         });
+        const nextOrders = Object.values(byId);
+        const left = new Set(nextOrders.map(o => o.nick));
+        const keptCusts = {};
+        Object.entries(prev.customers || {}).forEach(([nk, c]) => {
+          if (left.has(nk)) keptCusts[nk] = c;
+        });
         keepNicks.forEach(nk => {
           keptCusts[nk] = {
             ...(customers[nk] || {})
           };
         });
         const next = {
-          orders: Object.values(byId),
+          orders: nextOrders,
           customers: keptCusts
         };
         return JSON.stringify(next) === JSON.stringify(prev) ? prev : next;
       });
     }, 800);
     return () => clearTimeout(t);
-  }, [keepOrders, keepNicks, customers, settleNickList, loaded]);
+  }, [keepOrders, keepNicks, customers, orders, loaded]);
+
+  /* ⭐ 지난 킵 자동 이월 (2026-08-03 6차 · 사장님 결정 A안 + ㉮)
+     그 손님이 오늘 새로 주문하면 지난 킵도 이 날짜로 따라온다 — 합쳐서 한 번에 보내기 위해.
+     ⚠ **킵 상태 그대로** 올린다. 바로 매출에 합류시키면 이미 받아둔 돈(keepPaid)이
+        오늘 매출로 두 번 잡힐 수 있다. 보내실 때 「킵」을 눌러 해제하면 그때 합류한다.
+     ⚠ **오늘 날짜일 때만** 한다. 지난 날짜를 열어본 것만으로 그 날짜에 주문이 꽂히면
+        지난 방송 매출·결산이 조용히 틀어진다 (「킵 불러오기」 버튼이 날짜를 2단 확인받는 이유).
+     ⚠ 킵은 손님 단위 플래그다 — 따라온 킵이 킵이면 그 손님의 오늘 주문도 함께 킵이 되고,
+        해제하면 한꺼번에 합류한다 (2026-08-03 사장님 확인). */
+  useEffect(() => {
+    if (!keepsLoaded.current || !loaded) return;
+    if (bdate !== today) return;
+    const t = setTimeout(() => {
+      const have = new Set(orders.map(o => o.id));
+      const mine = new Set(settleNickList);
+      const add = (keeps.orders || []).filter(o => mine.has(o.nick) && !have.has(o.id));
+      if (!add.length) return;
+      const nicks = [...new Set(add.map(o => o.nick))];
+      setOrders(prev => {
+        const seen = new Set(prev.map(o => o.id));
+        return [...prev, ...add.filter(o => !seen.has(o.id))];
+      });
+      setCustomers(prev => {
+        const next = {
+          ...prev
+        };
+        nicks.forEach(nk => {
+          const src = (keeps.customers || {})[nk] || {};
+          const cur = next[nk] || {};
+          /* ⚠ 오늘 값이 우선이되, **돈이 걸린 칸은 지난 킵 값을 잃지 않는다.** */
+          next[nk] = {
+            ...EMPTY_CUST,
+            ...src,
+            ...cur,
+            keep: true,
+            keepPaid: Number(cur.keepPaid) || Number(src.keepPaid) || 0,
+            keepPaidLast: Number(cur.keepPaidLast) || Number(src.keepPaidLast) || 0,
+            shipPaid: !!(cur.shipPaid || src.shipPaid)
+          };
+        });
+        return next;
+      });
+      const amt = add.reduce((t2, o) => t2 + o.price * o.qty, 0);
+      showToast(`🔖 「${nicks.join(", ")}」 지난 킵 ${add.length}건 (${won(amt)}원)을 함께 올렸습니다 — 보내실 때 「킵」을 해제하세요`);
+    }, 900);
+    return () => clearTimeout(t);
+  }, [keeps, settleNickList, orders, bdate, today, loaded]);
   useEffect(() => {
     if (!keepsLoaded.current) return;
     const t = setTimeout(async () => {
@@ -7818,7 +7974,25 @@ function App() {
     disabled: cjShipCount === 0,
     onClick: () => exportTrackXlsx("CJ"),
     title: `운송장_CJ_사자창고_${dateCode}.xlsx`
-  }, "⬇ CJ 업로드 엑셀 다운", cjShipCount > 0 ? ` (${cjShipCount}명)` : "")), shipData.length > 0 && /*#__PURE__*/React.createElement("input", {
+  }, "⬇ CJ 업로드 엑셀 다운", cjShipCount > 0 ? ` (${cjShipCount}명)` : "")), shipData.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "uprow trkeditrow"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost" + (trkEditMode ? " on" : ""),
+    onClick: () => {
+      setTrkEditMode(!trkEditMode);
+      setTrkPicked({});
+      setTrkDelArm(false);
+    }
+  }, trkEditMode ? "편집 끝내기" : "✎ 편집 (줄 지우기)"), trkEditMode && /*#__PURE__*/React.createElement("button", {
+    className: "btn sm " + (trkDelArm ? "danger" : ""),
+    disabled: trkPickedList.length === 0,
+    onClick: deletePickedTrk
+  }, trkDelArm ? `한 번 더 누르면 ${trkPickedList.length}줄 삭제` : `선택 삭제 (${trkPickedList.length}줄)`), trkEditMode && /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost",
+    onClick: clearShipData
+  }, "초기화 (전부)")), trkEditMode && /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "출고완료된 줄은 지울 수 없습니다"), " — 실제로 나간 기록입니다. 꼭 지우셔야 하면 ④ 출고에서 ", /*#__PURE__*/React.createElement("b", null, "잠금해제"), "를 먼저 하세요. 번호가 잘못된 것은 지우지 말고 ", /*#__PURE__*/React.createElement("b", null, "✎"), " 로 고치시면 됩니다."), shipData.length > 0 && /*#__PURE__*/React.createElement("input", {
     className: "in search",
     style: {
       marginTop: 12
@@ -7877,7 +8051,9 @@ function App() {
       className: "tblwrap"
     }, /*#__PURE__*/React.createElement("table", {
       className: "tbl"
-    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "닉네임"), /*#__PURE__*/React.createElement("th", null, "이름"), /*#__PURE__*/React.createElement("th", null, "연락처"), /*#__PURE__*/React.createElement("th", null, "주소"), /*#__PURE__*/React.createElement("th", null, "택배사"), /*#__PURE__*/React.createElement("th", {
+    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, trkEditMode && /*#__PURE__*/React.createElement("th", {
+      className: "trkdelcol"
+    }), /*#__PURE__*/React.createElement("th", null, "닉네임"), /*#__PURE__*/React.createElement("th", null, "이름"), /*#__PURE__*/React.createElement("th", null, "연락처"), /*#__PURE__*/React.createElement("th", null, "주소"), /*#__PURE__*/React.createElement("th", null, "택배사"), /*#__PURE__*/React.createElement("th", {
       className: "consigncol",
       title: "위탁출고로 나간 건에 체크하세요"
     }, "위탁"), /*#__PURE__*/React.createElement("th", null, "운송장번호"), /*#__PURE__*/React.createElement("th", null, "안내"))), /*#__PURE__*/React.createElement("tbody", null, filtered.map((d, i) => {
@@ -7888,7 +8064,15 @@ function App() {
       return /*#__PURE__*/React.createElement("tr", {
         key: i,
         className: orphan ? "roworphan" : d.tracking ? "" : "rowwarn"
-      }, /*#__PURE__*/React.createElement("td", {
+      }, trkEditMode && /*#__PURE__*/React.createElement("td", {
+        className: "trkdelbox"
+      }, /*#__PURE__*/React.createElement("input", {
+        type: "checkbox",
+        disabled: isDoneRow,
+        title: isDoneRow ? "출고완료된 줄은 지울 수 없습니다 — 잠금해제를 먼저 하세요" : "지울 줄 고르기",
+        checked: !isDoneRow && !!trkPicked[`${d.nick}#${dq}`],
+        onChange: () => toggleTrkPick(d)
+      })), /*#__PURE__*/React.createElement("td", {
         className: "whname"
       }, d.nick, dq > 1 && /*#__PURE__*/React.createElement("span", {
         className: "seqbadge"
@@ -9060,6 +9244,13 @@ const CSS = `
 .whtbl input[type=checkbox] { width: 20px; height: 20px; cursor: pointer; accent-color: #0f766e; }
 .whtbl .whname { font-weight: 600; }
 .whtbl .whtotal { font-weight: 800; font-size: 15px; }
+/* 운송장 줄 삭제 (2026-08-03) */
+.trkdelcol { width: 34px; }
+.trkdelbox { width: 34px; text-align: center; }
+.trkdelbox input { width: 18px; height: 18px; accent-color: #b91c1c; cursor: pointer; }
+.trkdelbox input:disabled { cursor: not-allowed; opacity: .35; }
+.trkeditrow { margin-top: 8px; }
+.trkeditrow .btn.on { background: #16191f; color: #fff; border-color: #16191f; }
 /* 픽업(방문수령) 칸 — 입금/미입금과 겹치지 않는 별도 칸이라 색을 따로 준다 (2026-08-03) */
 .whtbl .pick { color: #7c3aed; font-weight: 700; }
 .whtbl tr.picked { background: #f4fbf8; }
