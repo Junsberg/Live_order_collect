@@ -7977,13 +7977,13 @@ function App() {
   }, "⬇ CJ 업로드 엑셀 다운", cjShipCount > 0 ? ` (${cjShipCount}명)` : "")), shipData.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "uprow trkeditrow"
   }, /*#__PURE__*/React.createElement("button", {
-    className: "btn ghost" + (trkEditMode ? " on" : ""),
+    className: "btn trkeditbtn" + (trkEditMode ? " on" : ""),
     onClick: () => {
       setTrkEditMode(!trkEditMode);
       setTrkPicked({});
       setTrkDelArm(false);
     }
-  }, trkEditMode ? "편집 끝내기" : "✎ 편집 (줄 지우기)"), trkEditMode && /*#__PURE__*/React.createElement("button", {
+  }, trkEditMode ? "✕ 편집 끝내기" : "✎ 편집 (삭제)"), trkEditMode && /*#__PURE__*/React.createElement("button", {
     className: "btn sm " + (trkDelArm ? "danger" : ""),
     disabled: trkPickedList.length === 0,
     onClick: deletePickedTrk
@@ -9250,7 +9250,14 @@ const CSS = `
 .trkdelbox input { width: 18px; height: 18px; accent-color: #b91c1c; cursor: pointer; }
 .trkdelbox input:disabled { cursor: not-allowed; opacity: .35; }
 .trkeditrow { margin-top: 8px; }
-.trkeditrow .btn.on { background: #16191f; color: #fff; border-color: #16191f; }
+/* ⚠ ghost 로 두었더니 사장님이 버튼인 줄 모르고 못 찾으셨다 (2026-08-03 실사용).
+      테두리·배경을 줘서 «누를 수 있는 것»으로 보이게 한다. */
+.trkeditbtn {
+  background: #fff7ed; border: 2px solid #f59e0b; color: #92400e; font-weight: 700;
+}
+.trkeditbtn:hover { background: #ffedd5; }
+.trkeditbtn.on { background: #16191f; border-color: #16191f; color: #fff; }
+.trkeditrow .btn.danger { border-width: 2px; }
 /* 픽업(방문수령) 칸 — 입금/미입금과 겹치지 않는 별도 칸이라 색을 따로 준다 (2026-08-03) */
 .whtbl .pick { color: #7c3aed; font-weight: 700; }
 .whtbl tr.picked { background: #f4fbf8; }
