@@ -878,6 +878,18 @@ function App() {
       return next;
     });
   };
+  /* 최근 목록에서 한 항목만 뺀다 (2026-08-04 사장님 지적 — 오타가 곧바로 버튼이 된다).
+     ⚠ «목록에서만» 뺀다. 지금 쓰는 장소와 서버의 place 는 건드리지 않는다.
+        여기서 setPlace 까지 하면 「버튼 정리하려다 방송 장소가 지워지는」 사고가 난다. */
+  const forgetPlace = v => {
+    setPlaceRecent(prev => {
+      const next = (prev || []).filter(x => x !== v);
+      try {
+        localStorage.setItem("saja:places", JSON.stringify(next));
+      } catch (e) {}
+      return next;
+    });
+  };
   useEffect(() => {
     try {
       const raw = localStorage.getItem("saja:places");
@@ -6842,12 +6854,19 @@ function App() {
     onChange: e => setPlace(e.target.value),
     onBlur: e => rememberPlace(e.target.value),
     title: "어디서 한 방송인지 적어 두면 나중에 장소별로 매출을 볼 수 있습니다"
-  }), placeRecent.filter(x => x !== place).slice(0, 3).map(x => /*#__PURE__*/React.createElement("button", {
+  }), placeRecent.filter(x => x !== place).slice(0, 3).map(x => /*#__PURE__*/React.createElement("span", {
     key: x,
+    className: "placechipwrap"
+  }, /*#__PURE__*/React.createElement("button", {
     className: "btn placechip",
     onClick: () => setPlace(x),
     title: `장소를 「${x}」로 바꿉니다`
-  }, x))), /*#__PURE__*/React.createElement("button", {
+  }, x), /*#__PURE__*/React.createElement("button", {
+    className: "btn placechipx",
+    "data-place": x,
+    onClick: () => forgetPlace(x),
+    title: `「${x}」를 최근 목록에서 지웁니다 (방송 장소는 안 바뀝니다)`
+  }, "×")))), /*#__PURE__*/React.createElement("button", {
     className: "btn xlbtn",
     onClick: exportXlsx,
     disabled: orders.length === 0 && products.length === 0
@@ -9360,7 +9379,12 @@ const CSS = `
 /* 📍 방송 장소 (2026-08-04 7차) */
 .placewrap { display: inline-flex; align-items: center; gap: 4px; }
 .in.placein { width: 116px; padding: 8px 8px; font-size: 13px; }
-.btn.placechip { width: auto; padding: 5px 8px; font-size: 12px; background: #eef1f5; color: #3a4250; border: 1px solid #dfe3e9; }
+.placechipwrap { display: inline-flex; align-items: stretch; }
+.btn.placechip { width: auto; padding: 5px 6px 5px 8px; font-size: 12px; background: #eef1f5; color: #3a4250;
+  border: 1px solid #dfe3e9; border-right: 0; border-radius: 6px 0 0 6px; }
+.btn.placechipx { width: auto; padding: 5px 6px; font-size: 12px; line-height: 1; background: #eef1f5; color: #8a919c;
+  border: 1px solid #dfe3e9; border-radius: 0 6px 6px 0; }
+.btn.placechipx:hover { background: #f6d9d6; color: #b4342a; }
 /* 원가 사전 서버 상태 줄 (2026-08-04 7차) */
 .costsrv { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px;
   padding: 8px 10px; border-radius: 8px; background: #f6f8fa; font-size: 12px; }
