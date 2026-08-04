@@ -2144,6 +2144,14 @@ function App() {
   // 킵 주문건 (화면·목록용)
   const keepOrders = useMemo(() => orders.filter(o => !o.canceled && !o.done && customers[o.nick] && customers[o.nick].keep), [orders, customers]);
   const keepNicks = useMemo(() => [...new Set(keepOrders.map(o => o.nick))], [keepOrders]);
+  /* ⚠ 「결산할 것이 있는가」 판정은 여기 한 곳만 쓴다 (money-rules §1 · 2026-08-04 7차).
+        전에는 결산·마감 버튼이 `activeOrders.length === 0` 만 봤다. activeOrders 는
+        취소·출고완료·킵을 «전부» 뺀 「지금 보낼 것」이라, 아래 두 날이 통째로 막혔다.
+          · 전원 킵      → 받은 돈(keepPaid)을 볼 수단이 없었다
+          · 전원 출고완료 → 요약 카드까지 안 그려져 **결산 버튼이 사라졌다.**
+                           그런데 closingOrders(= active + done)에는 하루치가 다 들어 있다
+        ⚠ 금액 «계산 규칙»은 안 바뀐다 → CALC_VER 는 올리지 않는다 (money-rules §4). */
+  const hasClosable = useMemo(() => activeOrders.length + doneOrders.length + keepOrders.length > 0, [activeOrders, doneOrders, keepOrders]);
   /* ⚠ 재고 차감·판매량 집계 기준.
         이미 보낸 차수(출고완료)도 실제로 판 것이므로 재고에서 빠져야 한다.
         빼먹으면 오전에 판 만큼 재고가 안 줄어 「아직 남았다」고 착각하고 초과 판매한다. */
@@ -3372,7 +3380,9 @@ function App() {
       shipCostUnknown
     } = closing;
     // ⚠ 상품별 집계는 closing.prodList 를 그대로 쓴다 — 여기서 다시 세지 않는다 (money-rules §1)
-    if (closingOrders.length === 0) {
+    /* ⚠ 킵만 있는 날도 뽑을 수 있어야 한다 — 받은 돈(keepPaid)이 「킵 보류」 절에 들어간다.
+          여기서 막으면 버튼만 열어도 토스트만 뜨고 끝난다 (2026-08-04 7차). */
+    if (closingOrders.length === 0 && keepOrders.length === 0) {
       showToast("결산할 주문이 없습니다.");
       return;
     }
@@ -4802,12 +4812,14 @@ function App() {
     const nk = arr => arr.slice(0, 4).join(", ") + (arr.length > 4 ? ` 외 ${arr.length - 4}명` : "");
 
     // 1) 안내 발송
+    /* ⚠ 보낼 사람이 0명인 날(전원 출고완료)에는 「0 / 0 ❌」이 아니라 «대상 없음»이다 (2026-08-04 7차 사장님 결정).
+          빠뜨린 것이 없는데 빨간불이 뜨면 마감 점검을 못 믿게 된다. */
     const notified = nickList.filter(x => cust(x).notified);
     push({
       key: "notify",
-      ok: nickList.length > 0 && notified.length === nickList.length,
+      ok: nickList.length === 0 || notified.length === nickList.length,
       label: "안내 발송",
-      detail: `${notified.length} / ${nickList.length}`,
+      detail: nickList.length === 0 ? "대상 없음" : `${notified.length} / ${nickList.length}`,
       names: nickList.filter(x => !cust(x).notified),
       tab: "settle"
     });
@@ -5438,6 +5450,13 @@ function App() {
       };
     }
   };
+
+  /* ⚠ 「서버가 아는 원가」를 state 로도 들고 있는다 (2026-08-04 7차).
+        ref 만으로는 화면이 다시 안 그려져 «안 올라간 원가»를 셀 수 없다. */
+  const [costSrv, setCostSrv] = useState({});
+  const [costSrvReady, setCostSrvReady] = useState(false);
+  const [costPushing, setCostPushing] = useState(false);
+  const [costPushMsg, setCostPushMsg] = useState("");
   const adoptServerCosts = r => {
     costKnownAtRef.current = r.at || costKnownAtRef.current;
     const atMap = {};
@@ -5450,6 +5469,8 @@ function App() {
       if (Object.keys(one).length) next[k] = one;
     });
     costAtRef.current = atMap;
+    setCostSrv(next);
+    setCostSrvReady(true);
     /* ⚠ 로컬에만 있는 항목은 지우지 않고 합친다. 서버가 아직 못 받은 값일 수 있다.
           (첫 연동 때 사장님 PC 의 사전이 화면에서 사라지면 안 된다) */
     setCostBook(prev => {
@@ -5461,6 +5482,81 @@ function App() {
       });
       return JSON.stringify(merged) === JSON.stringify(prev) ? prev : merged;
     });
+  };
+
+  /* ⚠ 올릴 목록을 만드는 규칙은 여기 한 곳만 쓴다 (2026-08-04 7차).
+        「원가가 바뀔 때 도는 효과」와 「지금 올리기 버튼」이 각자 만들면 조용히 어긋난다. */
+  const buildCostPayload = () => {
+    const payload = {};
+    Object.entries(costBookRef.current || {}).forEach(([k, v]) => {
+      const cost = Number(v && v.cost) || 0,
+        fee = Number(v && v.feeRate) || 0;
+      if (!(cost > 0) && !(fee > 0)) return;
+      // ⚠ at 이 없으면 서버는 「본 적 없는 항목」으로 보고 이미 있으면 손대지 않는다
+      payload[k] = {
+        cost,
+        feeRate: fee,
+        at: costAtRef.current[k] || null
+      };
+    });
+    return payload;
+  };
+
+  /* 아직 서버에 안 올라간 원가 — 화면에 숫자로 보여준다.
+     ⚠ 모르면 손댈 수 없다. 5차부터 「서버가 잠깐 끊긴 사이 넣은 원가가 영영 안 올라가는」
+        상태가 있었는데, 화면에 아무 표시가 없어 사장님이 알 방법이 없었다. */
+  const costPending = useMemo(() => {
+    const out = [];
+    Object.entries(costBook || {}).forEach(([k, v]) => {
+      const cost = Number(v && v.cost) || 0,
+        fee = Number(v && v.feeRate) || 0;
+      if (!(cost > 0) && !(fee > 0)) return;
+      const t = costSrv[k];
+      if (!t || (Number(t.cost) || 0) !== cost || (Number(t.feeRate) || 0) !== fee) out.push(k);
+    });
+    return out;
+  }, [costBook, costSrv]);
+
+  /* 「지금 올리기」 — 서버가 돌아온 뒤 사장님이 직접 밀어 넣는 수단.
+     ⚠ 올라가지 않았는데 「올렸다」고 말하지 않는다. 틀린 안내는 없느니만 못하다 (안전장치 71). */
+  const pushCostsNow = async () => {
+    if (costPushing) return;
+    setCostPushing(true);
+    setCostPushMsg("");
+    try {
+      if (!serverOn()) {
+        setCostPushMsg("서버에 연결돼 있지 않습니다 — 인터넷을 확인해 주세요");
+        return;
+      }
+      if (!costSrvOk.current || costKnownAtRef.current == null) {
+        const r0 = await costsRpc("load_costs");
+        if (!r0.ok) {
+          setCostPushMsg("서버에서 원가 사전을 읽지 못했습니다 — 잠시 뒤 다시 눌러주세요");
+          return;
+        }
+        costSrvOk.current = true;
+        adoptServerCosts(r0);
+      }
+      const payload = buildCostPayload();
+      if (!Object.keys(payload).length) {
+        setCostPushMsg("");
+        return;
+      }
+      const r = await costsRpc("sync_costs", {
+        p_costs: payload,
+        p_known_at: costKnownAtRef.current
+      });
+      if (!r.ok) {
+        setCostPushMsg("올리지 못했습니다 — 잠시 뒤 다시 눌러주세요");
+        return;
+      }
+      adoptServerCosts(r);
+      if ((r.skipped || []).length) {
+        setCostPushMsg(`${r.skipped.length}개는 다른 사람이 먼저 바꿔 두어 덮지 않았습니다`);
+      }
+    } finally {
+      setCostPushing(false);
+    }
   };
 
   // 서버에서 원가 사전을 읽는다 (로컬을 먼저 읽은 뒤)
@@ -5483,18 +5579,7 @@ function App() {
     if (!costLoaded.current) return;
     const t = setTimeout(async () => {
       if (!serverOn() || !costSrvOk.current || costKnownAtRef.current == null) return;
-      const payload = {};
-      Object.entries(costBookRef.current || {}).forEach(([k, v]) => {
-        const cost = Number(v && v.cost) || 0,
-          fee = Number(v && v.feeRate) || 0;
-        if (!(cost > 0) && !(fee > 0)) return;
-        // ⚠ at 이 없으면 서버는 「본 적 없는 항목」으로 보고 이미 있으면 손대지 않는다
-        payload[k] = {
-          cost,
-          feeRate: fee,
-          at: costAtRef.current[k] || null
-        };
-      });
+      const payload = buildCostPayload();
       if (!Object.keys(payload).length) return;
       const r = await costsRpc("sync_costs", {
         p_costs: payload,
@@ -6592,7 +6677,21 @@ function App() {
       style: {
         marginTop: 8
       }
-    }, "공급가(사입)와 수수료(위탁)는 ", /*#__PURE__*/React.createElement("b", null, "둘 중 하나만"), " 씁니다. 하나를 넣으면 다른 쪽은 비워집니다.", /*#__PURE__*/React.createElement("br", null), "입력한 값은 ", /*#__PURE__*/React.createElement("b", null, "원가 사전"), "에 남아 다음 방송에 같은 상품·가격이 나오면 자동으로 채워집니다.")), /*#__PURE__*/React.createElement("div", {
+    }, "공급가(사입)와 수수료(위탁)는 ", /*#__PURE__*/React.createElement("b", null, "둘 중 하나만"), " 씁니다. 하나를 넣으면 다른 쪽은 비워집니다.", /*#__PURE__*/React.createElement("br", null), "입력한 값은 ", /*#__PURE__*/React.createElement("b", null, "원가 사전"), "에 남아 다음 방송에 같은 상품·가격이 나오면 자동으로 채워집니다."), /*#__PURE__*/React.createElement("div", {
+      className: "costsrv" + (costPending.length ? " pend" : "")
+    }, costPending.length > 0 ? /*#__PURE__*/React.createElement("span", {
+      className: "csmsg"
+    }, "⚠ 안 올라간 원가 ", costPending.length, "개 — 매니저 화면에는 아직 안 보입니다") : costSrvReady ? /*#__PURE__*/React.createElement("span", {
+      className: "csmsg ok"
+    }, "☁ 원가 사전 서버에 저장됨") : /*#__PURE__*/React.createElement("span", {
+      className: "csmsg"
+    }, "⚠ 서버에서 원가 사전을 아직 못 읽었습니다"), (costPending.length > 0 || !costSrvReady) && /*#__PURE__*/React.createElement("button", {
+      className: "btn sm cspush",
+      onClick: pushCostsNow,
+      disabled: costPushing
+    }, costPushing ? "올리는 중…" : "☁ 지금 올리기"), costPushMsg && /*#__PURE__*/React.createElement("span", {
+      className: "cserr"
+    }, costPushMsg))), /*#__PURE__*/React.createElement("div", {
       className: "acctcard"
     }, /*#__PURE__*/React.createElement("div", {
       className: "acctcaption"
@@ -6703,7 +6802,7 @@ function App() {
   }, "📊 회계"), /*#__PURE__*/React.createElement("button", {
     className: "btn closebtn" + (closeLeft === 0 ? " done" : ""),
     onClick: () => setCloseOpen(true),
-    disabled: activeOrders.length === 0
+    disabled: !hasClosable
   }, "📋 마감", closeLeft > 0 && /*#__PURE__*/React.createElement("span", {
     className: "closebadge"
   }, closeLeft))), bdate !== today && /*#__PURE__*/React.createElement("div", {
@@ -7454,7 +7553,7 @@ function App() {
   }, " · ⚠ 지금 보는 날짜는 ", bdate, " 입니다"), " · ", keepPendingNicks.slice(0, 4).join(", "), keepPendingNicks.length > 4 ? " 외" : "")), /*#__PURE__*/React.createElement("button", {
     className: "btn keepload" + (keepLoadArm ? " danger" : ""),
     onClick: loadKeeps
-  }, keepLoadArm ? `${bdate} 에 넣습니다 — 한 번 더` : "불러오기")), (nickList.length > 0 || keepAll.length > 0) && /*#__PURE__*/React.createElement("div", {
+  }, keepLoadArm ? `${bdate} 에 넣습니다 — 한 번 더` : "불러오기")), (nickList.length > 0 || keepAll.length > 0 || hasClosable) && /*#__PURE__*/React.createElement("div", {
     className: "card summarycard"
   }, nickList.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
     className: "sm-item"
@@ -7484,7 +7583,7 @@ function App() {
     title: "킵 목록을 보고 오래된 것을 지웁니다"
   }, "🔖 킵 목록 ", keepAll.length, "명"), /*#__PURE__*/React.createElement("button", {
     className: "btn closingbtn",
-    disabled: activeOrders.length === 0,
+    disabled: !hasClosable,
     onClick: exportClosingXlsx,
     title: `결산_사자창고_${dateCode}.xlsx 로 저장`
   }, "📊 결산 엑셀")), /*#__PURE__*/React.createElement("div", {
@@ -9187,6 +9286,14 @@ const CSS = `
       ⚠ 새 화면을 만들 때 클래스 이름이 이미 있는지 반드시 확인할 것. */
 .acctprow { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid #f0f2f5; }
 .acctprow.nocost { background: #fffbf0; }
+/* 원가 사전 서버 상태 줄 (2026-08-04 7차) */
+.costsrv { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px;
+  padding: 8px 10px; border-radius: 8px; background: #f6f8fa; font-size: 12px; }
+.costsrv.pend { background: #fff4e5; }
+.costsrv .csmsg { color: #6b7280; }
+.costsrv .csmsg.ok { color: #2f7a4d; }
+.costsrv .cserr { color: #b4342a; }
+.btn.sm.cspush { width: auto; }
 .pname { font-size: 14px; font-weight: 600; }
 .pprice { font-size: 12px; color: #8a919c; margin-left: 6px; font-weight: 400; }
 .pnums { display: flex; gap: 10px; font-size: 13px; color: #4b5563; font-variant-numeric: tabular-nums; }
