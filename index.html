@@ -6545,7 +6545,7 @@ function App() {
       const m = marginOf(r.name, r.price, r.qty);
       const rate = r.amt ? Math.round(m / r.amt * 1000) / 10 : 0;
       return /*#__PURE__*/React.createElement("div", {
-        className: "prow" + (hasCost(r.name, r.price) ? "" : " nocost"),
+        className: "acctprow" + (hasCost(r.name, r.price) ? "" : " nocost"),
         key: r.key
       }, /*#__PURE__*/React.createElement("div", {
         className: "pname"
@@ -7041,18 +7041,18 @@ function App() {
           stock: v === "" ? null : Math.max(0, parseInt(v, 10) || 0)
         } : x));
       }
-    }), /*#__PURE__*/React.createElement("button", {
-      className: "btn ghost",
-      onClick: () => delProduct(p)
-    }, "삭제")), p.stock != null && /*#__PURE__*/React.createElement("div", {
+    }), /*#__PURE__*/React.createElement("div", {
       className: "prow-stock"
-    }, "재고 ", /*#__PURE__*/React.createElement("b", null, p.stock), " · 가용 ", /*#__PURE__*/React.createElement("b", {
+    }, p.stock != null && /*#__PURE__*/React.createElement(React.Fragment, null, "재고 ", /*#__PURE__*/React.createElement("b", null, p.stock), " · 가용 ", /*#__PURE__*/React.createElement("b", {
       className: soldOut ? "out" : "ok"
     }, Math.max(0, left)), sold > 0 && /*#__PURE__*/React.createElement("span", {
       className: "ps-sold"
     }, " · 판매 ", sold), soldOut && /*#__PURE__*/React.createElement("span", {
       className: "ps-out"
-    }, "품절")));
+    }, "품절"))), /*#__PURE__*/React.createElement("button", {
+      className: "btn ghost",
+      onClick: () => delProduct(p)
+    }, "삭제")));
   })), /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
@@ -8996,8 +8996,13 @@ const CSS = `
 .addrow { margin-bottom: 10px; }
 .rowbetween { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 .prow { display: flex; flex-direction: column; gap: 3px; border-top: 1px solid #f0f2f5; padding: 6px 0; }
-.prow-main { display: flex; gap: 6px; align-items: center; }
-.prow-stock { font-size: 12px; color: #8a919c; padding-left: 2px; }
+/* ⭐ 상품 한 줄을 «칼럼»으로 맞춘다 (2026-08-03 사장님 결정 ㉡ · PC 기준).
+      핸들 · 상품명 · 금액 · 수량 · 재고 · 삭제 — 폭을 못 박아야 줄마다 안 밀린다.
+      ⚠ 재고가 없는 줄도 빈 칸을 그려야 칼럼이 유지된다. */
+.prow-main { display: grid; grid-template-columns: 20px minmax(140px, 1fr) 110px 90px 210px 56px;
+             gap: 8px; align-items: center; }
+.prow-stock { font-size: 12px; color: #8a919c; text-align: right; white-space: nowrap;
+              overflow: hidden; text-overflow: ellipsis; }
 .prow-stock b { font-weight: 700; }
 .prow-stock b.ok { color: #0f766e; }
 .prow-stock b.out { color: #d81f26; }
@@ -9167,8 +9172,14 @@ const CSS = `
 .arow.anet { border-top: 2px solid #16191f; border-bottom: 0; margin-top: 4px; padding-top: 8px; }
 .arow.anet .alabel, .arow.anet .aval { font-weight: 800; font-size: 18px; }
 .acctwarn { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: #fdf6e3; border: 1px solid #b7791f; border-radius: 10px; padding: 8px 12px; font-size: 13px; margin-bottom: 10px; }
-.prow { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid #f0f2f5; }
-.prow.nocost { background: #fffbf0; }
+/* ⚠⚠ 이 규칙의 이름이 원래 「.prow」 였다 — 상품 탭과 같은 이름이었다 (2026-08-03 발견).
+      ⚠ CSS 는 템플릿 리터럴 안이다. 주석에 백틱을 쓰면 문자열이 끊겨 앱이 통째로 안 뜬다.
+      나중에 오는 이 규칙이 상품 탭 「.prow」(flex-column)를 덮어써서
+      상품 탭 행이 grid 가 되고 **행마다 금액·수량·삭제가 제각각으로 밀렸다.**
+      5차에 회계 화면을 만들면서 들어갔고, 그때부터 조용히 깨져 있었다.
+      ⚠ 새 화면을 만들 때 클래스 이름이 이미 있는지 반드시 확인할 것. */
+.acctprow { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid #f0f2f5; }
+.acctprow.nocost { background: #fffbf0; }
 .pname { font-size: 14px; font-weight: 600; }
 .pprice { font-size: 12px; color: #8a919c; margin-left: 6px; font-weight: 400; }
 .pnums { display: flex; gap: 10px; font-size: 13px; color: #4b5563; font-variant-numeric: tabular-nums; }
