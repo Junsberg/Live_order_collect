@@ -858,6 +858,35 @@ function App() {
   const lastBcRef = useRef(null); // 마지막으로 주고받은 내용 — 되울림(무한 반복) 방지
   const [srvSyncedDate, setSrvSyncedDate] = useState(null);
   const srvSyncedRef = useRef(null);
+  /* 📍 방송 장소 (2026-08-04 7차) — payload 가 아니라 broadcasts.place «칼럼»에 들어간다.
+        payload 에 넣으면 본문 md5 가 바뀌어 요약본 지문 대조가 어긋난다.
+     ⚠ 그래서 자동저장의 「같으면 안 올린다」 판정에 payload 와 «따로» 끼워야 한다. */
+  const [place, setPlace] = useState("");
+  const srvPlaceRef = useRef(null); // 서버에 있다고 아는 장소
+  const [placeRecent, setPlaceRecent] = useState([]); // 최근 쓴 장소 (그 기기 편의용)
+  /* ⚠ 최근 장소는 «그 기기 편의용»이다. 서버에 올리지 않는다.
+        방송의 «사실»은 broadcasts.place 하나뿐이고, 이건 타이핑을 줄이는 목록일 뿐이다. */
+  const rememberPlace = v => {
+    const t = String(v || "").trim();
+    if (!t) return;
+    setPlaceRecent(prev => {
+      const next = [t, ...(prev || []).filter(x => x !== t)].slice(0, 5);
+      if (JSON.stringify(next) === JSON.stringify(prev)) return prev;
+      try {
+        localStorage.setItem("saja:places", JSON.stringify(next));
+      } catch (e) {}
+      return next;
+    });
+  };
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("saja:places");
+      if (raw) {
+        const v = JSON.parse(raw);
+        if (Array.isArray(v)) setPlaceRecent(v.slice(0, 5));
+      }
+    } catch (e) {/* 없으면 무시 */}
+  }, []);
   const srvPendingRef = useRef(false);
   const [srvRetryTick, setSrvRetryTick] = useState(0); // 밀어둔 저장을 다시 태우는 신호
   const [srvLoadTick, setSrvLoadTick] = useState(0); // 불러오기 실패 시 다시 시도하는 신호
@@ -893,6 +922,7 @@ function App() {
         exists: true,
         rev: Number(row.rev),
         payload: row.payload,
+        place: row.place == null ? "" : String(row.place),
         updatedAt: row.updated_at,
         updatedBy: row.updated_by
       };
@@ -907,7 +937,11 @@ function App() {
   /* 서버에 저장한다. rev 가 안 맞으면 거부되고 누가 바꿨는지 알려준다.
      ⚠ 요약본(summary)은 본문과 「같은 호출」로 넘긴다. 따로 부르지 않는다.
         따로 부르면 본문만 저장되고 요약이 실패하는 상태가 생겨 회계가 어긋난다. */
-  const serverSave = async (date, payload, baseRev, summary) => {
+  /* ⚠⚠ p_place 를 «반드시» 실어 보낸다 (2026-08-04 7차).
+        서버는 `place = coalesce(p_place, b.place)` 다 — null 을 보내면 «기존 장소가 그대로 남는다».
+        장소를 지우려면 빈 문자열('')을 보내야 한다. null 로 지우려 하면
+        화면에서만 사라지고 서버에는 남아 조용히 어긋난다. */
+  const serverSave = async (date, payload, baseRev, summary, placeVal) => {
     const c = sb();
     if (!c) return {
       ok: false
@@ -921,6 +955,7 @@ function App() {
         p_seq: 1,
         p_payload: payload,
         p_base_rev: baseRev,
+        p_place: placeVal == null ? "" : String(placeVal),
         p_summary: summary || null,
         p_calc_ver: summary ? CALC_VER : null
       });
@@ -1543,10 +1578,14 @@ function App() {
       const tell = synced => {
         if (lastBcRef.current === str) return;
         lastBcRef.current = str;
+        /* ⚠ place 도 함께 보낸다 (2026-08-04 7차).
+              안 보내면 받는 탭의 srvPlaceRef 가 null 로 남아 「내 장소와 다르다」고 판단하고
+              헛저장을 하러 간다 → 옛 rev 로 올려 «가짜 충돌»이 뜬다. (t_tabs 로 잡힘) */
         const msg = {
           from: tabId.current,
           bdate,
           str,
+          place,
           rev: srvRevRef.current,
           synced: !!synced
         };
@@ -1569,7 +1608,7 @@ function App() {
       }
       // ⚠ 서버에 있는 것과 똑같으면 올릴 이유가 없다. 되올리면 저장자 이름과 rev 만 바뀌어
       //    다른 사람 화면에 가짜 충돌이 뜬다.
-      if (srvSyncedRef.current === str) {
+      if (srvSyncedRef.current === str && srvPlaceRef.current === place) {
         tell(true);
         return;
       }
@@ -1591,12 +1630,16 @@ function App() {
       srvBusy.current = true;
       srvPendingRef.current = false;
       setSrvState("saving");
-      const r = await serverSave(bdate, payload, srvRevRef.current, buildSummary());
+      const r = await serverSave(bdate, payload, srvRevRef.current, buildSummary(), place);
       srvBusy.current = false;
       if (r.ok) {
         srvRevRef.current = r.rev;
         setSrvRev(r.rev);
         srvSyncedRef.current = str;
+        srvPlaceRef.current = place;
+        /* ⚠ 「최근 장소」는 «서버에 올라간 뒤에» 기록한다. 타이핑 도중에 넣으면
+              「수」「수원」「수원 창」 같은 토막이 목록에 쌓인다. */
+        if (place) rememberPlace(place);
         setSrvState("ok");
         setSrvConflict(null);
       } else if (r.conflict) {
@@ -1614,13 +1657,13 @@ function App() {
       if (srvPendingRef.current) setSrvRetryTick(n => n + 1);
     }, 700); // 서버 요청이 붙으므로 로컬(400ms)보다 조금 여유를 둔다
     return () => clearTimeout(t);
-  }, [products, orders, customers, shipFee, shipCost, bdate, pickState, settleHeader, trackHeader, shipData, loaded, auth, srvPick, srvSyncedDate, srvRetryTick]);
+  }, [products, orders, customers, shipFee, shipCost, bdate, pickState, settleHeader, trackHeader, shipData, place, loaded, auth, srvPick, srvSyncedDate, srvRetryTick]);
 
   /* 앱을 열거나 날짜를 바꾸면 서버를 먼저 확인한다.
      ⚠ 서버에 그 날짜가 있으면 서버 것이 기준이다. 매니저 PC 의 옛 데이터가
         사장님이 올린 최신본을 덮어쓰는 것을 막는다. */
   // 다른 탭에서 온 내용을 화면에 반영한다 (서버 응답과 달리 이미 정규화된 값이라 그대로 쓴다)
-  const applyTabPayload = (str, rev, synced) => {
+  const applyTabPayload = (str, rev, synced, placeMsg) => {
     let d = null;
     try {
       d = JSON.parse(str);
@@ -1641,9 +1684,11 @@ function App() {
       srvRevRef.current = rev;
       setSrvRev(rev);
     }
+    if (placeMsg !== undefined && placeMsg !== null) setPlace(String(placeMsg));
     if (synced) {
       // 그 탭이 서버 저장까지 마쳤다면 이 탭도 서버와 같은 상태다 → 다시 올릴 필요가 없다
       srvSyncedRef.current = str;
+      srvPlaceRef.current = placeMsg === undefined || placeMsg === null ? place : String(placeMsg);
       setSrvSyncedDate(d.bdate);
       setSrvState("ok");
       setSrvConflict(null);
@@ -1659,7 +1704,7 @@ function App() {
       if (srvPick) return; // 고르는 중에는 화면을 바꾸지 않는다
       if (lastBcRef.current === msg.str) return; // 이미 반영된 내용
       lastBcRef.current = msg.str;
-      applyTabPayload(msg.str, msg.rev, msg.synced);
+      applyTabPayload(msg.str, msg.rev, msg.synced, msg.place);
     };
     let ch = null;
     try {
@@ -1715,13 +1760,14 @@ function App() {
       /* ⚠ 자동저장과 같은 가드 — 여기에도 있어야 한다.
             날짜를 눌러 보고 곧바로 다른 날짜로 넘어가면 이 경로로 빈 행이 만들어진다.
             서버에는 안 올리되 로컬 저장은 그대로 한다 (안내문구 수정 등이 걸려 있을 수 있다). */
+      const placeChanged = srvPlaceRef.current !== place;
       if (srvSyncedRef.current !== str && srvRevRef.current == null && isBlankDay(payload)) {
         await saveKey("saja:session", str, "방송 데이터");
-      } else if (srvSyncedRef.current !== str) {
+      } else if (srvSyncedRef.current !== str || placeChanged) {
         setDateBusy(true);
         setSrvState("saving");
         await saveKey("saja:session", str, "방송 데이터");
-        const r = await serverSave(bdate, payload, srvRevRef.current, buildSummary());
+        const r = await serverSave(bdate, payload, srvRevRef.current, buildSummary(), place);
         setDateBusy(false);
         if (!r.ok) {
           setSrvState(r.conflict ? "conflict" : "fail");
@@ -1735,6 +1781,7 @@ function App() {
         srvRevRef.current = r.rev;
         setSrvRev(r.rev);
         srvSyncedRef.current = str;
+        srvPlaceRef.current = place;
       }
     }
     fromDateRef.current = bdate; // ⭐ 옮기기 확인 카드에 「어디서 왔는지」를 찍기 위해
@@ -1767,6 +1814,7 @@ function App() {
         srvRevRef.current = null;
         setSrvRev(null);
         srvSyncedRef.current = null;
+        srvPlaceRef.current = null;
         if (first || localEmpty) {
           // 앱을 막 열었을 때 = 이 PC 내용이 곧 그 날짜의 내용이다 → 그대로 올린다
           setSrvSyncedDate(bdate);
@@ -2004,6 +2052,11 @@ function App() {
       trackHeader: nextTrack,
       shipData: m.shipData
     });
+    /* 📍 서버에 적힌 장소를 그대로 쓴다. 안 하면 다른 날짜로 갔다 와도 앞 날짜의 장소가 남는다. */
+    const pl = r.place == null ? "" : String(r.place);
+    setPlace(pl);
+    srvPlaceRef.current = pl;
+    if (pl) rememberPlace(pl);
     setSrvSyncedDate(bdate);
     setSrvState("ok");
     setSrvPick(null);
@@ -2043,11 +2096,12 @@ function App() {
       trackHeader,
       shipData
     };
-    const r = await serverSave(bdate, payload, r0.exists ? r0.rev : null, buildSummary());
+    const r = await serverSave(bdate, payload, r0.exists ? r0.rev : null, buildSummary(), place);
     if (r.ok) {
       srvRevRef.current = r.rev;
       setSrvRev(r.rev);
       srvSyncedRef.current = JSON.stringify(payload); // 방금 올린 것이 곧 서버 내용
+      srvPlaceRef.current = place;
       setSrvSyncedDate(bdate);
       setSrvState("ok");
       setSrvPick(null);
@@ -6776,7 +6830,24 @@ function App() {
     value: bdate,
     disabled: dateBusy,
     onChange: e => changeDate(e.target.value)
-  }), /*#__PURE__*/React.createElement("button", {
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "placewrap"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "in placein",
+    placeholder: "📍 장소",
+    value: place,
+    maxLength: 40,
+    disabled: dateBusy,
+    onKeyDown: endEdit,
+    onChange: e => setPlace(e.target.value),
+    onBlur: e => rememberPlace(e.target.value),
+    title: "어디서 한 방송인지 적어 두면 나중에 장소별로 매출을 볼 수 있습니다"
+  }), placeRecent.filter(x => x !== place).slice(0, 3).map(x => /*#__PURE__*/React.createElement("button", {
+    key: x,
+    className: "btn placechip",
+    onClick: () => setPlace(x),
+    title: `장소를 「${x}」로 바꿉니다`
+  }, x))), /*#__PURE__*/React.createElement("button", {
     className: "btn xlbtn",
     onClick: exportXlsx,
     disabled: orders.length === 0 && products.length === 0
@@ -9286,6 +9357,10 @@ const CSS = `
       ⚠ 새 화면을 만들 때 클래스 이름이 이미 있는지 반드시 확인할 것. */
 .acctprow { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid #f0f2f5; }
 .acctprow.nocost { background: #fffbf0; }
+/* 📍 방송 장소 (2026-08-04 7차) */
+.placewrap { display: inline-flex; align-items: center; gap: 4px; }
+.in.placein { width: 116px; padding: 8px 8px; font-size: 13px; }
+.btn.placechip { width: auto; padding: 5px 8px; font-size: 12px; background: #eef1f5; color: #3a4250; border: 1px solid #dfe3e9; }
 /* 원가 사전 서버 상태 줄 (2026-08-04 7차) */
 .costsrv { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px;
   padding: 8px 10px; border-radius: 8px; background: #f6f8fa; font-size: 12px; }
