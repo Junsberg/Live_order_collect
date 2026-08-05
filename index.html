@@ -4905,6 +4905,47 @@ function App() {
      ⚠ 방송 중에 계속 켜두면 입력하는 도중마다 「다름」으로 깜빡인다.
         그래서 «마감 점검을 열 때»와 «결산 엑셀을 뽑을 때»만 읽는다 (사장님 결정). */
   const [srvSum, setSrvSum] = useState(null); // null=아직 안 읽음 · {ok,row,err}
+
+  /* ---------- 지난 방송 현금영수증 미결현황 (0-9 · 2026-08-04 7차) ----------
+     영수증 탭은 «그날치»만 본다. 그래서 지난 방송에서 발행 못 한 건이 있어도
+     다른 날짜를 열면 보이지 않는다 — 영영 잊힌다.
+     ⭐ 재료는 이미 서버에 있다: `summaries.cash_pending` (0-5 요약본). **서버 변경 0건.**
+     ⚠ 요약본에는 「몇 건」만 있다. 누구인지·번호는 없다 → 「그 날짜로 가기」까지만 한다
+        (2026-08-04 사장님 결정 · 가볍고 빠른 쪽).
+     ⚠ 최근 90일까지만 찾는다. 전부 뒤지면 방송이 쌓일수록 느려진다. */
+  const OLDCASH_DAYS = 90;
+  const [oldCash, setOldCash] = useState([]);
+  const loadOldCash = async () => {
+    const c = sb();
+    if (!c) return [];
+    const from = new Date(Date.now() - OLDCASH_DAYS * 86400000);
+    const fromISO = `${from.getFullYear()}-${String(from.getMonth() + 1).padStart(2, "0")}-${String(from.getDate()).padStart(2, "0")}`;
+    try {
+      const {
+        data,
+        error
+      } = await c.from("summaries").select("date,place,cash_pending").gte("date", fromISO);
+      if (error) return [];
+      /* ⚠ 지금 보고 있는 날짜는 뺀다 — 바로 아래 목록에 그대로 있어서 두 번 보인다. */
+      return (data || []).filter(r => Number(r.cash_pending) > 0 && r.date !== bdate).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    } catch (e) {
+      return [];
+    }
+  };
+  useEffect(() => {
+    if (tab !== "extras" || !serverOn()) {
+      setOldCash([]);
+      return;
+    }
+    let dead = false;
+    (async () => {
+      const r = await loadOldCash();
+      if (!dead) setOldCash(r);
+    })();
+    return () => {
+      dead = true;
+    };
+  }, [tab, bdate, auth, customers]);
   const SUM_FIELDS = [["paid_goods", "paidGoods", "입금 상품매출"], ["paid_ship_fee", "paidShipFee", "입금 배송비"], ["unpaid_goods", "unpaidGoods", "미입금 상품"], ["unpaid_ship_fee", "unpaidShipFee", "미입금 배송비"], ["refund_goods", "refundGoods", "환불 상품"], ["refund_ship_fee", "refundShipFee", "환불 배송비"], ["lotte_count", "lotteCount", "롯데 건수"], ["cj_count", "cjCount", "CJ 건수"], ["paid_orders", "paidOrders", "입금 주문건수"], ["paid_custs", "paidCusts", "입금 인원"], ["total_orders", "totalOrders", "주문 건수"], ["total_custs", "totalCusts", "주문자"], ["pickup_count", "pickupCount", "픽업 인원"], ["free_ship_count", "freeShipCount", "무료배송 인원"], ["cash_pending", "cashPending", "현금영수증 미발행"], ["keep_custs", "keepCusts", "킵 인원"], ["keep_orders", "keepOrders", "킵 건수"], ["keep_goods", "keepGoods", "킵 상품금액"], ["keep_paid", "keepPaid", "킵 입금액"]];
   const loadServerSummary = async date => {
     const c = sb();
@@ -8578,7 +8619,34 @@ function App() {
     className: "r whtotal"
   }, totalPickupQty)))))), tab === "extras" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
+  }, oldCash.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "card oldcash"
   }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
+  }, "⚠ 지난 방송에 미발행이 남아 있습니다", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, " 최근 ", OLDCASH_DAYS, "일 · ", oldCash.reduce((t, r) => t + Number(r.cash_pending), 0), "건")), oldCash.map(r => /*#__PURE__*/React.createElement("div", {
+    className: "oldcashrow",
+    key: r.date
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "ocdate"
+  }, r.date), /*#__PURE__*/React.createElement("span", {
+    className: "ocplace"
+  }, r.place || "장소 없음"), /*#__PURE__*/React.createElement("span", {
+    className: "occnt"
+  }, "미발행 ", /*#__PURE__*/React.createElement("b", null, r.cash_pending), "건"), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    disabled: dateBusy,
+    onClick: () => changeDate(r.date)
+  }, "그 날짜로 가기"))), /*#__PURE__*/React.createElement("div", {
+    className: "hint",
+    style: {
+      marginTop: 8
+    }
+  }, "서버 요약본에는 ", /*#__PURE__*/React.createElement("b", null, "건수만"), " 있습니다. 누구인지·번호는 그 날짜로 가야 보입니다.")), /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "cardtitle"
@@ -9508,6 +9576,13 @@ const CSS = `
 .placewrap { display: inline-flex; align-items: center; gap: 4px; }
 .in.placein { width: 116px; padding: 8px 8px; font-size: 13px; }
 .placechipwrap { display: inline-flex; align-items: stretch; }
+/* 지난 방송 미발행 (0-9 · 2026-08-04 7차) */
+.card.oldcash { border: 1px solid #f0c9a0; background: #fff8ef; }
+.oldcashrow { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #f3e6d5; }
+.oldcashrow:last-of-type { border-bottom: 0; }
+.oldcashrow .ocdate { font-weight: 700; font-size: 13px; }
+.oldcashrow .ocplace { font-size: 12px; color: #8a919c; }
+.oldcashrow .occnt { margin-left: auto; font-size: 13px; color: #b4342a; }
 .btn.placechip { width: auto; padding: 5px 6px 5px 8px; font-size: 12px; background: #eef1f5; color: #3a4250;
   border: 1px solid #dfe3e9; border-right: 0; border-radius: 6px 0 0 6px; }
 .btn.placechipx { width: auto; padding: 5px 6px; font-size: 12px; line-height: 1; background: #eef1f5; color: #8a919c;
