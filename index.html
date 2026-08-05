@@ -3616,6 +3616,34 @@ function App() {
     XLSX.utils.book_append_sheet(wb, ws4, "4. 현금영수증");
     XLSX.writeFile(wb, `결산_사자창고_${dateCode}.xlsx`);
     showToast(`✓ 결산 파일을 저장했습니다 · 총 매출 ${won(total)}원`);
+    /* ⚠ 결산을 뽑는 순간이 「이 숫자가 맞나」를 가장 확인하고 싶은 때다 (사장님 결정).
+          서버 요약본과 다르면 여기서도 알린다. 파일 저장은 막지 않는다 — 손에 든 숫자는
+          화면 기준이고, 어긋난 것을 «알려주는》 것이 목적이다. */
+    if (serverOn()) {
+      (async () => {
+        const r = await loadServerSummary(bdate);
+        setSrvSum(r);
+        if (!r.ok) {
+          showToast("⚠ 서버 요약본을 읽지 못해 대조하지 못했습니다");
+          return;
+        }
+        if (!r.row) {
+          showToast("⚠ 서버 요약본이 아직 없습니다 — 잠시 뒤 마감 점검에서 다시 확인해주세요");
+          return;
+        }
+        const mine = buildSummary();
+        const bad = [];
+        SUM_FIELDS.forEach(([col, key, label]) => {
+          const a = Number(mine[key]) || 0,
+            b = Number(r.row[col]) || 0;
+          if (a !== b) bad.push(`${label} ${won(a)}↔${won(b)}`);
+        });
+        const verBad = Number(r.row.calc_ver) !== CALC_VER;
+        if (bad.length || verBad) {
+          showToast(`⚠ 서버 요약본이 이 결산과 다릅니다 — ${verBad ? `계산 규칙 ${r.row.calc_ver}↔${CALC_VER} · ` : ""}${bad.slice(0, 3).join(" · ")}${bad.length > 3 ? " 외" : ""}`);
+        }
+      })();
+    }
   };
 
   // 현금영수증 번호를 입력한 사람만
@@ -4867,11 +4895,94 @@ function App() {
      ⚠ 검사 항목을 배열로 만든다. 나중에 「지난 방송 미발행」·「요약본 지문 대조」를
         끼워 넣을 때 통째로 다시 짜지 않도록. (설계안 5-13 · 0단계 버전과 서버 버전이 다름) */
   const [closeOpen, setCloseOpen] = useState(false);
+  /* ---------- 서버 요약본 대조 (0-13 · 2026-08-04 7차) ----------
+     회계·기간 합산은 서버 요약본(summaries)을 읽어서 만든다. 그런데 요약본이 화면과
+     어긋나 있어도 지금은 아무도 모른다. 어긋나는 길은 실제로 있다 —
+     마지막 저장 실패 · CALC_VER 를 안 올린 채 규칙만 바뀜 · 다른 사람이 덮어씀.
+      ⚠ src_hash 로는 못 한다. 서버 지문은 md5(p_stored::text) 로 Postgres 의 jsonb 정규
+        문자열이라 브라우저의 JSON.stringify 와 글자가 다르다 — 앱에서 계산하면 영원히 불일치다.
+        → 지문 대신 «숫자 + calc_ver» 를 직접 맞댄다. 어느 항목이 몇 원 다른지까지 나온다.
+     ⚠ 방송 중에 계속 켜두면 입력하는 도중마다 「다름」으로 깜빡인다.
+        그래서 «마감 점검을 열 때»와 «결산 엑셀을 뽑을 때»만 읽는다 (사장님 결정). */
+  const [srvSum, setSrvSum] = useState(null); // null=아직 안 읽음 · {ok,row,err}
+  const SUM_FIELDS = [["paid_goods", "paidGoods", "입금 상품매출"], ["paid_ship_fee", "paidShipFee", "입금 배송비"], ["unpaid_goods", "unpaidGoods", "미입금 상품"], ["unpaid_ship_fee", "unpaidShipFee", "미입금 배송비"], ["refund_goods", "refundGoods", "환불 상품"], ["refund_ship_fee", "refundShipFee", "환불 배송비"], ["lotte_count", "lotteCount", "롯데 건수"], ["cj_count", "cjCount", "CJ 건수"], ["paid_orders", "paidOrders", "입금 주문건수"], ["paid_custs", "paidCusts", "입금 인원"], ["total_orders", "totalOrders", "주문 건수"], ["total_custs", "totalCusts", "주문자"], ["pickup_count", "pickupCount", "픽업 인원"], ["free_ship_count", "freeShipCount", "무료배송 인원"], ["cash_pending", "cashPending", "현금영수증 미발행"], ["keep_custs", "keepCusts", "킵 인원"], ["keep_orders", "keepOrders", "킵 건수"], ["keep_goods", "keepGoods", "킵 상품금액"], ["keep_paid", "keepPaid", "킵 입금액"]];
+  const loadServerSummary = async date => {
+    const c = sb();
+    if (!c) return {
+      ok: false,
+      err: "no client"
+    };
+    try {
+      const {
+        data,
+        error
+      } = await c.from("summaries").select("*").eq("date", date).eq("seq", 1).maybeSingle();
+      if (error) return {
+        ok: false,
+        err: error.message
+      };
+      return {
+        ok: true,
+        row: data || null
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        err: e && e.message || "summary load failed"
+      };
+    }
+  };
+  useEffect(() => {
+    if (!closeOpen || !serverOn()) return;
+    let dead = false;
+    (async () => {
+      const r = await loadServerSummary(bdate);
+      if (!dead) setSrvSum(r);
+    })();
+    return () => {
+      dead = true;
+    };
+  }, [closeOpen, bdate, auth]);
+  // 날짜가 바뀌면 앞 날짜 결과를 들고 있지 않는다 (엉뚱한 날짜와 대조하게 된다)
+  useEffect(() => {
+    setSrvSum(null);
+  }, [bdate]);
   const [lastExcelAt, setLastExcelAt] = useState(0); // 엑셀 저장 시각 (그 날짜 기준)
   useEffect(() => {
     setLastExcelAt(0);
   }, [bdate]); // 날짜를 바꾸면 그 날짜 기준으로 다시 센다
 
+  /* ⚠ 대조 판정은 여기 한 곳만 쓴다 (money-rules §1).
+        마감 점검과 결산 엑셀이 각자 비교하면 한쪽만 고쳤을 때 조용히 어긋난다. */
+  const summaryDiff = () => {
+    if (!serverOn()) return {
+      state: "off"
+    };
+    if (!srvSum) return {
+      state: "loading"
+    };
+    if (!srvSum.ok) return {
+      state: "err",
+      err: srvSum.err
+    };
+    if (!srvSum.row) return {
+      state: "none"
+    };
+    const mine = buildSummary();
+    const bad = [];
+    SUM_FIELDS.forEach(([col, key, label]) => {
+      const a = Number(mine[key]) || 0,
+        b = Number(srvSum.row[col]) || 0;
+      if (a !== b) bad.push(`${label} ${won(a)}↔${won(b)}`);
+    });
+    const verBad = Number(srvSum.row.calc_ver) !== CALC_VER;
+    return {
+      state: bad.length || verBad ? "diff" : "same",
+      bad,
+      verBad,
+      ver: srvSum.row.calc_ver
+    };
+  };
   const closeChecks = useMemo(() => {
     const list = [];
     const push = o => list.push(o);
@@ -4944,6 +5055,23 @@ function App() {
 
     // 창고 체크는 마감 점검에 넣지 않는다.
     // 보통 엑셀로 내려받아 종이로 출력해 쓰기 때문에 앱 안의 체크 상태가 실제 작업과 다르다.
+
+    /* 8) 서버 요약본 대조 (2026-08-04 7차 · 사장님 결정 「숫자 하나라도 다르면 ❌」)
+          ⚠ 「아직 안 올라감」과 「어긋남」을 같은 문구로 묶지 않는다.
+             섞으면 매번 빨간불이 떠서 사장님이 점검 자체를 안 믿게 된다. */
+    const sd = summaryDiff();
+    if (sd.state !== "off") {
+      const detail = sd.state === "loading" ? "확인 중…" : sd.state === "err" ? "서버를 읽지 못했습니다" : sd.state === "none" ? "아직 안 올라감" : sd.state === "same" ? "화면과 같음" : sd.verBad && !sd.bad.length ? `계산 규칙이 다릅니다 (서버 ${sd.ver} · 지금 ${CALC_VER})` : `다릅니다 — ${sd.bad.length}개 항목`;
+      push({
+        key: "srvsum",
+        ok: sd.state === "same" || sd.state === "loading",
+        label: "서버 요약본",
+        detail,
+        names: sd.state === "diff" ? (sd.verBad ? [`계산 규칙 ${sd.ver} ↔ ${CALC_VER}`] : []).concat(sd.bad) : [],
+        tab: null,
+        warn: sd.state !== "diff"
+      });
+    }
 
     // 7) 엑셀 저장
     const savedToday = lastExcelAt > 0;
@@ -5025,7 +5153,7 @@ function App() {
           「운송장은 있는데 주문 없음」이 doneOrders 를 쓰는데 의존성에 없어서,
           출고완료된 사람이 **유령 송장으로 잘못 잡혔다.**
           보낸 손님마다 헛경고가 떠서 사장님이 경고 자체를 무시하게 된다 — 그게 진짜 위험이다. */
-  }, [nickList, customers, paidNicks, paidLines, shipData, cashList, lastExcelAt, products, activeOrders, doneOrders]);
+  }, [nickList, customers, paidNicks, paidLines, shipData, cashList, lastExcelAt, products, activeOrders, doneOrders, srvSum, closing, keepOrders, keepNicks, shipFee]);
   const closeLeft = closeChecks.filter(c => !c.ok).length;
 
   /* ---------- 킵 (보류 주문) 5-19 ----------
