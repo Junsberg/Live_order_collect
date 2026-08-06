@@ -6917,12 +6917,13 @@ function App() {
       title: row ? `${d}${row.place ? " · " + row.place : ""}` : d
     }, /*#__PURE__*/React.createElement("span", {
       className: "caldnum"
-    }, i + 1), calData.state === "ok" && row && /*#__PURE__*/React.createElement("span", {
-      className: "caldot" + (n > 0 ? " caldotord" : ""),
-      "aria-hidden": "true"
-    }, "●"), calData.state === "ok" && row && /*#__PURE__*/React.createElement("span", {
+    }, i + 1), calData.state === "ok" && row && (n > 0 ? /*#__PURE__*/React.createElement("span", {
       className: "caldinfo"
-    }, n > 0 ? `주문 ${n}` : "준비"), calData.state === "ok" && row && row.place && /*#__PURE__*/React.createElement("span", {
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "calword"
+    }, "주문 "), n) : /*#__PURE__*/React.createElement("span", {
+      className: "caldinfo"
+    }, "준비")), calData.state === "ok" && row && row.place && /*#__PURE__*/React.createElement("span", {
       className: "caldplace"
     }, row.place));
   })), /*#__PURE__*/React.createElement("div", {
@@ -9564,17 +9565,17 @@ const CSS = `
 .caldplace { font-size: 10px; color: #9aa0aa; line-height: 1.2; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .calday.caltoday { border-color: #6b7280; }
 .calday.calon { border-color: #e8334a; background: #33202a; }
-/* 넓은 화면에서는 점을 쓰지 않는다 — 글자가 다 들어간다 */
-.caldot { display: none; font-size: 11px; line-height: 1; color: #6b7280; }
-.caldot.caldotord { color: #2dd4a7; }
-/* ⭐ 좁은 화면 — 글자를 버리고 점만 (2026-08-06 사장님 결정)
-   ⚠ 되돌리지 말 것: 글자를 살리면 폰에서 「주문 5」가 세로로 접히고 장소가 잘린다
-      (360px 에서 장소 7px · 320px 에서 1px — 실측). 안전장치 101 */
+/* ⚠ 한 줄로 붙들어 둔다 — 접히면 「주 / 문 / 113」이 된다 */
+.caldinfo, .caldplace { white-space: nowrap; }
+/* ⭐ 좁은 화면 — 「주문」과 장소를 버리고 «숫자»만 (2026-08-07 사장님 결정)
+   ⚠ 되돌리지 말 것: 글자를 다 살리면 폰에서 세로로 접히고 장소가 잘린다
+      (360px 에서 장소 7px · 320px 에서 1px — 실측). 안전장치 101
+   ⚠ 점(●)으로 만들었다가 되돌렸다 — 숫자가 「몇 건인지」까지 알려준다 */
 @media (max-width: 640px) {
-  .calbox .calday { min-height: 42px; gap: 2px; padding: 4px 1px; }
-  .calbox .caldinfo, .calbox .caldplace { display: none; }
-  .calbox .caldot { display: block; }
+  .calbox .calday { min-height: 46px; gap: 1px; padding: 4px 1px; }
+  .calbox .calword, .calbox .caldplace { display: none; }
   .calbox .caldnum { font-size: 12px; }
+  .calbox .caldinfo { font-size: 10px; }
   .calnav { gap: 10px; }
 }
 .xlbtn { background: #0f766e; border-color: #0f766e; color: #fff; padding: 8px 13px; }
