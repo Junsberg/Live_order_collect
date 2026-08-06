@@ -1145,7 +1145,25 @@ function App() {
   };
 
   /* ---------- 로그인 처리 ---------- */
-  // 로그인한 지 SESSION_HOURS 가 지났는가
+  /* ⚠ 2026-08-06 8차 — 기준이 «로그인 시각» → «마지막 활동 시각» 으로 바뀌었다.
+        전에는 로그인하고 3시간이면 «일하는 도중에도» 끊겼다. 방송이 3시간을 넘기면
+        주문을 받다 말고 로그인 창이 떴다. 데이터는 안 날아가지만 방송 중에는 참사다.
+     ⚠ 목적은 「자리를 비운 사이 남이 보는 것」을 막는 것이다. 그건 그대로 지켜진다 —
+        3시간 «아무것도 안 하면» 여전히 끊긴다.
+     ⚠ 시계를 다시 맞추는 것은 «사람이 실제로 만졌을 때»만이다.
+        타이머·자동저장으로 갱신하면 빈 화면을 켜둔 채로 영영 안 끊긴다. */
+  const touchAuth = () => {
+    try {
+      const raw = localStorage.getItem("saja:auth:at");
+      if (!raw) return; // 로그인 상태일 때만
+      /* ⚠ 1분에 한 번만 쓴다 — 키를 칠 때마다 localStorage 에 쓰면 입력이 버벅인다.
+            «저장된 값»을 기준으로 판단한다. 화면 안 변수로 세면 탭마다 따로 세어
+            다른 탭에서 일하는 동안 이 탭이 자기 시계를 못 따라간다. */
+      if (Date.now() - (Number(raw) || 0) < 60000) return;
+      localStorage.setItem("saja:auth:at", String(Date.now()));
+    } catch (e) {/* 저장 못 해도 앱은 계속 돈다 */}
+  };
+  // 마지막 활동으로부터 SESSION_HOURS 가 지났는가
   const expired = () => {
     const at = Number(localStorage.getItem("saja:auth:at") || 0);
     return at > 0 && Date.now() - at > SESSION_HOURS * 3600000;
@@ -1257,10 +1275,27 @@ function App() {
     const t = setInterval(() => {
       if (expired()) {
         doLogout();
-        setLoginErr(`로그인 후 ${SESSION_HOURS}시간이 지나 자동으로 로그아웃되었습니다. 다시 로그인해주세요.`);
+        setLoginErr(`${SESSION_HOURS}시간 동안 사용이 없어 자동으로 로그아웃되었습니다. 다시 로그인해주세요.`);
       }
     }, 60000);
     return () => clearInterval(t);
+  }, [auth]);
+
+  /* 사람이 실제로 만지면 시계를 다시 맞춘다 (2026-08-06 8차).
+     ⚠ pointerdown·keydown 만 본다. mousemove 를 넣으면 마우스가 스쳐도 갱신돼
+        「자리를 비웠다」를 판단할 수 없게 된다.
+     ⚠ 몇 번에 한 번만 쓸지는 touchAuth 안에서 «저장된 값»으로 정한다. */
+  useEffect(() => {
+    if (!auth || auth === true) return;
+    const on = () => {
+      touchAuth();
+    };
+    window.addEventListener("pointerdown", on, true);
+    window.addEventListener("keydown", on, true);
+    return () => {
+      window.removeEventListener("pointerdown", on, true);
+      window.removeEventListener("keydown", on, true);
+    };
   }, [auth]);
   const doLogin = async () => {
     const c = sb();
