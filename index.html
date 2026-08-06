@@ -4793,6 +4793,118 @@ function App() {
   const prodFileRef = useRef(null);
   const [prodImport, setProdImport] = useState(null); // {name, list} — 교체/추가 선택 대기
 
+  /* ---------- 📅 초기셋팅 달력 (0-6 · 2026-08-06 9차) ----------
+     상단바 날짜 «왼쪽» 📅 → 그 달의 방송 기록을 보여주고, 날짜를 눌러 이동한다.
+      ⚠⚠ 이 화면은 «읽기 전용»이다. 서버에 절대 쓰지 않는다.
+     ⚠⚠ 날짜 이동은 반드시 `changeDate` 를 통한다. `setBdate` 를 직접 부르면
+         「앞 날짜 저장 확정 → 실패 시 이동 취소 → 빈 날짜는 묻기 → 있는 날짜는 서버 것 채택」이
+         통째로 사라져, 보고 있던 데이터가 다른 날짜로 새어 나간다 (사장님이 가장 걱정하신 것).
+         검사 t_cal ㉳ 가 소스에서 이것을 못 박는다.
+      ⚠ 「기록 없음」과 「못 읽음」을 구분한다.
+        못 읽었는데 빈 날짜처럼 보이면, 그 날짜를 새로 시작해 기존 방송을 덮어쓴다.
+        → 못 읽으면 «모든 날짜를 잠그고» 그 사실을 화면에 쓴다.
+      ⚠ 재료는 `summaries` 뿐이다 (서버 변경 0건). 매출액은 안 보여준다 (2026-08-06 사장님 결정)
+        — 그 날짜로 가면 보이므로 달력을 빽빽하게 만들 이유가 없다. */
+  const [calOpen, setCalOpen] = useState(false);
+  const [calYM, setCalYM] = useState(() => ({
+    y: Number(bdate.slice(0, 4)),
+    m: Number(bdate.slice(5, 7))
+  }));
+  // { state: "loading" | "ok" | "fail", rows: [...] }  ⚠ "fail" 을 "빈 목록"으로 뭉개지 말 것
+  const [calData, setCalData] = useState({
+    state: "loading",
+    rows: []
+  });
+  const [calTick, setCalTick] = useState(0);
+  const ymISO = (y, m, d) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  const monthDays = (y, m) => new Date(y, m, 0).getDate(); // m 은 1~12
+
+  const loadCalMonth = async (y, m) => {
+    const c = sb();
+    if (!c) return {
+      state: "fail",
+      rows: []
+    };
+    const from = ymISO(y, m, 1);
+    const to = ymISO(y, m, monthDays(y, m));
+    try {
+      const {
+        data,
+        error
+      } = await c.from("summaries").select("date,place,total_orders").gte("date", from).lte("date", to);
+      // ⚠ error 를 무시하고 [] 를 쓰면 「기록 없는 달」로 보인다. 반드시 fail 로 구분한다.
+      if (error) return {
+        state: "fail",
+        rows: []
+      };
+      if (!Array.isArray(data)) return {
+        state: "fail",
+        rows: []
+      };
+      return {
+        state: "ok",
+        rows: data
+      };
+    } catch (e) {
+      return {
+        state: "fail",
+        rows: []
+      };
+    }
+  };
+  useEffect(() => {
+    if (!calOpen) return;
+    if (!serverOn()) {
+      setCalData({
+        state: "fail",
+        rows: []
+      });
+      return;
+    }
+    let dead = false;
+    setCalData({
+      state: "loading",
+      rows: []
+    });
+    (async () => {
+      const r = await loadCalMonth(calYM.y, calYM.m);
+      if (!dead) setCalData(r);
+    })();
+    return () => {
+      dead = true;
+    };
+  }, [calOpen, calYM.y, calYM.m, calTick, auth]);
+
+  // 달력을 열 때는 «지금 보고 있는 날짜»의 달부터 보여준다
+  const openCalendar = () => {
+    setCalYM({
+      y: Number(bdate.slice(0, 4)),
+      m: Number(bdate.slice(5, 7))
+    });
+    setCalOpen(true);
+  };
+  const calShift = n => setCalYM(p => {
+    const d = new Date(p.y, p.m - 1 + n, 1);
+    return {
+      y: d.getFullYear(),
+      m: d.getMonth() + 1
+    };
+  });
+  /* 날짜를 고르면 기존 날짜 전환 절차를 그대로 탄다.
+     ⚠ 저장에 실패하면 changeDate 가 날짜를 안 바꾼다 — 그때 달력을 닫아도
+        상단 날짜는 원래 날짜 그대로다 (화면과 실제가 어긋나지 않는다). */
+  const calPick = async d => {
+    setCalOpen(false);
+    await changeDate(d);
+  };
+  const calMap = (() => {
+    const m = {};
+    (calData.rows || []).forEach(r => {
+      if (r && r.date) m[String(r.date)] = r;
+    });
+    return m;
+  })();
+
   /* ---------- 자동 스냅샷 · 되돌리기 (L-2) ----------
      원칙: 「화면에서 사라지는 작업만 찍는다.」 (설계안 4장)
      화면에 남아 있으면 스스로 되돌릴 수 있으므로 스냅샷이 필요 없다.
@@ -6744,7 +6856,78 @@ function App() {
   }, "서버 것 받기"), auth.isOwner && /*#__PURE__*/React.createElement("button", {
     className: "btn sm",
     onClick: forceMine
-  }, "내 것으로 덮어쓰기")), undoOpen && /*#__PURE__*/React.createElement("div", {
+  }, "내 것으로 덮어쓰기")), calOpen && /*#__PURE__*/React.createElement("div", {
+    className: "closewrap",
+    onClick: e => {
+      if (e.target === e.currentTarget) setCalOpen(false);
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closecard calbox"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closehead"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "closetitle"
+  }, "📅 방송 날짜 고르기"), /*#__PURE__*/React.createElement("div", {
+    className: "sub"
+  }, "날짜를 누르면 그 날짜로 갑니다 · 지금 보는 날짜는 ", bdate)), /*#__PURE__*/React.createElement("button", {
+    className: "btn calclose",
+    onClick: () => setCalOpen(false)
+  }, "닫기")), /*#__PURE__*/React.createElement("div", {
+    className: "calnav"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn sm calprev",
+    onClick: () => calShift(-1)
+  }, "‹"), /*#__PURE__*/React.createElement("span", {
+    className: "caltitle"
+  }, calYM.y, "년 ", calYM.m, "월"), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm calnext",
+    onClick: () => calShift(1)
+  }, "›")), calData.state === "fail" && /*#__PURE__*/React.createElement("div", {
+    className: "calwarn"
+  }, "⚠ 지난 방송 기록을 ", /*#__PURE__*/React.createElement("b", null, "불러오지 못했습니다."), " 어느 날짜에 무엇이 있는지 알 수 없어 날짜를 고를 수 없게 막았습니다.", /*#__PURE__*/React.createElement("button", {
+    className: "btn sm calretry",
+    onClick: () => setCalTick(n => n + 1)
+  }, "다시 시도")), calData.state === "loading" && /*#__PURE__*/React.createElement("div", {
+    className: "calwarn"
+  }, "불러오는 중입니다…"), /*#__PURE__*/React.createElement("div", {
+    className: "calgrid calhead"
+  }, ["일", "월", "화", "수", "목", "금", "토"].map(w => /*#__PURE__*/React.createElement("span", {
+    className: "calwd",
+    key: w
+  }, w))), /*#__PURE__*/React.createElement("div", {
+    className: "calgrid"
+  }, Array.from({
+    length: new Date(calYM.y, calYM.m - 1, 1).getDay()
+  }).map((x, i) => /*#__PURE__*/React.createElement("span", {
+    className: "calpad",
+    key: "pad" + i
+  })), Array.from({
+    length: monthDays(calYM.y, calYM.m)
+  }, (x, i) => {
+    const d = ymISO(calYM.y, calYM.m, i + 1);
+    const row = calMap[d];
+    const n = row ? Number(row.total_orders) || 0 : 0;
+    const locked = calData.state !== "ok" || dateBusy;
+    return /*#__PURE__*/React.createElement("button", {
+      key: d,
+      "data-date": d,
+      disabled: locked,
+      className: "btn calday" + (d === bdate ? " calon" : "") + (d === today ? " caltoday" : ""),
+      onClick: () => calPick(d),
+      title: row ? `${d}${row.place ? " · " + row.place : ""}` : d
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "caldnum"
+    }, i + 1), calData.state === "ok" && row && /*#__PURE__*/React.createElement("span", {
+      className: "caldinfo"
+    }, n > 0 ? `주문 ${n}` : "준비"), calData.state === "ok" && row && row.place && /*#__PURE__*/React.createElement("span", {
+      className: "caldplace"
+    }, row.place));
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "hint",
+    style: {
+      marginTop: 10
+    }
+  }, "기록이 없는 날짜를 고르면 「빈 방송으로 시작할지」를 다시 물어봅니다.", /*#__PURE__*/React.createElement("b", null, " 지금 보고 있는 주문이 다른 날짜로 옮겨가는 일은 없습니다.")))), undoOpen && /*#__PURE__*/React.createElement("div", {
     className: "closewrap",
     onClick: e => {
       if (e.target === e.currentTarget) {
@@ -7049,7 +7232,12 @@ function App() {
     onClick: () => fileRef.current && fileRef.current.click()
   }, "불러오기")), /*#__PURE__*/React.createElement("div", {
     className: "topright"
-  }, /*#__PURE__*/React.createElement("input", {
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn calbtn",
+    onClick: openCalendar,
+    disabled: dateBusy,
+    title: "달력에서 방송 날짜 고르기"
+  }, "📅"), /*#__PURE__*/React.createElement("input", {
     className: "datein",
     type: "date",
     value: bdate,
@@ -9348,6 +9536,31 @@ const CSS = `
   color: #fff; font-size: 13px; font-family: inherit; color-scheme: dark;
 }
 .datein:focus { outline: 2px solid #e8334a; }
+/* 📅 초기셋팅 달력 (0-6 · 2026-08-06 9차) */
+.calbtn { padding: 7px 9px; font-size: 14px; line-height: 1; }
+.calbox { max-width: 620px; }
+.calnav { display: flex; align-items: center; justify-content: center; gap: 14px; margin: 6px 0 10px; }
+.caltitle { font-size: 15px; font-weight: 700; min-width: 120px; text-align: center; }
+.calwarn {
+  background: #3a2a2a; border: 1px solid #6b3a3a; border-radius: 10px;
+  padding: 10px 12px; margin-bottom: 10px; font-size: 13px; line-height: 1.6;
+}
+.calretry { margin-left: 8px; }
+.calgrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.calhead { margin-bottom: 4px; }
+.calwd { text-align: center; font-size: 12px; color: #9aa0aa; padding: 2px 0; }
+.calpad { display: block; }
+.calday {
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+  gap: 1px; min-height: 58px; padding: 5px 2px; border-radius: 9px;
+  background: #22262d; border: 1px solid #3a3f48; overflow: hidden;
+}
+.calday:disabled { opacity: .35; cursor: default; }
+.caldnum { font-size: 13px; font-weight: 700; }
+.caldinfo { font-size: 10px; color: #7dd3c0; line-height: 1.2; }
+.caldplace { font-size: 10px; color: #9aa0aa; line-height: 1.2; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.calday.caltoday { border-color: #6b7280; }
+.calday.calon { border-color: #e8334a; background: #33202a; }
 .xlbtn { background: #0f766e; border-color: #0f766e; color: #fff; padding: 8px 13px; }
 .xlbtn:disabled { opacity: .4; cursor: default; }
 .upbtn { background: #22262d; border-color: #3a3f48; color: #fff; padding: 8px 13px; }
