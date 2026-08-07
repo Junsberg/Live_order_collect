@@ -4793,8 +4793,210 @@ function App() {
   const prodFileRef = useRef(null);
   const [prodImport, setProdImport] = useState(null); // {name, list} — 교체/추가 선택 대기
 
+  /* ---------- 📅 0-7 3단계 · 기간 합산 + 장소별 필터 (2026-08-07 9차) ----------
+     회계 화면 안 카드. 재료는 `summaries` 뿐 — **서버 변경 0건** (달력 0-6 과 같은 경로).
+      ⚠⚠ 「못 읽음」과 「없음」을 절대 합치지 않는다.
+         일부만 읽고 더하면 «매출이 조용히 줄어든 채로» 보인다. 사장님은 알 방법이 없다.
+         → 읽기 실패면 합계를 «아예 안 보여준다». 「0원」으로도 안 보여준다.
+      ⚠⚠ 같은 주문이 두 날짜에 있으면 매출이 2배가 된다.
+         「지금 화면 내용을 이 날짜로 올리기」로 주문을 옮기면 앞 날짜에도 남는다.
+         요약본에는 주문 id 가 없어 요약본만으로는 못 잡는다.
+         → 사장님 결정(2026-08-07): 합산할 때 그 기간 «본문»을 읽어 id 를 대조한다.
+         ⚠ 본문 읽기 실패는 요약본 실패와 «다르게» 다룬다 —
+            합계는 요약본에서 나온 것이라 유효하므로 보여주되, 「중복 검사를 못 했다」고 밝힌다.
+            절대 「중복 없음」이라 단정하지 않는다.
+      ⚠ 운송장이 빠진 날(`ship_cost.unknown`)은 배송 손익이 실제보다 높다.
+        → 사장님 결정: 합산은 그대로 두고 «경고만». 숫자를 말없이 바꾸면 더 헷갈린다. */
+  const PLACE_NONE = "__none__";
+  const monthEdge = d => {
+    const y = Number(String(d).slice(0, 4)),
+      m = Number(String(d).slice(5, 7));
+    const p2 = n => String(n).padStart(2, "0");
+    return {
+      from: `${y}-${p2(m)}-01`,
+      to: `${y}-${p2(m)}-${new Date(y, m, 0).getDate()}`
+    };
+  };
+  const [perFrom, setPerFrom] = useState(() => monthEdge(bdate).from);
+  const [perTo, setPerTo] = useState(() => monthEdge(bdate).to);
+  const [perPlace, setPerPlace] = useState(""); // "" = 전체
+  // { state: "loading" | "ok" | "fail", rows: [] }  ⚠ fail 을 빈 목록으로 뭉개지 말 것
+  const [perData, setPerData] = useState({
+    state: "loading",
+    rows: []
+  });
+  // { state: "checking" | "ok" | "fail", dups: [] }  ⚠ fail 은 「중복 없음」이 아니다
+  const [perDup, setPerDup] = useState({
+    state: "checking",
+    dups: []
+  });
+  const [perTick, setPerTick] = useState(0);
+  const loadPeriod = async (from, to) => {
+    const c = sb();
+    if (!c) return {
+      state: "fail",
+      rows: []
+    };
+    try {
+      const {
+        data,
+        error
+      } = await c.from("summaries").select("date,seq,place,paid_goods,paid_ship_fee,unpaid_goods,unpaid_ship_fee," + "refund_goods,refund_ship_fee,ship_cost,total_orders,total_custs," + "keep_goods,keep_paid,cash_pending,calc_ver").gte("date", from).lte("date", to);
+      if (error || !Array.isArray(data)) return {
+        state: "fail",
+        rows: []
+      };
+      return {
+        state: "ok",
+        rows: data
+      };
+    } catch (e) {
+      return {
+        state: "fail",
+        rows: []
+      };
+    }
+  };
+
+  /* 주문 id 중복 대조 — 본문을 날짜별로 읽어 id 를 맞대 본다.
+     ⚠ 한 날짜라도 못 읽으면 «검사 실패»다. 읽은 것만으로 「중복 없음」이라 하면 거짓말이 된다. */
+  const checkPeriodDup = async dates => {
+    const c = sb();
+    if (!c) return {
+      state: "fail",
+      dups: []
+    };
+    const seen = {}; // 주문 id -> [날짜…]
+    for (const d of dates) {
+      try {
+        const {
+          data,
+          error
+        } = await c.rpc("load_broadcast", {
+          p_date: d,
+          p_seq: 1
+        });
+        if (error) return {
+          state: "fail",
+          dups: []
+        };
+        const row = Array.isArray(data) ? data[0] : data;
+        if (!row || !row.found) continue; // 행이 없는 날짜는 정상 (건너뛴다)
+        const os = row.payload && row.payload.orders || [];
+        os.forEach(o => {
+          if (!o || !o.id) return;
+          seen[o.id] = seen[o.id] || [];
+          if (!seen[o.id].includes(d)) seen[o.id].push(d);
+        });
+      } catch (e) {
+        return {
+          state: "fail",
+          dups: []
+        };
+      }
+    }
+    const dups = Object.keys(seen).filter(id => seen[id].length > 1).map(id => ({
+      id,
+      dates: seen[id]
+    }));
+    return {
+      state: "ok",
+      dups
+    };
+  };
+  useEffect(() => {
+    if (!acctOpen) return;
+    if (!serverOn()) {
+      setPerData({
+        state: "fail",
+        rows: []
+      });
+      setPerDup({
+        state: "fail",
+        dups: []
+      });
+      return;
+    }
+    let dead = false;
+    setPerData({
+      state: "loading",
+      rows: []
+    });
+    setPerDup({
+      state: "checking",
+      dups: []
+    });
+    (async () => {
+      const r = await loadPeriod(perFrom, perTo);
+      if (dead) return;
+      setPerData(r);
+      if (r.state !== "ok") {
+        setPerDup({
+          state: "fail",
+          dups: []
+        });
+        return;
+      }
+      const ds = r.rows.map(x => String(x.date)).sort();
+      const dp = await checkPeriodDup(ds);
+      if (!dead) setPerDup(dp);
+    })();
+    return () => {
+      dead = true;
+    };
+  }, [acctOpen, perFrom, perTo, perTick, auth]);
+
+  /* 합계 — 화면에서 다시 세지 않는다. 요약본 값을 그대로 더한다. */
+  const periodCalc = (() => {
+    const all = perData.rows || [];
+    const rows = all.filter(r => {
+      if (perPlace === "") return true;
+      if (perPlace === PLACE_NONE) return !r.place;
+      return String(r.place) === perPlace;
+    }).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    const n = v => Number(v) || 0;
+    const t = {
+      days: rows.length,
+      orders: 0,
+      custs: 0,
+      sales: 0,
+      shipProfit: 0,
+      refund: 0,
+      keepGoods: 0,
+      keepPaid: 0,
+      cashPending: 0,
+      missDays: [],
+      trkMissing: 0,
+      vers: []
+    };
+    rows.forEach(r => {
+      const sc = r.ship_cost || {};
+      t.orders += n(r.total_orders);
+      t.custs += n(r.total_custs);
+      t.sales += n(r.paid_goods) + n(r.paid_ship_fee) + n(r.unpaid_goods) + n(r.unpaid_ship_fee);
+      t.shipProfit += n(sc.shipProfit);
+      t.refund += n(r.refund_goods) + n(r.refund_ship_fee);
+      t.keepGoods += n(r.keep_goods);
+      t.keepPaid += n(r.keep_paid);
+      t.cashPending += n(r.cash_pending);
+      if (sc.unknown) {
+        t.missDays.push(String(r.date));
+        t.trkMissing += n(sc.trkMissing);
+      }
+      if (r.calc_ver != null && !t.vers.includes(r.calc_ver)) t.vers.push(r.calc_ver);
+    });
+    const places = [...new Set(all.map(r => r.place).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ko"));
+    const hasNone = all.some(r => !r.place);
+    return {
+      rows,
+      t,
+      places,
+      hasNone
+    };
+  })();
+
   /* ---------- 📅 초기셋팅 달력 (0-6 · 2026-08-06 9차) ----------
-     상단바 날짜 «왼쪽» 📅 → 그 달의 방송 기록을 보여주고, 날짜를 눌러 이동한다.
+      상단바 날짜 «왼쪽» 📅 → 그 달의 방송 기록을 보여주고, 날짜를 눌러 이동한다.
       ⚠⚠ 이 화면은 «읽기 전용»이다. 서버에 절대 쓰지 않는다.
      ⚠⚠ 날짜 이동은 반드시 `changeDate` 를 통한다. `setBdate` 를 직접 부르면
          「앞 날짜 저장 확정 → 실패 시 이동 취소 → 빈 날짜는 묻기 → 있는 날짜는 서버 것 채택」이
@@ -7162,7 +7364,78 @@ function App() {
       className: "acctcaption"
     }, "🔖 킵 (아직 안 보낸 것)"), /*#__PURE__*/React.createElement("div", {
       className: "hint"
-    }, "킵 ", /*#__PURE__*/React.createElement("b", null, keepNicks.length, "명"), " · 받은 돈 ", /*#__PURE__*/React.createElement("b", null, won(keepPaidSum), "원"), " — 아직 안 보낸 물건이라 ", /*#__PURE__*/React.createElement("b", null, "위 매출·마진에는 들어 있지 않습니다."), "다음 발송 때 그 날짜 매출로 잡힙니다.")));
+    }, "킵 ", /*#__PURE__*/React.createElement("b", null, keepNicks.length, "명"), " · 받은 돈 ", /*#__PURE__*/React.createElement("b", null, won(keepPaidSum), "원"), " — 아직 안 보낸 물건이라 ", /*#__PURE__*/React.createElement("b", null, "위 매출·마진에는 들어 있지 않습니다."), "다음 발송 때 그 날짜 매출로 잡힙니다.")), /*#__PURE__*/React.createElement("div", {
+      className: "acctcard percard"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "acctcaption"
+    }, "📅 기간 합산"), /*#__PURE__*/React.createElement("div", {
+      className: "perbar"
+    }, /*#__PURE__*/React.createElement("input", {
+      className: "perfrom datein",
+      type: "date",
+      value: perFrom,
+      onChange: e => setPerFrom(e.target.value)
+    }), /*#__PURE__*/React.createElement("span", null, "~"), /*#__PURE__*/React.createElement("input", {
+      className: "perto datein",
+      type: "date",
+      value: perTo,
+      onChange: e => setPerTo(e.target.value)
+    }), /*#__PURE__*/React.createElement("button", {
+      className: "btn sm",
+      onClick: () => {
+        const m = monthEdge(bdate);
+        setPerFrom(m.from);
+        setPerTo(m.to);
+      }
+    }, "이번 달"), /*#__PURE__*/React.createElement("select", {
+      className: "perplace",
+      value: perPlace,
+      onChange: e => setPerPlace(e.target.value)
+    }, /*#__PURE__*/React.createElement("option", {
+      value: ""
+    }, "전체"), periodCalc.places.map(pl => /*#__PURE__*/React.createElement("option", {
+      key: pl,
+      value: pl
+    }, pl)), periodCalc.hasNone && /*#__PURE__*/React.createElement("option", {
+      value: PLACE_NONE
+    }, "장소 없음"))), perData.state === "fail" && /*#__PURE__*/React.createElement("div", {
+      className: "acctwarn perfail"
+    }, "⚠ 지난 방송 요약본을 ", /*#__PURE__*/React.createElement("b", null, "불러오지 못했습니다."), " 얼마인지 알 수 없어 합계를 보여주지 않습니다.", /*#__PURE__*/React.createElement("button", {
+      className: "btn sm perretry",
+      onClick: () => setPerTick(n => n + 1)
+    }, "다시 시도")), perData.state === "loading" && /*#__PURE__*/React.createElement("div", {
+      className: "hint"
+    }, "불러오는 중입니다…"), perData.state === "ok" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      className: "persum"
+    }, "방송 ", periodCalc.t.days, "회 · 주문 ", periodCalc.t.orders, "건 · 주문자 ", periodCalc.t.custs, "명"), arow("매출", periodCalc.t.sales, "입금·미입금 모두 · 킵 제외"), arow("배송 손익", periodCalc.t.shipProfit, ""), arow("환불", -periodCalc.t.refund, ""), periodCalc.t.missDays.length > 0 && /*#__PURE__*/React.createElement("div", {
+      className: "acctwarn perwarn"
+    }, "⚠ 운송장이 빠진 날이 있습니다 — ", /*#__PURE__*/React.createElement("b", null, periodCalc.t.trkMissing, "건"), "(", periodCalc.t.missDays.join(" · "), "). 그만큼 운임이 안 잡혀 ", /*#__PURE__*/React.createElement("b", null, "배송 손익이 실제보다 높습니다."), " 합계는 그대로 두었습니다."), periodCalc.t.vers.length > 1 && /*#__PURE__*/React.createElement("div", {
+      className: "acctwarn"
+    }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "계산 규칙(calc_ver)이 다른"), " 요약본이 섞여 있습니다 (", periodCalc.t.vers.join(" · "), "). 기준이 다른 값을 더한 것이라 합계를 그대로 믿지 마세요."), perDup.state === "checking" && /*#__PURE__*/React.createElement("div", {
+      className: "hint"
+    }, "주문 중복을 확인하는 중입니다…"), perDup.state === "fail" && /*#__PURE__*/React.createElement("div", {
+      className: "acctwarn"
+    }, "⚠ 방송 본문을 못 읽어 ", /*#__PURE__*/React.createElement("b", null, "중복 검사를 못 했습니다."), "같은 주문이 두 날짜에 들어가 있어도 지금은 알 수 없습니다."), perDup.state === "ok" && perDup.dups.length > 0 && /*#__PURE__*/React.createElement("div", {
+      className: "acctwarn perdup"
+    }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "같은 주문이 두 날짜에 들어가 있습니다 — ", perDup.dups.length, "건."), "그만큼 ", /*#__PURE__*/React.createElement("b", null, "매출이 부풀려집니다."), perDup.dups.slice(0, 5).map(d => /*#__PURE__*/React.createElement("div", {
+      key: d.id
+    }, "· 주문 ", d.id, " — ", d.dates.join(" · "))), "한쪽 날짜에서 지워야 합계가 맞습니다."), perDup.state === "ok" && perDup.dups.length === 0 && /*#__PURE__*/React.createElement("div", {
+      className: "hint"
+    }, "✓ 두 날짜에 겹치는 주문 없음 — 중복 없음을 확인했습니다."), periodCalc.rows.length === 0 && /*#__PURE__*/React.createElement("div", {
+      className: "empty small"
+    }, "이 기간에 방송이 없습니다"), periodCalc.rows.map(r => /*#__PURE__*/React.createElement("div", {
+      className: "perday",
+      "data-date": String(r.date),
+      key: String(r.date)
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "perdate"
+    }, String(r.date)), /*#__PURE__*/React.createElement("span", {
+      className: "perpl"
+    }, r.place || "장소 없음"), /*#__PURE__*/React.createElement("span", {
+      className: "pero"
+    }, Number(r.total_orders) > 0 ? `주문 ${r.total_orders}` : "준비"), /*#__PURE__*/React.createElement("span", {
+      className: "perv"
+    }, Number(r.total_orders) > 0 ? won(Number(r.paid_goods || 0) + Number(r.paid_ship_fee || 0) + Number(r.unpaid_goods || 0) + Number(r.unpaid_ship_fee || 0)) : "—"))))));
   })(), printMode && (() => {
     const grouped = {};
     shipLines.forEach(o => {
@@ -9824,6 +10097,20 @@ const CSS = `
 .accttitle { font-size: 20px; font-weight: 800; color: #16191f; }
 .acctdate { font-size: 14px; font-weight: 600; color: #8a919c; margin-left: 8px; }
 .acctcard { background: #fff; border: 1px solid #e3e6ea; border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; max-width: 1120px; }
+/* ===== 📅 기간 합산 (0-7 3단계 · 2026-08-07 9차) ===== */
+.perbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.perbar .datein { color-scheme: light; background: #fff; color: #16181d; border: 1px solid #ccd1d8; }
+.perplace { padding: 7px 10px; border-radius: 10px; border: 1px solid #ccd1d8; background: #fff; color: #16181d; font-family: inherit; font-size: 13px; }
+.persum { font-size: 13px; color: #4b5563; margin-bottom: 8px; }
+.perday { display: grid; grid-template-columns: 104px 1fr 84px 110px; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid #eef0f3; font-size: 13px; }
+.perdate { font-variant-numeric: tabular-nums; }
+.perpl { color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pero { color: #0f766e; }
+.perv { text-align: right; font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) {
+  .perday { grid-template-columns: 92px 1fr 96px; }
+  .perpl { grid-column: 1 / -1; order: 3; }
+}
 .acctcaption { font-size: 13px; font-weight: 700; color: #6b7280; margin-bottom: 8px; }
 .arow { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; border-bottom: 1px dashed #eef0f3; flex-wrap: wrap; }
 .arow:last-child { border-bottom: 0; }
