@@ -4793,6 +4793,151 @@ function App() {
   const prodFileRef = useRef(null);
   const [prodImport, setProdImport] = useState(null); // {name, list} — 교체/추가 선택 대기
 
+  /* ---------- 📦 서버 10단계 : 보관함 · 단골 배송지 · 메모 승격 (2026-08-07 9차) ----------
+     서버는 이미 준비돼 있다 — **DDL 0건** (세 번 연속).
+       product_lists ( list_id PK · name · products · cost_book )  is_member · 전원 공유
+       regulars      ( nick+addr PK · uses · last_used )            is_member · 전원 공유
+       memos         ( account PK · text )   ⭐ account = auth.uid() — «자기 것만»
+      ⚠⚠ 서버를 «못 읽었는데» 없다고 오판해 올리면, 서버에 있던 매니저 보관함을 덮어쓴다.
+         → 읽기 실패면 승격을 «통째로 중단»하고 「올렸음」 표시도 남기지 않는다 (다음에 다시 시도).
+     ⚠⚠ 올린 뒤에도 로컬을 «절대 지우지 않는다».
+         오프라인일 때 단골 배송지가 안 뜨면 방송이 멈춘다.
+     ⚠ 사장님 결정(2026-08-07): 이름이 겹치면 «물어본다» (기본값 없이 셋 다 고르게).
+        단골은 주소가 키라 자동 병합 — uses 는 큰 값, last_used 는 최근 것.
+        메모는 «이어붙인다» — 아무것도 안 사라진다. */
+  const PROMO_KEY = "saja:promoted:v1";
+  const [promoConf, setPromoConf] = useState([]); // [{ name, mine, srv }] — 이름이 겹치는 것
+  const promoRan = useRef(false);
+  const promoteToServer = async () => {
+    const c = sb();
+    if (!c || !serverOn()) return;
+    if (promoRan.current) return;
+    try {
+      const done = await loadKey(PROMO_KEY);
+      if (done.ok && done.value) {
+        promoRan.current = true;
+        return;
+      }
+    } catch (e) {
+      return;
+    }
+    promoRan.current = true;
+
+    /* ① 서버를 먼저 읽는다 — 하나라도 실패하면 «아무것도 하지 않는다» */
+    const rPl = await c.from("product_lists").select("*");
+    const rRg = await c.from("regulars").select("*");
+    const rMe = await c.from("memos").select("*");
+    if (rPl.error || rRg.error || rMe.error || !Array.isArray(rPl.data) || !Array.isArray(rRg.data) || !Array.isArray(rMe.data)) {
+      promoRan.current = false; // ⭐ 표시를 안 남긴다 — 다음 접속에 다시 시도
+      return;
+    }
+
+    /* ② 보관함 — 이름이 겹치는 것만 빼고 올린다 */
+    const myShelf = (await loadJson("saja:shelf", [])) || [];
+    const srvNames = {};
+    rPl.data.forEach(x => {
+      srvNames[String(x.name)] = x;
+    });
+    const conflicts = [];
+    const toPut = [];
+    myShelf.forEach(sh => {
+      const nm = String(sh.name || "");
+      if (srvNames[nm]) {
+        conflicts.push({
+          name: nm,
+          mine: sh,
+          srv: srvNames[nm]
+        });
+        return;
+      }
+      toPut.push({
+        list_id: String(sh.id),
+        name: nm,
+        products: sh.products || [],
+        cost_book: sh.costBook || {},
+        updated_at: new Date(sh.ts || Date.now()).toISOString()
+      });
+    });
+    if (toPut.length) await c.from("product_lists").upsert(toPut);
+
+    /* ③ 단골 배송지 — 주소가 키다. uses 는 큰 값, last_used 는 최근 것 */
+    const myReg = (await loadJson("saja:regulars", {})) || {};
+    const srvReg = {};
+    rRg.data.forEach(x => {
+      srvReg[`${x.nick}|${x.addr}`] = x;
+    });
+    const regPut = [];
+    Object.keys(myReg).forEach(nick => {
+      ((myReg[nick] || {}).addrs || []).forEach(a => {
+        const key = `${nick}|${a.addr}`;
+        const old = srvReg[key];
+        const mineLast = new Date(a.last || Date.now()).toISOString();
+        regPut.push({
+          nick,
+          addr: a.addr,
+          name: a.name || null,
+          phone: a.phone || null,
+          req: a.req || null,
+          uses: Math.max(Number(a.uses) || 0, Number(old && old.uses) || 0),
+          last_used: old && String(old.last_used) > mineLast ? old.last_used : mineLast,
+          last_date: old && old.last_date || null
+        });
+      });
+    });
+    if (regPut.length) await c.from("regulars").upsert(regPut);
+
+    /* ④ 메모 — ⭐ 이어붙인다. 어느 쪽도 사라지지 않는다 */
+    const myMemoRaw = await loadKey("saja:memo");
+    const myMemo = String(myMemoRaw.ok && myMemoRaw.value || "");
+    const srvMemo = String(rMe.data[0] && rMe.data[0].text || "");
+    if (myMemo.trim()) {
+      const joined = srvMemo.trim() && !srvMemo.includes(myMemo) ? `${srvMemo}\n\n──────────\n${myMemo}` : srvMemo.trim() ? srvMemo : myMemo;
+      await c.from("memos").upsert({
+        text: joined
+      });
+    }
+
+    /* ⑤ 겹치는 것이 남아 있으면 «아직» 끝난 게 아니다 — 표시를 안 남긴다 */
+    if (conflicts.length) {
+      setPromoConf(conflicts);
+      return;
+    }
+    await saveKey(PROMO_KEY, String(Date.now()), "승격 완료 표시");
+  };
+  useEffect(() => {
+    promoteToServer();
+  }, [auth]);
+
+  /* 겹치는 보관함 하나를 처리한다. ⚠ 기본값을 두지 않는다 — 급할 때 그냥 넘기면 잘못된 쪽이 남는다. */
+  const resolvePromo = async (name, how) => {
+    const c = sb();
+    const item = promoConf.find(x => x.name === name);
+    if (!c || !item) return;
+    try {
+      if (how === "mine") {
+        await c.from("product_lists").upsert([{
+          list_id: String(item.srv.list_id),
+          name,
+          products: item.mine.products || [],
+          cost_book: item.mine.costBook || {},
+          updated_at: new Date().toISOString()
+        }]);
+      } else if (how === "both") {
+        await c.from("product_lists").upsert([{
+          list_id: String(item.mine.id),
+          name: `${name} (2)`,
+          products: item.mine.products || [],
+          cost_book: item.mine.costBook || {},
+          updated_at: new Date().toISOString()
+        }]);
+      }
+      // how === "srv" 는 아무것도 안 한다 (서버 것을 그대로 둔다)
+      const rest = promoConf.filter(x => x.name !== name);
+      setPromoConf(rest);
+      if (!rest.length) await saveKey(PROMO_KEY, String(Date.now()), "승격 완료 표시");
+    } catch (e) {/* 실패하면 목록에 남는다 — 다시 고를 수 있다 */}
+  };
+
   /* ---------- 📅 0-7 3단계 · 기간 합산 + 장소별 필터 (2026-08-07 9차) ----------
      회계 화면 안 카드. 재료는 `summaries` 뿐 — **서버 변경 0건** (달력 0-6 과 같은 경로).
       ⚠⚠ 「못 읽음」과 「없음」을 절대 합치지 않는다.
@@ -7275,7 +7420,43 @@ function App() {
     style: {
       marginTop: 10
     }
-  }, "기록이 없는 날짜를 고르면 「빈 방송으로 시작할지」를 다시 물어봅니다.", /*#__PURE__*/React.createElement("b", null, " 지금 보고 있는 주문이 다른 날짜로 옮겨가는 일은 없습니다.")))), undoOpen && /*#__PURE__*/React.createElement("div", {
+  }, "기록이 없는 날짜를 고르면 「빈 방송으로 시작할지」를 다시 물어봅니다.", /*#__PURE__*/React.createElement("b", null, " 지금 보고 있는 주문이 다른 날짜로 옮겨가는 일은 없습니다.")))), promoConf.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "closewrap promowrap"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closecard"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "closehead"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "closetitle"
+  }, "📦 보관함을 서버와 맞추는 중입니다"), /*#__PURE__*/React.createElement("div", {
+    className: "sub"
+  }, "이름이 같은 것이 ", promoConf.length, "개 있습니다 — 어느 것을 남길지 골라주세요"))), promoConf.map(it => /*#__PURE__*/React.createElement("div", {
+    className: "promorow",
+    "data-name": it.name,
+    key: it.name
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "promoname"
+  }, "「", it.name, "」"), /*#__PURE__*/React.createElement("div", {
+    className: "promoside"
+  }, /*#__PURE__*/React.createElement("b", null, "내 PC"), " 상품 ", (it.mine.products || []).length, "종", it.mine.ts ? ` · ${new Date(it.mine.ts).toLocaleDateString("ko-KR")}` : ""), /*#__PURE__*/React.createElement("div", {
+    className: "promoside"
+  }, /*#__PURE__*/React.createElement("b", null, "서버"), " 상품 ", (it.srv.products || []).length, "종", it.srv.updated_at ? ` · ${new Date(it.srv.updated_at).toLocaleDateString("ko-KR")}` : ""), /*#__PURE__*/React.createElement("div", {
+    className: "promobtns"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    onClick: () => resolvePromo(it.name, "srv")
+  }, "서버 것 쓰기"), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    onClick: () => resolvePromo(it.name, "mine")
+  }, "내 것으로 덮기"), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm primary",
+    onClick: () => resolvePromo(it.name, "both")
+  }, "둘 다 남기기")))), /*#__PURE__*/React.createElement("div", {
+    className: "hint",
+    style: {
+      marginTop: 10
+    }
+  }, "「둘 다 남기기」를 고르면 내 것이 ", /*#__PURE__*/React.createElement("b", null, "「이름 (2)」"), "로 들어갑니다.", /*#__PURE__*/React.createElement("b", null, " 내 PC 의 보관함은 어느 쪽을 고르든 지워지지 않습니다.")))), undoOpen && /*#__PURE__*/React.createElement("div", {
     className: "closewrap",
     onClick: e => {
       if (e.target === e.currentTarget) {
@@ -10273,6 +10454,11 @@ const CSS = `
 .acctdate { font-size: 14px; font-weight: 600; color: #8a919c; margin-left: 8px; }
 .acctcard { background: #fff; border: 1px solid #e3e6ea; border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; max-width: 1120px; }
 /* ===== 📅 기간 합산 (0-7 3단계 · 2026-08-07 9차) ===== */
+/* 📦 서버 10단계 승격 — 이름 충돌 고르기 (2026-08-07 9차) */
+.promorow { border-top: 1px solid #eef0f3; padding: 10px 0; }
+.promoname { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+.promoside { font-size: 13px; color: #4b5563; }
+.promobtns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .perbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
 .perbar .datein { color-scheme: light; background: #fff; color: #16181d; border: 1px solid #ccd1d8; }
 .perplace { padding: 7px 10px; border-radius: 10px; border: 1px solid #ccd1d8; background: #fff; color: #16181d; font-family: inherit; font-size: 13px; }
