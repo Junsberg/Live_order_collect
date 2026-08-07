@@ -5169,6 +5169,148 @@ function App() {
     /* ⚠ 날짜 한도만이 아니라 용량 한도도 함께 건다 (pruneSnaps).
           안 걸면 대형 방송이 이어질 때 저장이 통째로 막힌다. */
     setSnaps(prev => pruneSnaps([snap, ...prev], SNAP_KEEP_DAYS, SNAP_MAX));
+    /* ⭐ 로컬을 «먼저» 찍고 서버로 보낸다 (서버 9단계 · 2026-08-07).
+          서버가 죽어도 내 기기에서는 되돌릴 수 있어야 한다.
+       ⚠ await 하지 않는다 — 서버 응답을 기다리다 삭제가 늦어지면 안 된다.
+          실패는 pushSrvSnap 안에서 snapPending 으로 «드러낸다». */
+    pushSrvSnap(snap);
+    /* ⚠ `reason` 에 대상(닉네임 등)이 들어 있다 — detail 에 전문을 남긴다.
+          target 은 날짜다 (날짜별로 훑어보기 위함). 설계안 5-12 의 「누가 · 무엇을 · 누구를」이
+          action + detail.reason 으로 갖춰진다. */
+    pushAudit(reason, snap.bdate, {
+      reason,
+      cnt: snap.cnt
+    });
+  };
+
+  /* ---------- 🗂 서버 9·13단계 : 스냅샷 승격 · 작업기록 (2026-08-07 9차) ----------
+     서버는 이미 준비돼 있다 (테이블·인덱스·RLS·권한) — **DDL 0건**.
+       snapshots : SELECT·INSERT·UPDATE·DELETE
+       audit_log : SELECT·INSERT «만» — ⭐ 아무도 못 지운다 (사장님 포함). 지우는 코드를 쓰지 말 것.
+      ⚠ 설계안이 못 박은 것: **로컬 스냅샷은 서버로 올리지 않는다.**
+        내 기기 되돌리기용이고 이미 지나간 일이다. 올리면 다른 사람 화면에
+        내 기기의 옛 스냅샷이 뒤섞여 시점 복원이 혼란스러워진다.
+        → 승격 시점부터 «새로 찍는» 것만 올린다.
+      ⚠⚠ 저장 실패를 다루는 규칙 (2026-08-07 사장님 확인)
+       ① 저장에 실패해도 «작업 자체는 진행»한다 — 주문서 삭제는 되어야 한다
+       ② 로컬 스냅샷을 «늘 먼저» 찍는다 — 서버가 죽어도 내 기기에서는 되돌릴 수 있다
+       ③ ⭐ 실패를 «조용히 넘기지 않는다» — 「서버에 안 올라간 스냅샷 N개」를 화면에 밝힌다
+          숨기면 «서버에 있다고 믿었는데 없는» 상황이 된다
+       ④ ⭐⭐ 정리(오래된 것 삭제)는 «저장이 성공한 뒤에만». 절대 먼저 지우지 않는다
+          먼저 지우면 저장이 실패했을 때 «있던 스냅샷마저» 사라져 되돌릴 게 없어진다 */
+  const SRV_SNAP_MAX = 10; // 날짜당 (2026-08-07 사장님 결정)
+  const SRV_SNAP_DAYS = 90;
+  const [srvSnaps, setSrvSnaps] = useState([]);
+  const [snapPending, setSnapPending] = useState(0); // 서버에 못 올린 개수
+  const [snapTick, setSnapTick] = useState(0);
+  const loadSrvSnaps = async d => {
+    const c = sb();
+    if (!c || !serverOn()) return;
+    try {
+      const {
+        data,
+        error
+      } = await c.from("snapshots").select("*").eq("date", d);
+      if (error || !Array.isArray(data)) return; // 못 읽으면 목록을 비우지 않는다
+      setSrvSnaps(data);
+    } catch (e) {/* 조회 실패는 조용히 — 로컬 되돌리기는 그대로 쓸 수 있다 */}
+  };
+  useEffect(() => {
+    loadSrvSnaps(bdate);
+  }, [bdate, snapTick, auth]);
+
+  /* 오래된 것 정리 — ⚠ «저장이 성공한 뒤에만» 부른다 */
+  const pruneSrvSnaps = async d => {
+    const c = sb();
+    if (!c) return;
+    try {
+      const {
+        data,
+        error
+      } = await c.from("snapshots").select("id,taken_at").eq("date", d);
+      if (error || !Array.isArray(data)) return; // 못 읽으면 «아무것도 지우지 않는다»
+      const sorted = data.slice().sort((a, b) => String(b.taken_at).localeCompare(String(a.taken_at)));
+      const over = sorted.slice(SRV_SNAP_MAX).map(x => x.id); // 최신 10개는 반드시 남는다
+      if (over.length) await c.from("snapshots").delete().in("id", over);
+      // 90일 지난 것은 날짜와 무관하게 정리한다
+      const cut = new Date(Date.now() - SRV_SNAP_DAYS * 86400000).toISOString();
+      const {
+        data: old,
+        error: e2
+      } = await c.from("snapshots").select("id").lt("taken_at", cut);
+      if (!e2 && Array.isArray(old) && old.length) {
+        await c.from("snapshots").delete().in("id", old.map(x => x.id));
+      }
+    } catch (e) {/* 정리 실패는 다음에 다시 한다 — 데이터가 사라지는 쪽이 아니다 */}
+  };
+  const pushAudit = async (action, target, detail) => {
+    const c = sb();
+    if (!c || !serverOn()) return;
+    try {
+      await c.from("audit_log").insert({
+        action,
+        target: target || null,
+        detail: detail || null
+      });
+    } catch (e) {/* 기록 실패가 작업을 막으면 안 된다 */}
+  };
+
+  /* 스냅샷 한 장을 서버로. ⚠ 실패해도 던지지 않는다 — 작업은 진행되어야 한다. */
+  const pushSrvSnap = async snap => {
+    const c = sb();
+    if (!c || !serverOn()) {
+      setSnapPending(n => n + 1);
+      return;
+    }
+    try {
+      const {
+        error
+      } = await c.from("snapshots").insert({
+        date: snap.bdate,
+        seq: 1,
+        reason: snap.reason,
+        taken_by: auth && auth.label || "",
+        payload: {
+          orders: snap.orders,
+          customers: snap.customers,
+          shipData: snap.shipData,
+          products: snap.products,
+          pickState: snap.pickState,
+          shipFee: snap.shipFee,
+          shipCost: snap.shipCost,
+          cnt: snap.cnt
+        }
+      });
+      if (error) {
+        setSnapPending(n => n + 1);
+        return;
+      } // ⭐ 실패를 숨기지 않는다
+      await pruneSrvSnaps(snap.bdate); // ⭐ 성공한 «뒤에만» 정리
+      setSnapTick(n => n + 1);
+    } catch (e) {
+      setSnapPending(n => n + 1);
+    }
+  };
+  /* 서버 스냅샷으로 되돌리기 — 로컬과 «같은 2단 확인»을 거친다.
+     ⚠ 되돌리기 직전 상태를 먼저 찍는다 (다시 되돌릴 수 있게). 로컬과 같은 규칙이다. */
+  const restoreSrvSnap = sp => {
+    if (undoArm !== sp.id) {
+      setUndoArm(sp.id);
+      setTimeout(() => setUndoArm(c => c === sp.id ? null : c), 4000);
+      return;
+    }
+    const d = sp.payload || {};
+    takeSnap("되돌리기 직전 (서버 기록)");
+    setOrders(d.orders || []);
+    setCustomers(d.customers || {});
+    setShipData(d.shipData || []);
+    setProducts(d.products || []);
+    setPickState(d.pickState || {});
+    if (typeof d.shipFee === "number") setShipFee(d.shipFee);
+    if (d.shipCost) setShipCost(readShipCost(d.shipCost));
+    setUndoArm(null);
+    setUndoOpen(false);
+    showToast(`✓ ${sp.taken_by || "?"} 님이 남긴 시점으로 되돌렸습니다 — 주문 ${d.cnt || 0}건`);
   };
   const restoreSnap = sp => {
     if (undoArm !== sp.id) {
@@ -7155,7 +7297,15 @@ function App() {
       setUndoOpen(false);
       setUndoArm(null);
     }
-  }, "닫기")), daySnaps.length === 0 ? /*#__PURE__*/React.createElement("div", {
+  }, "닫기")), snapPending > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "acctwarn snapfail"
+  }, "⚠ ", /*#__PURE__*/React.createElement("b", {
+    className: "snappending"
+  }, "서버에 안 올라간 스냅샷 ", snapPending, "개"), " 가 있습니다. 이 기록은 ", /*#__PURE__*/React.createElement("b", null, "내 기기에만"), " 있습니다 — 다른 사람 화면에서는 되돌릴 수 없습니다."), /*#__PURE__*/React.createElement("div", {
+    className: "snaplocal"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "acctcaption"
+  }, "💻 내 기기"), daySnaps.length === 0 ? /*#__PURE__*/React.createElement("div", {
     className: "empty"
   }, "되돌릴 기록이 없습니다.") : /*#__PURE__*/React.createElement("div", {
     className: "closelist"
@@ -7174,7 +7324,32 @@ function App() {
   }, "주문 ", sp.cnt, "건"), /*#__PURE__*/React.createElement("button", {
     className: "btn sm" + (undoArm === sp.id ? " danger" : " primary"),
     onClick: () => restoreSnap(sp)
-  }, undoArm === sp.id ? "한 번 더 누르면 되돌림" : "이 시점으로")))), /*#__PURE__*/React.createElement("div", {
+  }, undoArm === sp.id ? "한 번 더 누르면 되돌림" : "이 시점으로"))))), /*#__PURE__*/React.createElement("div", {
+    className: "snapserver"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "acctcaption"
+  }, "☁ 서버 (다른 사람이 한 것도 보입니다)"), srvSnaps.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "empty small"
+  }, "서버에 쌓인 기록이 없습니다.") : /*#__PURE__*/React.createElement("div", {
+    className: "closelist"
+  }, srvSnaps.map(sp => /*#__PURE__*/React.createElement("div", {
+    className: "snaprow",
+    key: sp.id
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "snaptime"
+  }, new Date(sp.taken_at).toLocaleTimeString("ko-KR", {
+    hour: "2-digit",
+    minute: "2-digit"
+  })), /*#__PURE__*/React.createElement("span", {
+    className: "snapreason"
+  }, sp.reason), /*#__PURE__*/React.createElement("span", {
+    className: "snapby"
+  }, sp.taken_by || "?"), /*#__PURE__*/React.createElement("span", {
+    className: "snapcnt"
+  }, "주문 ", sp.payload && sp.payload.cnt || 0, "건"), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm" + (undoArm === sp.id ? " danger" : ""),
+    onClick: () => restoreSrvSnap(sp)
+  }, undoArm === sp.id ? "한 번 더 누르면 되돌림" : "이 시점으로"))))), /*#__PURE__*/React.createElement("div", {
     className: "hint",
     style: {
       marginTop: 10
