@@ -5297,11 +5297,16 @@ function App() {
 
   // 지금 화면 상태를 통째로 담아둔다 (그 날짜 것만 5개 유지)
   const takeSnap = reason => {
+    /* ⭐ srcDate — 이 데이터가 «어느 날짜와 맞춰져 있었나» (2026-08-10 12차).
+          bdate 로는 못 잡는다: emptyStartFresh 는 날짜를 «바꾼 뒤»에 찍으므로
+          스냅샷 bdate 가 이미 새 날짜다. daySnaps 도 bdate 로 거르니 화면에 보이는 것은
+          언제나 날짜가 같다. 실제로 구별되는 값은 srvSyncedDate 하나뿐이다. */
     const snap = {
       id: uid(),
       at: Date.now(),
       bdate,
       reason,
+      srcDate: srvSyncedDate,
       orders: JSON.parse(JSON.stringify(orders)),
       customers: JSON.parse(JSON.stringify(customers)),
       shipData: JSON.parse(JSON.stringify(shipData)),
@@ -5423,7 +5428,8 @@ function App() {
           pickState: snap.pickState,
           shipFee: snap.shipFee,
           shipCost: snap.shipCost,
-          cnt: snap.cnt
+          cnt: snap.cnt,
+          srcDate: snap.srcDate || null
         }
       });
       if (error) {
@@ -5438,6 +5444,35 @@ function App() {
   };
   /* 서버 스냅샷으로 되돌리기 — 로컬과 «같은 2단 확인»을 거친다.
      ⚠ 되돌리기 직전 상태를 먼저 찍는다 (다시 되돌릴 수 있게). 로컬과 같은 규칙이다. */
+  /* ⭐⭐ 되돌리기 날짜 교차 오염 막기 (2026-08-10 12차 · 재현된 실결함)
+        「빈 방송으로 시작」은 setSrvSyncedDate(bdate) 로 «자동 저장 게이트를 열어둔 채» 끝난다.
+        그 뒤 되돌리기로 앞 날짜 주문이 화면에 돌아오면 isBlankDay 가 false 가 되어
+        가드 두 개(자동저장 날짜 확인 · 빈 날짜 가드)를 «모두» 통과한다.
+        → 같은 주문이 두 날짜에 남아 기간 회계에서 매출이 두 배로 잡힌다.
+        ⚠ 3차 실사고(「지금 화면 내용을 이 날짜로 올리기」)와 «같은 결과»에 이르는 다른 길이다.
+           그쪽은 3단 잠금 + 뒷정리 배너로 조여 놨는데 이쪽은 아무 잠금이 없었다.
+        ⚠ 옛 스냅샷에는 srcDate 가 «없다». 없다고 막으면 기존 되돌리기가 통째로 깨진다.
+           → 없으면 «막지 않고», 대신 뒷정리 배너로 알린다. */
+  const [undoWarn, setUndoWarn] = useState(null);
+  const undoBlocked = src => !!src && src !== bdate;
+  const amountOf = list => (list || []).filter(o => !o.canceled).reduce((a, o) => a + (Number(o.price) || 0) * (Number(o.qty) || 1), 0);
+
+  /* 옛 스냅샷(srcDate 없음)을 되돌린 «뒤» — 그 내용이 어느 날짜에서 왔는지 «알 수 없다».
+     막지 않고 알린다. srcDate 가 붙은 뒤로 찍힌 것은 위에서 이미 걸러졌으므로
+     이 경고는 옛 기록에만 뜨고, 보관 한도(SNAP_KEEP_DAYS)가 지나면 저절로 사라진다.
+     ⚠ 「이 날짜에 서버 행이 없을 때만」으로 좁혔다가 실패했다 (2026-08-10 실측).
+        상품만 있어도 행이 생겨 srvRev 가 1 이 되므로 그 조건으로는 «영영 안 뜬다». */
+  const warnUndoDup = (src, list) => {
+    if (src) return; // 날짜를 아는 것은 이미 위에서 걸렀다
+    const live = (list || []).filter(o => !o.canceled);
+    if (!live.length) return; // 되돌린 내용이 비었으면 알릴 것이 없다
+    setUndoWarn({
+      kind: "dup",
+      to: bdate,
+      count: live.length,
+      amount: amountOf(list)
+    });
+  };
   const restoreSrvSnap = sp => {
     if (undoArm !== sp.id) {
       setUndoArm(sp.id);
@@ -5445,6 +5480,17 @@ function App() {
       return;
     }
     const d = sp.payload || {};
+    if (undoBlocked(d.srcDate)) {
+      // ⭐ 앞 날짜에서 온 기록 — 거부
+      setUndoArm(null);
+      setUndoWarn({
+        kind: "block",
+        src: d.srcDate,
+        to: bdate,
+        count: (d.orders || []).length
+      });
+      return;
+    }
     takeSnap("되돌리기 직전 (서버 기록)");
     setOrders(d.orders || []);
     setCustomers(d.customers || {});
@@ -5455,12 +5501,24 @@ function App() {
     if (d.shipCost) setShipCost(readShipCost(d.shipCost));
     setUndoArm(null);
     setUndoOpen(false);
+    warnUndoDup(d.srcDate, d.orders);
     showToast(`✓ ${sp.taken_by || "?"} 님이 남긴 시점으로 되돌렸습니다 — 주문 ${d.cnt || 0}건`);
   };
   const restoreSnap = sp => {
     if (undoArm !== sp.id) {
       setUndoArm(sp.id);
       setTimeout(() => setUndoArm(c => c === sp.id ? null : c), 4000);
+      return;
+    }
+    if (undoBlocked(sp.srcDate)) {
+      // ⭐ 앞 날짜에서 온 기록 — 거부
+      setUndoArm(null);
+      setUndoWarn({
+        kind: "block",
+        src: sp.srcDate,
+        to: bdate,
+        count: (sp.orders || []).length
+      });
       return;
     }
     takeSnap("되돌리기 직전"); // 되돌린 것 자체도 되돌릴 수 있게
@@ -5473,6 +5531,7 @@ function App() {
     if (sp.shipCost) setShipCost(readShipCost(sp.shipCost));
     setUndoArm(null);
     setUndoOpen(false);
+    warnUndoDup(sp.srcDate, sp.orders);
     showToast(`✓ ${new Date(sp.at).toLocaleTimeString("ko-KR", {
       hour: "2-digit",
       minute: "2-digit"
@@ -7285,6 +7344,15 @@ function App() {
   }, moveLeft.from, " 로 가기"), /*#__PURE__*/React.createElement("button", {
     className: "btn sm",
     onClick: () => setMoveLeft(null)
+  }, "확인했습니다")), undoWarn && /*#__PURE__*/React.createElement("div", {
+    className: "srvbar movebar"
+  }, /*#__PURE__*/React.createElement("span", null, undoWarn.kind === "block" ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("b", null, "⚠ 이 기록은 앞 날짜(", undoWarn.src, ") 내용입니다 — 되돌리지 않았습니다."), " ", "지금 날짜(", undoWarn.to, ")에 넣으면 ", /*#__PURE__*/React.createElement("b", null, "두 날짜에 같은 매출"), "이 잡힙니다.") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("b", null, "⚠ 되돌린 주문 ", undoWarn.count, "건(₩", won(undoWarn.amount), ")이 앞 날짜에도 남아 있습니다."), " ", "그대로 두면 ", /*#__PURE__*/React.createElement("b", null, "두 날짜에 같은 매출"), "이 잡힙니다 — 확인해 주세요.")), undoWarn.kind === "block" && /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    onClick: () => changeDate(undoWarn.src),
+    disabled: dateBusy
+  }, undoWarn.src, " 로 가기"), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    onClick: () => setUndoWarn(null)
   }, "확인했습니다")), srvPick && !srvPick.empty && /*#__PURE__*/React.createElement("div", {
     className: "closewrap"
   }, /*#__PURE__*/React.createElement("div", {
