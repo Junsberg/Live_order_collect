@@ -5462,15 +5462,28 @@ function App() {
      이 경고는 옛 기록에만 뜨고, 보관 한도(SNAP_KEEP_DAYS)가 지나면 저절로 사라진다.
      ⚠ 「이 날짜에 서버 행이 없을 때만」으로 좁혔다가 실패했다 (2026-08-10 실측).
         상품만 있어도 행이 생겨 srvRev 가 1 이 되므로 그 조건으로는 «영영 안 뜬다». */
-  const warnUndoDup = (src, list) => {
+  /* ⭐⭐ 경고 기준은 «저장 기준»과 같아야 한다 (2026-08-11 13차 · 안전장치 165).
+        12차에는 「주문 건수」만 봤다. 그런데 자동 저장을 막는 isBlankDay 는
+        products · shipData · pickState 도 본다.
+          → 「주문 0 · 상품 23」 옛 스냅샷을 되돌리면 저장은 «되는데» 경고는 «안 떴다».
+            앞 날짜 상품·재고가 이 날짜에 심어지고 서버 행 + 요약본까지 생기는데
+            사장님은 그것을 «모른 채» 넘어갔다.
+        ⚠ 실서버에 실물이 있었다 — snapshots date=2026-08-23 · srcDate 없음 · 주문 0 · 상품 23종.
+        ⚠ 두 기준이 어긋나면 또 샌다. isBlankDay 를 고칠 때 여기도 함께 본다. */
+  const warnUndoDup = (src, sp) => {
     if (src) return; // 날짜를 아는 것은 이미 위에서 걸렀다
-    const live = (list || []).filter(o => !o.canceled);
-    if (!live.length) return; // 되돌린 내용이 비었으면 알릴 것이 없다
+    const d = sp || {};
+    const live = (d.orders || []).filter(o => !o.canceled);
+    const prods = (d.products || []).length;
+    const trks = (d.shipData || []).length;
+    if (!live.length && !prods && !trks) return; // 되돌린 내용이 «정말로» 비었으면 알릴 것이 없다
     setUndoWarn({
       kind: "dup",
       to: bdate,
       count: live.length,
-      amount: amountOf(list)
+      amount: amountOf(d.orders),
+      prods,
+      trks
     });
   };
   const restoreSrvSnap = sp => {
@@ -5501,7 +5514,7 @@ function App() {
     if (d.shipCost) setShipCost(readShipCost(d.shipCost));
     setUndoArm(null);
     setUndoOpen(false);
-    warnUndoDup(d.srcDate, d.orders);
+    warnUndoDup(d.srcDate, d);
     showToast(`✓ ${sp.taken_by || "?"} 님이 남긴 시점으로 되돌렸습니다 — 주문 ${d.cnt || 0}건`);
   };
   const restoreSnap = sp => {
@@ -5531,7 +5544,7 @@ function App() {
     if (sp.shipCost) setShipCost(readShipCost(sp.shipCost));
     setUndoArm(null);
     setUndoOpen(false);
-    warnUndoDup(sp.srcDate, sp.orders);
+    warnUndoDup(sp.srcDate, sp);
     showToast(`✓ ${new Date(sp.at).toLocaleTimeString("ko-KR", {
       hour: "2-digit",
       minute: "2-digit"
@@ -7346,7 +7359,7 @@ function App() {
     onClick: () => setMoveLeft(null)
   }, "확인했습니다")), undoWarn && /*#__PURE__*/React.createElement("div", {
     className: "srvbar movebar"
-  }, /*#__PURE__*/React.createElement("span", null, undoWarn.kind === "block" ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("b", null, "⚠ 이 기록은 앞 날짜(", undoWarn.src, ") 내용입니다 — 되돌리지 않았습니다."), " ", "지금 날짜(", undoWarn.to, ")에 넣으면 ", /*#__PURE__*/React.createElement("b", null, "두 날짜에 같은 매출"), "이 잡힙니다.") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("b", null, "⚠ 되돌린 주문 ", undoWarn.count, "건(₩", won(undoWarn.amount), ")이 앞 날짜에도 남아 있습니다."), " ", "그대로 두면 ", /*#__PURE__*/React.createElement("b", null, "두 날짜에 같은 매출"), "이 잡힙니다 — 확인해 주세요.")), undoWarn.kind === "block" && /*#__PURE__*/React.createElement("button", {
+  }, /*#__PURE__*/React.createElement("span", null, undoWarn.kind === "block" ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("b", null, "⚠ 이 기록은 앞 날짜(", undoWarn.src, ") 내용입니다 — 되돌리지 않았습니다."), " ", "지금 날짜(", undoWarn.to, ")에 넣으면 ", /*#__PURE__*/React.createElement("b", null, "두 날짜에 같은 매출"), "이 잡힙니다.") : /*#__PURE__*/React.createElement(React.Fragment, null, undoWarn.count > 0 ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("b", null, "⚠ 되돌린 주문 ", undoWarn.count, "건(₩", won(undoWarn.amount), ")이 앞 날짜에도 남아 있습니다."), " ", "그대로 두면 ", /*#__PURE__*/React.createElement("b", null, "두 날짜에 같은 매출"), "이 잡힙니다 — 확인해 주세요.") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("b", null, "⚠ 되돌린 내용(", [undoWarn.prods ? `상품 ${undoWarn.prods}종` : "", undoWarn.trks ? `운송장 ${undoWarn.trks}건` : ""].filter(Boolean).join(" · "), ")이 앞 날짜에서 온 것일 수 있습니다."), " ", "이 날짜(", undoWarn.to, ")에 ", /*#__PURE__*/React.createElement("b", null, "앞 날짜 상품·재고"), "가 그대로 기록됩니다 — 확인해 주세요."))), undoWarn.kind === "block" && /*#__PURE__*/React.createElement("button", {
     className: "btn sm",
     onClick: () => changeDate(undoWarn.src),
     disabled: dateBusy
