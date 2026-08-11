@@ -1855,7 +1855,21 @@ function App() {
         return;
       }
       srvFirstSync.current = false; // 읽기에 성공한 뒤에만 내린다
-      const localEmpty = orders.length === 0 && products.length === 0;
+      /* ⭐⭐ 「비었는가」 판정은 앱에 «한 벌»만 둔다 (2026-08-11 13차 · 안전장치 166).
+            전에는 여기서 `orders.length === 0 && products.length === 0` 을 따로 셌다.
+            그런데 저장을 막는 isBlankDay 는 shipData·pickState 도 본다.
+              → 「주문 0 · 상품 0 인데 운송장(또는 픽업)이 남은」 화면으로 날짜를 바꾸면
+                 ① 여기서 «묻지도 않고» 게이트가 열리고
+                 ② isBlankDay 는 false 라 빈 날짜 가드를 통과해
+                 ③ 앞 날짜 운송장·픽업이 «새 날짜»에 기록됐다 (재현된 실결함).
+            ⚠ 도달 경로도 화면 조작뿐이다: 주문서 삭제(운송장은 남는다) → 상품 삭제 → 날짜 변경.
+            ⚠ 판정을 또 나누지 마라. 두 벌이 되는 순간 반드시 어긋난다 (안전장치 165 와 같은 축). */
+      const localEmpty = isBlankDay({
+        orders,
+        products,
+        shipData,
+        pickState
+      });
       if (!r.exists) {
         // 서버에 그 날짜가 없음
         srvRevRef.current = null;
@@ -9383,7 +9397,11 @@ function App() {
         onChange: () => toggleTrkPick(d)
       })), /*#__PURE__*/React.createElement("td", {
         className: "whname"
-      }, d.nick, dq > 1 && /*#__PURE__*/React.createElement("span", {
+      }, /*#__PURE__*/React.createElement("div", {
+        className: "whnick"
+      }, d.nick), /*#__PURE__*/React.createElement("div", {
+        className: "whbadges"
+      }, dq > 1 && /*#__PURE__*/React.createElement("span", {
         className: "seqbadge"
       }, dq, "차"), isDoneRow && /*#__PURE__*/React.createElement("span", {
         className: "donebadge"
@@ -9396,7 +9414,7 @@ function App() {
         title: "배송지 이름과 대조하지 못했습니다"
       }, "미검증"), d.consign && /*#__PURE__*/React.createElement("span", {
         className: "consignbadge"
-      }, "위탁")), /*#__PURE__*/React.createElement("td", null, d.name || "-"), /*#__PURE__*/React.createElement("td", null, d.phone || "-"), /*#__PURE__*/React.createElement("td", null, d.addr || "-"), /*#__PURE__*/React.createElement("td", null, d.carrier || "-"), /*#__PURE__*/React.createElement("td", {
+      }, "위탁"))), /*#__PURE__*/React.createElement("td", null, d.name || "-"), /*#__PURE__*/React.createElement("td", null, d.phone || "-"), /*#__PURE__*/React.createElement("td", null, d.addr || "-"), /*#__PURE__*/React.createElement("td", null, d.carrier || "-"), /*#__PURE__*/React.createElement("td", {
         className: "consigncol"
       }, /*#__PURE__*/React.createElement("label", {
         className: "consignbox",
@@ -10679,7 +10697,25 @@ const CSS = `
 .whtbl td { cursor: pointer; }
 .whtbl .chk { width: 34px; }
 .whtbl input[type=checkbox] { width: 20px; height: 20px; cursor: pointer; accent-color: #0f766e; }
+/* ⚠ 13차 실측 — 아래 .whtbl .whname 은 «죽은 규칙»이었다.
+      ⑤ 업로드의 운송장 표는 «.tbl» 이고 .whtbl 이 아니어서 font-weight 가 400 으로 나왔다.
+      원래 의도(600)대로 .whname 에 직접 건다. 옛 규칙은 다른 표에 걸려 있을 수 있어 «남겨 둔다». */
 .whtbl .whname { font-weight: 600; }
+.whname { font-weight: 600; }
+/* ⭐ 뱃지는 닉네임 «아래» 줄에 고정한다 (2026-08-11 13차 사장님 요청).
+      뱃지 자체의 margin-left 를 0 으로 덮고 gap 으로 띄운다 —
+      안 그러면 첫 뱃지만 왼쪽이 6px 들어가 닉네임과 어긋난다.
+   ⚠ 13차 실측 — ⑤ 업로드의 이 표는 «.tbl» 이지 .whtbl 이 «아니다».
+      처음에 .whtbl .whbadges 로 썼다가 규칙이 통째로 안 먹었다 (좌표 계측으로 잡음).
+      .whtbl .whname 규칙도 같은 이유로 «지금 안 먹고 있다» (font-weight 실측 400).
+      → 클래스에 기대지 말고 «계측»으로 확인할 것.
+   ⚠⚠ 이 CSS 는 «템플릿 리터럴 안»이다. 주석에 백틱을 쓰면 문자열이 끊겨 앱이 통째로 죽는다.
+      13차에 실제로 그랬다. «빌드는 통과했다» — 빌드 통과는 동작을 보장하지 않는다.
+   ⚠ 뱃지가 여러 개일 수 있어 flex-wrap 이다. nowrap 으로 바꾸면 칸이 넘친다. */
+.whnick { line-height: 1.35; }
+.whbadges { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; }
+.whbadges:empty { display: none; }
+.whbadges > span { margin-left: 0; }
 .whtbl .whtotal { font-weight: 800; font-size: 15px; }
 /* 운송장 줄 삭제 (2026-08-03) */
 .trkdelcol { width: 34px; }
