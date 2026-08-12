@@ -1532,6 +1532,83 @@ function App() {
       e.currentTarget.releasePointerCapture(e.pointerId);
     } catch (err) {}
   };
+
+  /* ---------- 💾 서버 전체 백업 (2026-08-11 13차 · 안전장치 168) ----------
+     ⚠ 무료 플랜에는 PITR(시점 복구)도 다운로드 백업도 «없다».
+        사고가 나면 되돌릴 수단이 아예 없으므로, 사장님이 손으로 받아 두는 것이 유일한 대비다.
+     ⚠⚠ 이 기능은 «읽기 전용»이다. select 만 쓴다 — 서버를 바꾸는 코드를 여기에 «절대» 넣지 마라.
+        백업하다가 서버가 상하면 본말전도다.
+     ⚠ 서버에 기록도 남기지 않는다 (audit_log 포함). 백업이 서버 용량을 먹으면 안 된다.
+     ⚠ 한 테이블이라도 못 읽으면 «파일을 만들지 않는다». 반쪽 백업을 「백업했다」고 믿는 것이
+        백업이 없는 것보다 위험하다 (안전장치 12 「읽기 실패 ≠ 빈 데이터」와 같은 축). */
+  const BACKUP_TABLES = ["broadcasts", "summaries", "keeps", "costs", "cost_book", "snapshots", "audit_log", "regulars", "product_lists", "memos", "app_accounts", "app_settings", "edit_locks", "usage"];
+  /* 복원해서는 «안 되는» 것 — 일시적 상태라 되살리면 편집이 막히거나 엉뚱한 잠금이 생긴다.
+     백업 파일에는 담되 「복원 제외」로 표시해 둔다. */
+  const NO_RESTORE = ["edit_locks", "usage"];
+  const [backupBusy, setBackupBusy] = useState(false);
+  const backupServer = async () => {
+    if (!auth || !auth.isOwner) {
+      showToast("⚠ 서버 백업은 사장님만 할 수 있습니다");
+      return;
+    }
+    if (backupBusy) return;
+    const c = sb();
+    if (!c) {
+      showToast("⚠ 서버에 연결되어 있지 않습니다 — 백업할 수 없습니다");
+      return;
+    }
+    setBackupBusy(true);
+    try {
+      const data = {};
+      const counts = {};
+      for (const t of BACKUP_TABLES) {
+        const r = await c.from(t).select("*");
+        /* ⭐⭐ 실패를 «빈 배열»로 넘기지 않는다 (안전장치 12).
+              error 만 봐서는 부족하다 — 권한(RLS)에 막히거나 표가 없어지면
+              Supabase 는 «오류 없이» 아무것도 안 준다. 그것을 「원래 비어 있던 표」로
+              백업하면, 복구할 때 그 표가 통째로 사라진 것을 «백업했다고 믿은 채» 넘어간다.
+           ⚠ 배열이 왔는지까지 확인한다. 빈 배열([])은 «정상»이다 — 진짜로 없을 수 있다. */
+        if (r.error || !Array.isArray(r.data)) {
+          showToast(`⚠ 「${t}」를 읽지 못해 백업을 «중단»했습니다 — 반쪽 파일은 만들지 않습니다 (${r.error && r.error.message || "응답이 목록이 아닙니다"})`);
+          setBackupBusy(false);
+          return;
+        }
+        data[t] = r.data;
+        counts[t] = data[t].length;
+      }
+      const out = {
+        _백업: "사자창고 라이브 — 서버 전체 백업",
+        _만든시각: new Date().toISOString(),
+        _만든사람: auth.label || auth.email || "",
+        _표수: BACKUP_TABLES.length,
+        _행수: counts,
+        _복원제외: NO_RESTORE,
+        _주의: "고객 연락처·주소가 들어 있습니다. 함부로 공유하지 마세요.",
+        tables: data
+      };
+      const blob = new Blob([JSON.stringify(out, null, 1)], {
+        type: "application/json;charset=utf-8"
+      });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      /* ⭐ 파일 이름을 «날짜»로 고정한다 — 같은 날 여러 번 눌러도 사본이 쌓이지 않는다.
+         ⚠ 이름에 «한글을 쓰지 않는다» (2026-08-11 13차 계측).
+            환경에 따라 한글 이름이 통째로 버려지고 「download」로 저장된다.
+            실측: a.download 에 한글이 있으면 → 「download」 · 영문뿐이면 → 그대로 유지.
+            그러면 여러 번 받았을 때 download(1)·(2)… 로 «사본이 쌓인다» — 이 기능의 목적에 어긋난다. */
+      a.download = `saja_server_backup_${todayISO().replace(/-/g, "")}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      const total = Object.values(counts).reduce((s, n) => s + n, 0);
+      showToast(`✓ 서버 백업 완료 — 표 ${BACKUP_TABLES.length}개 · 행 ${total}건 (${(blob.size / 1024).toFixed(0)}KB)`);
+    } catch (e) {
+      showToast(`⚠ 백업 중 오류가 나서 «중단»했습니다 — ${String(e && e.message || e).slice(0, 80)}`);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
   const saveMemoFile = () => {
     const blob = new Blob([memoText], {
       type: "text/plain;charset=utf-8"
@@ -9646,7 +9723,22 @@ function App() {
     }, c.cashIssued ? "발행완료 ✓" : "미발행"));
   })))), tab === "settings" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
-  }, settingEdit === null && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }, settingEdit === null && /*#__PURE__*/React.createElement(React.Fragment, null, auth && auth.isOwner && /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "서버 백업 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "사고에 대비해 서버 내용을 파일로 받아 둡니다")), /*#__PURE__*/React.createElement("button", {
+    className: "btn wide",
+    disabled: backupBusy,
+    onClick: backupServer
+  }, backupBusy ? "받는 중…" : "💾 서버 전체 백업 받기"), /*#__PURE__*/React.createElement("div", {
+    className: "hint",
+    style: {
+      marginTop: 8
+    }
+  }, "지금 서버(Supabase)에는 ", /*#__PURE__*/React.createElement("b", null, "자동 백업도 시점 복구도 없습니다."), " 문제가 생기면 되돌릴 방법이 없으므로", /*#__PURE__*/React.createElement("b", null, " 방송이 끝난 뒤 가끔 눌러"), " 파일을 받아 두세요.", /*#__PURE__*/React.createElement("br", null), "· 읽기만 합니다 — 이 버튼으로 서버 내용이 바뀌지 않습니다.", /*#__PURE__*/React.createElement("br", null), "· 파일 이름이 날짜라서 ", /*#__PURE__*/React.createElement("b", null, "같은 날 여러 번 눌러도 사본이 쌓이지 않습니다."), /*#__PURE__*/React.createElement("br", null), "· 한 곳이라도 못 읽으면 ", /*#__PURE__*/React.createElement("b", null, "파일을 만들지 않고 중단"), "합니다 (반쪽 백업 방지).", /*#__PURE__*/React.createElement("br", null), "· ⚠ 파일에 ", /*#__PURE__*/React.createElement("b", null, "고객 연락처·주소"), "가 들어 있습니다. 함부로 공유하지 마세요.")), /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "cardtitle"
