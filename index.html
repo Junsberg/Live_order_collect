@@ -648,7 +648,7 @@ const isBlankDay = p => !!p && !(p.orders || []).length && !(p.products || []).l
       안 올리면 옛 규칙으로 만든 요약이 서버에 그대로 남는다. 본문은 안 바뀌었으니
       src_hash 로는 절대 못 잡는다 — 「틀린 걸 알아도 어느 날짜가 틀렸는지」 못 찾게 된다.
    1 = 2026-07-28 최초 (킵 제외 · 차수 마감분 포함 · noFee 4종 · 환불 분리) */
-const CALC_VER = 2; /* ⭐ 2026-08-12 14차 — trkMissing 을 «사람» 단위로 바꿈 (안전장치 170).
+const CALC_VER = 3; /* ⭐ 2026-08-12 14차 — trkMissing 을 «사람» 단위로 바꿈 (안전장치 170).
                        지난 8개 날짜 요약본은 calc_ver 1 로 남는다. 그 날짜를 열어 회계를 보면
                        「계산 규칙이 다릅니다」 안내가 뜬다 — 그것이 이 번호의 «목적»이다. */
 
@@ -3339,6 +3339,14 @@ function App() {
      ⚠ 결산에는 「이미 보낸 차수(출고완료)」도 넣는다. 빼면 오전 출고분이 사라진다. */
   const closing = useMemo(() => {
     const closingOrders = [...activeOrders, ...doneOrders];
+    /* ⭐⭐ 회계·상품별 집계 대상 — 「입금된 주문」 (2026-08-12 14차 · 안전장치 171)
+       ⚠ 이 선언은 goods·totalQty·pmap «앞»에 있어야 한다. 뒤에 두면 선언 전 사용으로
+          앱이 통째로 죽는다 — 빌드는 «성공»한다 (13차에 같은 함정을 겪었다). */
+    const paidOrder = o => o.done ? o.donePaid !== false : cust(o.nick).paid;
+    const acctOrders = orders.filter(o => !o.canceled && paidOrder(o));
+    const unpaidOrders = orders.filter(o => !o.canceled && !paidOrder(o));
+    const unpaidQtySum = unpaidOrders.reduce((s, o) => s + o.qty, 0);
+    const unpaidAmtSum = unpaidOrders.reduce((s, o) => s + o.price * o.qty, 0);
     /* ⚠ 잠금해제된 주문의 배송비를 잃지 않는다 (2026-07-31 5차).
           doneFee 는 그 차수의 「머리 주문」에만 붙는다. 하필 머리 주문을 잠금해제하면
           doneFee 가 사라지고, 열린 쪽은 wasDone 이라 배송비를 안 매기므로
@@ -3359,13 +3367,17 @@ function App() {
     const refundAmt = refundOrders.reduce((t, o) => t + o.price * o.qty, 0);
     const refundAllList = settleNickList.filter(n => cust(n).refundAll); // 전체환불자는 활성 주문이 0건이라 nicks 에 없음
     const refundNickCount = new Set(refundOrders.map(o => o.nick)).size;
-    const goods = closingOrders.reduce((s, o) => s + o.price * o.qty, 0);
+    /* ⭐ 상품 매출도 «입금된 주문»만 (2026-08-12 14차 · 안전장치 171).
+          결산 엑셀 「상품 매출」과 「상품별 실적」이 서로 다른 기준을 쓰면
+          같은 엑셀 안에서 합계가 안 맞는다 — 안전장치 50 의 취지가 깨진다.
+       ⚠ 미입금분은 사라지지 않는다. 요약본 unpaid_goods 와 결산 「미입금」 줄에 그대로 남는다. */
+    const goods = acctOrders.reduce((s, o) => s + o.price * o.qty, 0);
     const feeSum = feeList.length * shipFee;
     const total = goods + feeSum;
     const paidGoods = paidList.reduce((s, n) => s + sumOf(n), 0);
     const paidShipFee = paidFeeList.length * shipFee;
     const paidTotal = paidGoods + paidShipFee;
-    const totalQty = closingOrders.reduce((s, o) => s + o.qty, 0);
+    const totalQty = acctOrders.reduce((s, o) => s + o.qty, 0); // ⭐ 14차 — 위와 같은 기준
     const canceledCnt = orders.filter(o => o.canceled).length;
     /* 택배사별 건수 — 운송장이 조회된 사람 기준 (미입력은 어느 쪽도 아니다)
        ⚠ 위탁 건도 택배사 집계에는 그대로 남긴다 (2026-07-30 사장님 결정).
@@ -3408,13 +3420,22 @@ function App() {
     /* 배송 손익 (0-7 1단계) — 「받은 배송비」 − 「택배사에 낸 운임」
        ⚠ 운송장을 안 올리면 carrier 가 비어 lotteCount·cjCount 가 0이 된다.
           운임 0으로 계산하면 손익이 부풀려지므로 「모른다」를 따로 알려준다. */
-    /* 상품별 집계 — 결산 엑셀 「2. 상품별 실적」과 회계 화면이 **같은 값**을 쓴다.
+    /* ⭐⭐ 상품별 집계 — 「입금된 주문」만 센다 (2026-08-12 14차 · 안전장치 171)
+       🔴 실제 사고: 회계탭 상품 마진 리스트에 «미입금분»이 섞여 있어 사장님이 그 수량대로
+          공급처에 돈을 «더 주셨다». 되돌려받기로 하셨고, 그래서 기준을 바꾼다.
+       사장님 결정 변경 (2026-08-12) — 7/30 결정(안전장치 50)의 «기준»만 바뀐다:
+         · 전: 결산 엑셀과 같은 기준 = closingOrders 전체 (킵 제외 · 미입금 «포함»)
+         · 후: 결산 엑셀과 같은 기준 = «입금된 주문» (킵·픽업이어도 입금됐으면 포함)
+         두 화면이 같아야 한다는 취지는 그대로다. 기준만 옮긴다.
+       ⚠ 미입금은 아직 «판 것»이 아니다 — 공급처에 줄 돈의 근거가 될 수 없다.
+       ⚠ 킵·픽업이어도 입금됐으면 그날 돈이 들어온 것이라 넣는다.
+       ⚠ 입금 판정을 «새로 만들지 않는다» — 아래 paidOrder 는 원래 pmap 안에 있던 식 그대로다.
+          「입금이 켜진 또는 켜졌던(출고완료)」 = o.done ? donePaid !== false : cust(nick).paid
        ⚠ 집계 키는 「상품명 + 가격」. 상품명만으로 묶으면 막판 할인처럼 같은 상품을
           다른 가격에 판 경우 단가·수량이 틀리게 나온다 (매출 합계는 맞아서 알아채기 어렵다).
        ⚠ 두 곳에서 따로 세면 회계가 조용히 어긋난다 (money-rules §1). */
     const pmap = {};
-    closingOrders.forEach(o => {
-      const paid = o.done ? o.donePaid !== false : cust(o.nick).paid;
+    acctOrders.forEach(o => {
       const k = `${o.name}\u241f${o.price}`;
       pmap[k] = pmap[k] || {
         key: k,
@@ -3428,7 +3449,7 @@ function App() {
       };
       pmap[k].qty += o.qty;
       pmap[k].amt += o.price * o.qty;
-      pmap[k][paid ? "paidQty" : "unpaidQty"] += o.qty;
+      pmap[k].paidQty += o.qty;
       pmap[k].buyers.add(o.nick);
     });
     const prodList = Object.values(pmap).sort((a, b) => b.amt - a.amt || a.name.localeCompare(b.name, "ko") || b.price - a.price);
@@ -3500,7 +3521,11 @@ function App() {
       trkMissing,
       sendList,
       shipCostUnknown,
-      prodList
+      prodList,
+      acctOrders,
+      unpaidOrders,
+      unpaidQtySum,
+      unpaidAmtSum
     };
   }, [activeOrders, doneOrders, orders, customers, settleNickList, shipFee, shipCost, shipData]);
 
@@ -3513,7 +3538,9 @@ function App() {
   const buildSummary = () => ({
     paidGoods: closing.paidGoods,
     paidShipFee: closing.paidShipFee,
-    unpaidGoods: closing.goods - closing.paidGoods,
+    /* ⚠ 14차 — goods 가 입금분만이 되어 「goods − paidGoods」는 «항상 0» 이다.
+          미수금을 잃지 않도록 실제 미입금 주문 합계를 쓴다 (closing.unpaidAmtSum). */
+    unpaidGoods: closing.unpaidAmtSum,
     unpaidShipFee: closing.feeSum - closing.paidShipFee,
     refundGoods: closing.refundAmt,
     refundShipFee: closing.refundAllList.length * shipFee,
@@ -3586,8 +3613,12 @@ function App() {
       shipProfit,
       trkMissing,
       sendList,
-      shipCostUnknown
-    } = closing;
+      shipCostUnknown,
+      unpaidAmtSum,
+      unpaidQtySum,
+      acctOrders,
+      paidShipFee
+    } = closing; // ⭐ 14차 — 입금 기준 집계
     // ⚠ 상품별 집계는 closing.prodList 를 그대로 쓴다 — 여기서 다시 세지 않는다 (money-rules §1)
     /* ⚠ 킵만 있는 날도 뽑을 수 있어야 한다 — 받은 돈(keepPaid)이 「킵 보류」 절에 들어간다.
           여기서 막으면 버튼만 열어도 토스트만 뜨고 끝난다 (2026-08-04 7차). */
@@ -3605,11 +3636,23 @@ function App() {
     const wb = XLSX.utils.book_new();
 
     // 1) 총괄 요약
-    const s1 = [[`사자창고 라이브 결산`, bdate], [], ["[매출]", ""], ["상품 매출", goods, "환불분 제외 · 실제로 판 것만"], ["배송비 수입", feeSum, `${feeList.length}명 × ${shipFee}원 (픽업 ${pickList.length}명 · 무료배송 ${freeList.length}명 · 전체환불 ${refundAllList.length}명 제외)`], ["총 매출", total], [],
+    const s1 = [[`사자창고 라이브 결산`, bdate], [],
+    /* ⭐ 14차 — 「상품 매출」은 «입금된 주문»만이다 (안전장치 171).
+          미입금분을 따로 한 줄로 적어 「입금 + 미수 = 총 매출」이 엑셀에서 눈으로 검산되게 한다.
+          ⚠ 이 줄이 없으면 「상품 매출 + 배송비 = 총 매출」이 안 맞아 보인다. */
+    ["[매출]", ""], ["상품 매출", goods, "⭐ 입금된 주문만 · 환불분 제외 (2026-08-12부터)"], ["미입금 상품", unpaidAmtSum, unpaidAmtSum ? "아직 입금 전 — 매출·마진에 넣지 않는다" : ""], ["배송비 수입", feeSum, `${feeList.length}명 × ${shipFee}원 (픽업 ${pickList.length}명 · 무료배송 ${freeList.length}명 · 전체환불 ${refundAllList.length}명 제외)`], ["총 매출", goods + unpaidAmtSum + feeSum, "입금 + 미수"], [],
     /* [배송 손익] 0-7 1단계 — 받은 배송비에서 택배사 운임을 뺀 것.
        ⚠ 운임은 음수로 적는다. 「수입 + 운임 = 손익」이 엑셀에서 눈으로 검산된다.
        ⚠ 운송장을 안 올리면 운임을 모른다. 0원으로 적으면 손익이 부풀려지므로 말로 알려준다. */
-    ["[배송 손익]", ""], ["롯데 운임", -lotteCost, carrierNote(lotteCount, lotteBilled, shipCost.lotte)], ["CJ 운임", -cjCost, carrierNote(cjCount, cjBilled, shipCost.cj)], ["위탁 운임", -consignCost, consignCount ? `${consignCount}건 × ${won(shipCost.consign)}원 (택배사 무관)` : "0건"], ["배송 손익", shipProfit, shipWarn], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["미수금", total - paidTotal, `${nicks.length - paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0], ["입금률 (금액)", total ? Math.round(paidTotal / total * 100) / 100 : 0], [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", closingOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length, "주문만 취소 (돈이 오가지 않음)"], [], ["[킵 보류]", "", "이번에 발송하지 않는 주문 — 위 매출에 포함되지 않음"], ["킵 인원", keepNicks.length], ["킵 건수", keepOrders.length], ["킵 상품금액", keepOrders.reduce((t, o) => t + o.price * o.qty, 0)], ["킵 입금액", keepNicks.reduce((t, nk) => t + (Number(cust(nk).keepPaid) || 0), 0), "받았지만 아직 매출이 아님 (배송비 포함)"], [], ["[환불]", ""], ["환불 건수", refundOrders.length, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 부분환불 ${refundNickCount - refundAllList.length}명` : refundOrders.length ? `부분환불 ${refundNickCount}명` : ""], ["환불 상품금액", refundAmt], ["환불 배송비", refundAllList.length * shipFee, refundAllList.length ? `전체환불 ${refundAllList.length}명 × ${shipFee}원` : ""], ["환불 합계", refundAmt + refundAllList.length * shipFee, "실제로 돌려준 돈 · 위 매출에는 포함되어 있지 않음"], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(closingOrders.map(o => `${o.name}\u241f${o.price}`)).size, "같은 상품도 가격이 다르면 별개로 셈"], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
+    ["[배송 손익]", ""], ["롯데 운임", -lotteCost, carrierNote(lotteCount, lotteBilled, shipCost.lotte)], ["CJ 운임", -cjCost, carrierNote(cjCount, cjBilled, shipCost.cj)], ["위탁 운임", -consignCost, consignCount ? `${consignCount}건 × ${won(shipCost.consign)}원 (택배사 무관)` : "0건"], ["배송 손익", shipProfit, shipWarn], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`],
+    /* ⚠ 14차 — total(=goods+feeSum) 의 goods 가 «입금분만»이 되어
+          「total − paidTotal」은 상품 미수금을 «못 잡는다» (배송비 차액만 남는다).
+          요약본(unpaid_goods)과 값이 갈라져 t_sum 이 잡아냈다.
+          실제 미입금 주문 합계 + 미입금 배송비로 «요약본과 같은 식»을 쓴다. */
+    ["미수금", unpaidAmtSum + (feeSum - paidShipFee), `${nicks.length - paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0],
+    /* ⚠ 14차 — 분모 total 은 이제 입금분만이라 입금률이 «항상 1» 이 된다.
+          「입금 + 미수」를 분모로 써야 뜻이 맞는다. */
+    ["입금률 (금액)", goods + unpaidAmtSum + feeSum ? Math.round(paidTotal / (goods + unpaidAmtSum + feeSum) * 100) / 100 : 0], [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", closingOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length, "주문만 취소 (돈이 오가지 않음)"], [], ["[킵 보류]", "", "이번에 발송하지 않는 주문 — 위 매출에 포함되지 않음"], ["킵 인원", keepNicks.length], ["킵 건수", keepOrders.length], ["킵 상품금액", keepOrders.reduce((t, o) => t + o.price * o.qty, 0)], ["킵 입금액", keepNicks.reduce((t, nk) => t + (Number(cust(nk).keepPaid) || 0), 0), "받았지만 아직 매출이 아님 (배송비 포함)"], [], ["[환불]", ""], ["환불 건수", refundOrders.length, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 부분환불 ${refundNickCount - refundAllList.length}명` : refundOrders.length ? `부분환불 ${refundNickCount}명` : ""], ["환불 상품금액", refundAmt], ["환불 배송비", refundAllList.length * shipFee, refundAllList.length ? `전체환불 ${refundAllList.length}명 × ${shipFee}원` : ""], ["환불 합계", refundAmt + refundAllList.length * shipFee, "실제로 돌려준 돈 · 위 매출에는 포함되어 있지 않음"], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(closingOrders.map(o => `${o.name}\u241f${o.price}`)).size, "같은 상품도 가격이 다르면 별개로 셈"], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
     const ws1 = XLSX.utils.aoa_to_sheet(s1);
     ws1["!cols"] = [{
       wch: 20
@@ -7860,6 +7903,67 @@ function App() {
     const net = marginSum + closing.shipProfit - refundSum;
     const keepNicks = settleNickList.filter(n => cust(n).keep);
     const keepPaidSum = keepNicks.reduce((t, n) => t + (Number(cust(n).keepPaid) || 0), 0);
+    const unpaidSum = closing.unpaidAmtSum + (closing.feeSum - closing.paidShipFee);
+
+    /* ⭐ 회계 엑셀 내려받기 (2026-08-12 14차 신설 · 안전장치 172)
+       왜: 사장님이 이 화면 숫자로 «공급처 정산»을 하신다. 화면을 보고 손으로 옮기는 것
+           자체가 사고 지점이다 — 미입금이 섞여 돈을 더 준 일이 이미 있었다.
+       ⚠ 숫자를 여기서 «새로 세지 않는다». 화면이 쓰는 rows·marginSum·closing 을 그대로 쓴다.
+          두 곳에서 따로 세면 엑셀과 화면이 조용히 갈라진다 (money-rules §1). */
+    const acctXlsx = () => {
+      if (!rows.length) {
+        showToast("회계에 넣을 입금된 주문이 없습니다.");
+        return;
+      }
+      const costSum = rows.reduce((t, r) => t + (r.price * r.qty - marginOf(r.name, r.price, r.qty)), 0);
+      const s1 = [["회계", bdate], ["기준", "입금된 주문만 — 킵·픽업이어도 입금됐으면 포함 · 미입금은 제외"], [], ["항목", "금액", "비고"], ["상품 매출 (입금)", closing.goods, "입금된 주문만 · 환불분 제외"], ["상품 원가 합계", costSum, missing.length ? `⚠ 원가 미입력 ${missing.length}종은 원가 0으로 잡힘` : ""], ["상품 마진", marginSum, missing.length ? `⚠ 원가 미입력 ${missing.length}종 포함 — 실제보다 높다` : ""], [], ["배송비 수입", closing.feeSum, `${closing.feeList.length}명 × ${shipFee}원`], ["운임", -closing.shipCostSum, closing.shipCostUnknown ? `⚠ 운송장 ${closing.trkMissing}명 미업로드 — 운임이 그만큼 빠져 있다` : ""], ["배송 손익", closing.shipProfit, ""], [], ["환불", -refundSum, refundSum ? `전체환불 ${closing.refundAllList.length}명 · 부분환불 ${closing.refundNickCount}명` : ""], ["순이익", net, "상품 마진 + 배송 손익 − 환불"], [], ["미수금 (참고)", unpaidSum, `${closing.unpaidOrders.length}건 — 손익에 «들어가지 않음»`], ["킵 입금액 (참고)", keepPaidSum, "킵으로 미리 받은 돈"]];
+      const s2 = [["상품명", "판매가", "수량", "매출", "공급가", "수수료%", "원가합계", "마진", "마진율", "산 사람", "원가입력"]];
+      rows.forEach(r => {
+        const c = costOf(r.name, r.price) || {};
+        const m = marginOf(r.name, r.price, r.qty);
+        const has = hasCost(r.name, r.price);
+        s2.push([r.name, r.price, r.qty, r.amt, Number(c.cost) > 0 ? Number(c.cost) : "", Number(c.feeRate) > 0 ? Number(c.feeRate) : "", r.price * r.qty - m, m, r.amt ? Math.round(m / r.amt * 100) + "%" : "", r.buyers.size, has ? "입력됨" : "미입력"]);
+      });
+      s2.push([]);
+      s2.push(["합계", "", rows.reduce((t, r) => t + r.qty, 0), closing.goods, "", "", rows.reduce((t, r) => t + r.price * r.qty - marginOf(r.name, r.price, r.qty), 0), marginSum, "", "", missing.length ? `미입력 ${missing.length}종` : ""]);
+      const wb = XLSX.utils.book_new();
+      const w1 = XLSX.utils.aoa_to_sheet(s1);
+      w1["!cols"] = [{
+        wch: 20
+      }, {
+        wch: 14
+      }, {
+        wch: 52
+      }];
+      XLSX.utils.book_append_sheet(wb, w1, "총 손익");
+      const w2 = XLSX.utils.aoa_to_sheet(s2);
+      w2["!cols"] = [{
+        wch: 28
+      }, {
+        wch: 10
+      }, {
+        wch: 7
+      }, {
+        wch: 12
+      }, {
+        wch: 10
+      }, {
+        wch: 9
+      }, {
+        wch: 12
+      }, {
+        wch: 12
+      }, {
+        wch: 9
+      }, {
+        wch: 9
+      }, {
+        wch: 10
+      }];
+      XLSX.utils.book_append_sheet(wb, w2, "상품 마진");
+      XLSX.writeFile(wb, `회계_사자창고_${bdate.replace(/-/g, "")}.xlsx`);
+      showToast("회계 엑셀을 내려받았습니다.");
+    };
     /* 운임 줄 문구 — 결산 엑셀과 같은 규칙을 쓴다 (문구가 갈리면 어느 쪽이 맞는지 헷갈린다) */
     const cNote = (cnt, billed, unit) => {
       if (!cnt) return closing.shipCostUnknown ? `운송장 ${closing.trkMissing}명 미업로드 — 그만큼 운임이 빠져 있다` : "0건";
@@ -7884,10 +7988,15 @@ function App() {
       className: "accttitle"
     }, "📊 회계 ", /*#__PURE__*/React.createElement("span", {
       className: "acctdate"
-    }, bdate)), /*#__PURE__*/React.createElement("button", {
+    }, bdate)), /*#__PURE__*/React.createElement("div", {
+      className: "acctheadbtns"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn xlsbtn",
+      onClick: acctXlsx
+    }, "엑셀 내려받기"), /*#__PURE__*/React.createElement("button", {
       className: "btn",
       onClick: () => setAcctOpen(false)
-    }, "닫기")), /*#__PURE__*/React.createElement("div", {
+    }, "닫기"))), /*#__PURE__*/React.createElement("div", {
       className: "acctcard"
     }, /*#__PURE__*/React.createElement("div", {
       className: "acctcaption"
@@ -7896,7 +8005,7 @@ function App() {
       style: {
         marginTop: 8
       }
-    }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "결산 엑셀과 같은 기준"), "입니다 — 킵은 빠지고 ", /*#__PURE__*/React.createElement("b", null, "미입금도 포함"), "됩니다. 실제로 들어온 돈은 입금 ", won(closing.paidTotal), " · 미수금 ", won(closing.total - closing.paidTotal), " 입니다.")), /*#__PURE__*/React.createElement("div", {
+    }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "결산 엑셀과 같은 기준"), "입니다 — ", /*#__PURE__*/React.createElement("b", null, "입금된 주문만"), " 셉니다. 킵·픽업이어도 입금됐으면 들어오고, ", /*#__PURE__*/React.createElement("b", null, "미입금은 빠집니다"), ". 아직 안 들어온 돈은 미수금 ", won(closing.unpaidAmtSum + (closing.feeSum - closing.paidShipFee)), "(", closing.unpaidOrders.length, "건) 입니다.")), /*#__PURE__*/React.createElement("div", {
       className: "acctcard"
     }, /*#__PURE__*/React.createElement("div", {
       className: "acctcaption"
@@ -10735,7 +10844,18 @@ const CSS = `
 
 /* ===== 📊 회계 화면 (0-7 2단계) ===== */
 .acctroot { position: fixed; inset: 0; z-index: 60; overflow-y: auto; background: #f5f6f8; padding: 14px 14px 40px; }
-.accthead { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.accthead { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+/* ⭐ 2026-08-12 14차 — 「엑셀 내려받기」 버튼을 넣으며 만든 자리.
+   ⚠ 클래스를 만들고 CSS 를 «안 걸면» display:block 이 되어 320px 에서 버튼이 세로로 갈라진다.
+      13차에 같은 실수를 했고 검사 3종이 그때도 전부 통과했다 — 좌표로 «직접» 재야 잡힌다. */
+.acctheadbtns { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.acctheadbtns .btn { white-space: nowrap; }
+.xlsbtn { background: #eaf7ee; border-color: #bfe3c9; color: #1b6b34; font-weight: 800; }
+@media (max-width: 380px) {
+  .accttitle { font-size: 15px; }
+  .xlsbtn { padding: 6px 8px; font-size: 12px; }
+  .acctheadbtns { gap: 6px; }
+}
 .accttitle { font-size: 20px; font-weight: 800; color: #16191f; }
 .acctdate { font-size: 14px; font-weight: 600; color: #8a919c; margin-left: 8px; }
 .acctcard { background: #fff; border: 1px solid #e3e6ea; border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; max-width: 1120px; }
