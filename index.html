@@ -648,7 +648,9 @@ const isBlankDay = p => !!p && !(p.orders || []).length && !(p.products || []).l
       안 올리면 옛 규칙으로 만든 요약이 서버에 그대로 남는다. 본문은 안 바뀌었으니
       src_hash 로는 절대 못 잡는다 — 「틀린 걸 알아도 어느 날짜가 틀렸는지」 못 찾게 된다.
    1 = 2026-07-28 최초 (킵 제외 · 차수 마감분 포함 · noFee 4종 · 환불 분리) */
-const CALC_VER = 1;
+const CALC_VER = 2; /* ⭐ 2026-08-12 14차 — trkMissing 을 «사람» 단위로 바꿈 (안전장치 170).
+                       지난 8개 날짜 요약본은 calc_ver 1 로 남는다. 그 날짜를 열어 회계를 보면
+                       「계산 규칙이 다릅니다」 안내가 뜬다 — 그것이 이 번호의 «목적»이다. */
 
 /* 되돌리기 기록 정리 — 날짜 한도와 「용량」 한도를 함께 건다. ⭐ 0-5
    ⚠ 전에는 30일 한도만 있었다. 스냅샷 하나가 그 날짜 주문·고객·운송장·상품을 통째로 담으므로
@@ -3384,12 +3386,14 @@ function App() {
           «같은 번호가 2차로 또» 붙는다. 택배는 한 건만 나갔는데 운임을 두 번 낸 것으로 계산된다.
           (실서버 2026-07-31: 롯데 9건으로 잡혔지만 실제 발송은 5건 — 11,200원 과다) */
     const seenTrk = new Set();
+    const trkNickSet = new Set(); // ⭐ 운임에 «실제로 잡힌» 줄의 닉네임 (2026-08-12 14차)
     shipData.forEach(d => {
       const trk = normTrk(d.tracking);
       if (!trk) return;
       if (!dateNicks.has(d.nick)) return;
       if (seenTrk.has(trk)) return;
       seenTrk.add(trk);
+      trkNickSet.add(d.nick);
       const c = String(d.carrier || "");
       const isConsign = !!d.consign;
       if (isConsign) consignCount++;
@@ -3441,8 +3445,21 @@ function App() {
       const c = cust(n);
       return !c.pickup && !c.keep && !c.refundAll;
     });
-    const trkKnown = lotteCount + cjCount + consignCount; // 운임을 아는 건수
-    const trkMissing = Math.max(0, sendList.length - trkKnown);
+    const trkKnown = lotteCount + cjCount + consignCount; // 운임을 아는 «줄» 수
+    /* ⭐⭐ 2026-08-12 14차 · 안전장치 170 — 「경고 기준」과 「집계 기준」의 단위가 «달랐다».
+          전에는 trkMissing = sendList.length(«사람») − trkKnown(«운송장 줄») 이었다.
+          한 사람이 1·2차로 «서로 다른 번호»를 가지면 줄 수만 늘어 경고가 «상쇄»됐다.
+            예) A 가 3건 · B·C 는 운송장 없음 → 3 − 3 = 0 → 경고가 «아예 안 떴다».
+          07-21(주문 113 · 운송장 22)의 손익 부풀림을 잡으라고 5차에 만든 경고가 스스로 샌 것이다.
+          ⚠ 화면 경고만이 아니라 요약본 shipCost.unknown 까지 false 로 저장돼
+             기간 회계의 「운송장 빠진 날」 목록에서도 통째로 빠졌다.
+          ⚠ 실서버 2026-07-27 이 실제로 그 상태다 (운송장 줄 9 · 사람 8 · 14차 조회).
+          → 「보낼 사람 중 운송장이 «하나도» 없는 사람」으로 «단위를 사람으로 통일»한다.
+          ⚠ 운임 금액(shipCostSum·shipProfit)은 «줄» 기준 그대로다 — 택배는 줄 단위로 나간다.
+             바뀌는 것은 경고와 trkMissing·unknown 두 값뿐이다.
+          ⚠ 집계 규칙이 바뀌었으므로 CALC_VER 를 올린다 (money-rules §4). */
+    const trkMissList = sendList.filter(n => !trkNickSet.has(n));
+    const trkMissing = trkMissList.length; // «사람» 수
     const shipCostUnknown = trkMissing > 0;
     return {
       closingOrders,
@@ -3581,10 +3598,10 @@ function App() {
 
     /* 운임 줄 문구 — 회계 화면과 같은 규칙을 쓴다 (문구가 갈리면 어느 쪽이 맞는지 헷갈린다) */
     const carrierNote = (cnt, billed, unit) => {
-      if (!cnt) return shipCostUnknown ? `운송장 ${trkMissing}건 미업로드 — 그만큼 운임이 빠져 있다` : "0건";
+      if (!cnt) return shipCostUnknown ? `운송장 ${trkMissing}명 미업로드 — 그만큼 운임이 빠져 있다` : "0건";
       return cnt === billed ? `${cnt}건 × ${won(unit)}원` : `${cnt}건 중 위탁 ${cnt - billed}건 제외 ${billed}건 × ${won(unit)}원`;
     };
-    const shipWarn = shipCostUnknown ? `⚠ 보낼 ${sendList.length}명 중 운송장 ${trkMissing}건이 없습니다 — 그만큼 운임이 빠져 실제 손익은 이보다 낮습니다` : `배송비 수입 ${won(feeSum)} − 운임 ${won(shipCostSum)}`;
+    const shipWarn = shipCostUnknown ? `⚠ 보낼 ${sendList.length}명 중 운송장 ${trkMissing}명이 없습니다 — 그만큼 운임이 빠져 실제 손익은 이보다 낮습니다` : `배송비 수입 ${won(feeSum)} − 운임 ${won(shipCostSum)}`;
     const wb = XLSX.utils.book_new();
 
     // 1) 총괄 요약
@@ -7845,10 +7862,10 @@ function App() {
     const keepPaidSum = keepNicks.reduce((t, n) => t + (Number(cust(n).keepPaid) || 0), 0);
     /* 운임 줄 문구 — 결산 엑셀과 같은 규칙을 쓴다 (문구가 갈리면 어느 쪽이 맞는지 헷갈린다) */
     const cNote = (cnt, billed, unit) => {
-      if (!cnt) return closing.shipCostUnknown ? `운송장 ${closing.trkMissing}건 미업로드 — 그만큼 운임이 빠져 있다` : "0건";
+      if (!cnt) return closing.shipCostUnknown ? `운송장 ${closing.trkMissing}명 미업로드 — 그만큼 운임이 빠져 있다` : "0건";
       return cnt === billed ? `${cnt}건 × ${won(unit)}원` : `${cnt}건 중 위탁 ${cnt - billed}건 제외 ${billed}건 × ${won(unit)}원`;
     };
-    const sWarn = closing.shipCostUnknown ? `⚠ 보낼 ${closing.sendList.length}명 중 운송장 ${closing.trkMissing}건이 없습니다 — 그만큼 운임이 빠져 실제 손익은 이보다 낮습니다` : `배송비 수입 ${won(closing.feeSum)} − 운임 ${won(closing.shipCostSum)}`;
+    const sWarn = closing.shipCostUnknown ? `⚠ 보낼 ${closing.sendList.length}명 중 운송장 ${closing.trkMissing}명이 없습니다 — 그만큼 운임이 빠져 실제 손익은 이보다 낮습니다` : `배송비 수입 ${won(closing.feeSum)} − 운임 ${won(closing.shipCostSum)}`;
     const arow = (label, val, note, cls) => /*#__PURE__*/React.createElement("div", {
       className: "arow" + (cls ? " " + cls : ""),
       key: label
@@ -8015,7 +8032,7 @@ function App() {
       className: "persum"
     }, "방송 ", periodCalc.t.days, "회 · 주문 ", periodCalc.t.orders, "건 · 주문자 ", periodCalc.t.custs, "명"), arow("매출", periodCalc.t.sales, "입금·미입금 모두 · 킵 제외"), arow("배송 손익", periodCalc.t.shipProfit, ""), arow("환불", -periodCalc.t.refund, ""), periodCalc.t.missDays.length > 0 && /*#__PURE__*/React.createElement("div", {
       className: "acctwarn perwarn"
-    }, "⚠ 운송장이 빠진 날이 있습니다 — ", /*#__PURE__*/React.createElement("b", null, periodCalc.t.trkMissing, "건"), "(", periodCalc.t.missDays.join(" · "), "). 그만큼 운임이 안 잡혀 ", /*#__PURE__*/React.createElement("b", null, "배송 손익이 실제보다 높습니다."), " 합계는 그대로 두었습니다."), periodCalc.t.vers.length > 1 && /*#__PURE__*/React.createElement("div", {
+    }, "⚠ 운송장이 빠진 날이 있습니다 — ", /*#__PURE__*/React.createElement("b", null, periodCalc.t.trkMissing, "명"), "(", periodCalc.t.missDays.join(" · "), "). 그만큼 운임이 안 잡혀 ", /*#__PURE__*/React.createElement("b", null, "배송 손익이 실제보다 높습니다."), " 합계는 그대로 두었습니다."), periodCalc.t.vers.length > 1 && /*#__PURE__*/React.createElement("div", {
       className: "acctwarn"
     }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "계산 규칙(calc_ver)이 다른"), " 요약본이 섞여 있습니다 (", periodCalc.t.vers.join(" · "), "). 기준이 다른 값을 더한 것이라 합계를 그대로 믿지 마세요."), perDup.state === "checking" && /*#__PURE__*/React.createElement("div", {
       className: "hint"
