@@ -6286,14 +6286,18 @@ function App() {
   const [regulars, setRegulars] = useState({}); // { 닉네임: { addrs: [{ name, phone, addr, req, uses, last }] } }
   const [regPick, setRegPick] = useState(null); // 배송지가 여러 개일 때 고르는 중인 닉네임
   const regLoaded = useRef(false);
-  const REG_KEEP_DAYS = 365; // 마지막 사용일 기준 1년 보관
+  /* ⭐ 3년 보관 (2026-08-12 14차 · 사장님 승인). 전에는 365 였다.
+     가전을 판 뒤 AS 문의가 1~2년 뒤에 온다 — 그때 그 손님 배송지를 찾아야 한다.
+     365 는 근거 없이 정한 값이었다 (13차 사장님 지적). 개인정보 관행도 3년이 흔하다.
+     ⚠ 무한 보관은 아니다 — 만료 자체를 없애면 개인정보가 영영 쌓인다. */
+  const REG_KEEP_DAYS = 1095; // 마지막 사용일 기준 3년 보관
 
   useEffect(() => {
     (async () => {
       try {
         const d = await loadJson("saja:regulars", null);
         if (d) {
-          // 1년 지난 배송지는 자동 삭제 (개인정보 보관 정책)
+          // 보관 기한이 지난 배송지는 자동 삭제 (개인정보 보관 정책)
           const cut = Date.now() - REG_KEEP_DAYS * 86400000;
           const kept = {};
           Object.entries(d).forEach(([k, v]) => {
@@ -6319,6 +6323,80 @@ function App() {
   // 적립 — 입금 완료 + 주소·연락처가 모두 있는 사람만.
   // 반쯤 입력된 정보가 쌓이면 오히려 방해가 된다. 픽업은 주소가 없으므로 자연히 제외된다.
   const addrKey = c => `${String(c.addr || "").replace(/\s+/g, " ").trim()}`;
+
+  /* ---------- ⭐ 서버 단골 «내려받기» (2026-08-12 14차 신설 · 안전장치 169) ----------
+     13차까지는 승격(promoteToServer)이 «올리기»만 했다. 그래서 서버 `regulars` 에 49행이
+     있어도 매니저 PC 에서는 단골 제안이 «영영 안 떴다» (14차에 재현 확인).
+     설계안 5-10·9-4 와 인수인계서 승격표는 이 항목을 «공유»로 적어 두었다 — 구현이 반쪽이었다.
+      ⚠⚠ 여기는 «오배송»이 걸린 자리다. 옛 값으로 최신 배송지를 덮으면 물건이 엉뚱한 데로 간다.
+        설계안이 두 곳에 「last_used 최신 우선」이라고 못 박아 두었다. 그대로 따른다.
+     ⚠ 못 읽은 것을 「없다」로 보지 않는다 (안전장치 12·122) — 오류가 «없어도» 배열이 아니면 멈춘다.
+     ⚠ 로컬을 지우거나 통째로 갈아끼우지 않는다 (안전장치 123) — 합치기만 한다.
+     ⚠ 보관 기한을 우회하지 않는다 — 서버에서 온 것도 REG_KEEP_DAYS 로 거른다. */
+  const pullRegulars = (mineDict, rows, cut) => {
+    const next = {};
+    Object.entries(mineDict || {}).forEach(([nk, v]) => {
+      next[nk] = {
+        addrs: [...((v || {}).addrs || [])]
+      };
+    });
+    (rows || []).forEach(x => {
+      const nk = String(x && x.nick || "");
+      const ad = String(x && x.addr || "");
+      if (!nk || !ad) return;
+      const last = Date.parse(String(x && x.last_used || "")) || 0;
+      if (last < cut) return; // 보관 기한이 지난 것은 «안 들인다»
+      const srv = {
+        name: x.name || "",
+        phone: x.phone || "",
+        addr: ad,
+        req: x.req || "",
+        uses: Number(x.uses) || 1,
+        last,
+        lastDate: x.last_date || ""
+      };
+      const e = next[nk] || {
+        addrs: []
+      };
+      const i = e.addrs.findIndex(a => addrKey(a) === addrKey(srv));
+      if (i < 0) e.addrs.push(srv);else {
+        const m = e.addrs[i];
+        const mLast = Number(m.last) || 0;
+        const win = last > mLast ? srv : m; // ⭐ 최신 우선 (옛 값으로 덮으면 오배송)
+        e.addrs[i] = {
+          ...win,
+          uses: Math.max(Number(m.uses) || 1, srv.uses),
+          // 쓴 횟수는 «큰 쪽»
+          last: Math.max(mLast, last),
+          lastDate: win.lastDate || m.lastDate || srv.lastDate || ""
+        };
+      }
+      e.addrs.sort((a, b) => (b.last || 0) - (a.last || 0));
+      next[nk] = e;
+    });
+    return next;
+  };
+  const regPullRan = useRef(false);
+  useEffect(() => {
+    (async () => {
+      const c = sb();
+      if (!c || !serverOn() || regPullRan.current) return;
+      /* ⚠ 로컬 읽기가 «끝난 뒤»에 합쳐야 한다. 먼저 합치면 로컬 읽기가 결과를 통째로 덮는다. */
+      for (let i = 0; i < 80 && !regLoaded.current; i++) await new Promise(r => setTimeout(r, 100));
+      if (!regLoaded.current) return;
+      let rg;
+      try {
+        rg = await c.from("regulars").select("*");
+      } catch (e) {
+        return;
+      } // 표시를 안 남긴다 — 다음 접속에 다시 시도
+      if (!rg || rg.error || !Array.isArray(rg.data)) return;
+      regPullRan.current = true;
+      if (!rg.data.length) return;
+      const cut = Date.now() - REG_KEEP_DAYS * 86400000;
+      setRegulars(prev => pullRegulars(prev, rg.data, cut));
+    })();
+  }, [auth]);
   useEffect(() => {
     if (!regLoaded.current || !loaded) return;
     const t = setTimeout(() => {
