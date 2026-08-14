@@ -648,8 +648,13 @@ const isBlankDay = p => !!p && !(p.orders || []).length && !(p.products || []).l
       안 올리면 옛 규칙으로 만든 요약이 서버에 그대로 남는다. 본문은 안 바뀌었으니
       src_hash 로는 절대 못 잡는다 — 「틀린 걸 알아도 어느 날짜가 틀렸는지」 못 찾게 된다.
    1 = 2026-07-28 최초 (킵 제외 · 차수 마감분 포함 · noFee 4종 · 환불 분리) */
-const CALC_VER = 5; /* ⭐ 2026-08-13 15차 — 미입금자를 회계에서 «통째로» 제외 (안전장치 175).
-                          ⭐ 2026-08-13 15차 — 「배송비 수입」도 «입금 기준»으로 (안전장치 174).
+const CALC_VER = 6; /* ⭐ 2026-08-14 16차 — 「주문 건수」가 «취소만» 뺀 값이 되었다 (미결 16 해소).
+                          전에는 킵을 뺐다 — 킵을 넣는 상품 매출과 서로 다른 집합을 세고 있었다.
+                          금액 자체는 안 바뀌지만 요약본 값이 바뀌므로 판 번호를 올린다 (money-rules §4).
+                          ⚠ 지난 날짜 요약본은 그 날짜를 열어 다시 저장해야 갱신된다.
+                            그 전까지는 회계에 「계산 규칙이 다릅니다」가 뜬다 — 의도한 표시다.
+                       ⭐ 2026-08-13 15차 — 미입금자를 회계에서 «통째로» 제외 (안전장치 175).
+                       ⭐ 2026-08-13 15차 — 「배송비 수입」도 «입금 기준»으로 (안전장치 174).
                        ⭐ 2026-08-12 14차 — trkMissing 을 «사람» 단위로 바꿈 (안전장치 170).
                        지난 8개 날짜 요약본은 calc_ver 1 로 남는다. 그 날짜를 열어 회계를 보면
                        「계산 규칙이 다릅니다」 안내가 뜬다 — 그것이 이 번호의 «목적»이다. */
@@ -3365,6 +3370,15 @@ function App() {
     const doneFeeOf = n => doneOrders.filter(o => o.nick === n).reduce((t, o) => t + (Number(o.doneFee) || 0), 0);
     const feeOfAll = n => feeOf(n) + doneFeeOf(n);
     const paidOf = n => cust(n).paid || doneOrders.some(o => o.nick === n && o.donePaid !== false);
+    /* ⭐⭐ 「그날 주문이 몇 건이었나」 — 2026-08-14 16차 · 미결 16 해소 (사장님 결정 (가-2))
+       ⚠ 전에는 `closingOrders.length`(= active + done) 였다. 그것은 킵을 «뺀» 값이라,
+          킵을 «넣는» 상품 매출과 서로 다른 집합을 세고 있었다.
+          실서버 2026-07-27 이 실제로 어긋나 있었다 — 주문 41건인데 매출 327,800원 안에
+          「41건에 없는 킵 3건 = 19,800원」이 들어 있었다.
+       ⚠ 입금 여부는 «보지 않는다». 보면 손님이 나중에 입금할 때 지난 날짜 달력 숫자가 움직인다.
+          「입금된 것만 센 건수」는 paidOrders 가 따로 맡는다 — 매출과 짝은 그쪽이 맞춘다.
+       ⚠ 이 값을 결산 엑셀과 서버 요약본이 «둘 다» 쓴다. 어느 쪽에서도 다시 세지 말 것. */
+    const orderCount = orders.filter(o => !o.canceled).length;
     const nicks = settleNickList.filter(n => closingOrders.some(o => o.nick === n));
     const sumOf = n => closingOrders.filter(o => o.nick === n).reduce((s, o) => s + o.price * o.qty, 0);
     const qtyOf = n => closingOrders.filter(o => o.nick === n).reduce((s, o) => s + o.qty, 0);
@@ -3559,7 +3573,8 @@ function App() {
       acctOrders,
       unpaidOrders,
       unpaidQtySum,
-      unpaidAmtSum
+      unpaidAmtSum,
+      orderCount
     };
   }, [activeOrders, doneOrders, orders, customers, settleNickList, shipFee, shipCost, shipData]);
 
@@ -3599,7 +3614,8 @@ function App() {
     },
     paidOrders: closing.closingOrders.filter(o => closing.paidOf(o.nick)).length,
     paidCusts: closing.paidList.length,
-    totalOrders: closing.closingOrders.length,
+    totalOrders: closing.orderCount,
+    // ⭐ 16차 미결 16 — 취소만 뺀다 (킵 포함)
     totalCusts: closing.nicks.length,
     pickupCount: closing.pickList.length,
     freeShipCount: closing.freeList.length,
@@ -3653,8 +3669,9 @@ function App() {
       acctOrders,
       paidShipFee,
       unpaidShipFee,
-      paidFeeList
-    } = closing; // ⭐ 14·15차 — 입금 기준 집계
+      paidFeeList,
+      orderCount
+    } = closing; // ⭐ 14·15차 — 입금 기준 집계 · 16차 orderCount
     // ⚠ 상품별 집계는 closing.prodList 를 그대로 쓴다 — 여기서 다시 세지 않는다 (money-rules §1)
     /* ⚠ 킵만 있는 날도 뽑을 수 있어야 한다 — 받은 돈(keepPaid)이 「킵 보류」 절에 들어간다.
           여기서 막으면 버튼만 열어도 토스트만 뜨고 끝난다 (2026-08-04 7차). */
@@ -3684,7 +3701,9 @@ function App() {
     /* ⭐ 15차 — 「입금률 (금액)」은 없앴다. 미입금을 통째로 빼면 분모·분자가 같아져
           «항상 100%» 라 뜻이 없다. 인원 기준은 남긴다 — 누가 아직 안 냈는지는 여전히 쓸모 있다. */
 
-    [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", closingOrders.length], ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length, "주문만 취소 (돈이 오가지 않음)"], [], ["[킵 보류]", "", "이번에 발송하지 않는 주문 — 위 매출에 포함되지 않음"], ["킵 인원", keepNicks.length], ["킵 건수", keepOrders.length], ["킵 상품금액", keepOrders.reduce((t, o) => t + o.price * o.qty, 0)], ["킵 입금액", keepNicks.reduce((t, nk) => t + (Number(cust(nk).keepPaid) || 0), 0), "받았지만 아직 매출이 아님 (배송비 포함)"], [], ["[환불]", ""], ["환불 건수", refundOrders.length, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 부분환불 ${refundNickCount - refundAllList.length}명` : refundOrders.length ? `부분환불 ${refundNickCount}명` : ""], ["환불 상품금액", refundAmt], ["환불 배송비", refundAllList.length * shipFee, refundAllList.length ? `전체환불 ${refundAllList.length}명 × ${shipFee}원` : ""], ["환불 합계", refundAmt + refundAllList.length * shipFee, "실제로 돌려준 돈 · 위 매출에는 포함되어 있지 않음"], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(closingOrders.map(o => `${o.name}\u241f${o.price}`)).size, "같은 상품도 가격이 다르면 별개로 셈"], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
+    [], ["[주문]", ""], ["주문자", nicks.length], ["주문 건수", orderCount],
+    // ⭐ 16차 — 요약본과 «같은 한 벌»을 쓴다
+    ["총 수량", totalQty], ["객단가", nicks.length ? Math.round(goods / nicks.length) : 0], ["취소 건수", canceledCnt - refundOrders.length, "주문만 취소 (돈이 오가지 않음)"], [], ["[킵 보류]", "", "이번에 발송하지 않는 주문 — 위 매출에 포함되지 않음"], ["킵 인원", keepNicks.length], ["킵 건수", keepOrders.length], ["킵 상품금액", keepOrders.reduce((t, o) => t + o.price * o.qty, 0)], ["킵 입금액", keepNicks.reduce((t, nk) => t + (Number(cust(nk).keepPaid) || 0), 0), "받았지만 아직 매출이 아님 (배송비 포함)"], [], ["[환불]", ""], ["환불 건수", refundOrders.length, refundAllList.length ? `전체환불 ${refundAllList.length}명 · 부분환불 ${refundNickCount - refundAllList.length}명` : refundOrders.length ? `부분환불 ${refundNickCount}명` : ""], ["환불 상품금액", refundAmt], ["환불 배송비", refundAllList.length * shipFee, refundAllList.length ? `전체환불 ${refundAllList.length}명 × ${shipFee}원` : ""], ["환불 합계", refundAmt + refundAllList.length * shipFee, "실제로 돌려준 돈 · 위 매출에는 포함되어 있지 않음"], [], ["[수령 방식]", ""], ["택배", nicks.length - pickList.length - freeList.length], ["택배(무료배송)", freeList.length], ["픽업수령", pickList.length], [], ["[기타]", ""], ["판매된 상품 종류", new Set(closingOrders.map(o => `${o.name}\u241f${o.price}`)).size, "같은 상품도 가격이 다르면 별개로 셈"], ["현금영수증 신청", cashList.length], ["현금영수증 발행완료", cashIssuedCount]];
     const ws1 = XLSX.utils.aoa_to_sheet(s1);
     ws1["!cols"] = [{
       wch: 20
@@ -3758,7 +3777,7 @@ function App() {
       const lines = closingOrders.filter(o => o.nick === n).map(o => `${o.name}${o.qty > 1 ? ` ${o.qty}개` : ""}`).join(", ") + (rf.length ? `${closingOrders.some(o => o.nick === n) ? " / " : ""}[환불] ` + rf.map(o => `${o.name}${o.qty > 1 ? ` ${o.qty}개` : ""}`).join(", ") : "");
       s3.push([n, c.name || "", c.phone || "", g, f, g + f, paidOf(n) ? "입금" : "미입금", rs, c.pickup ? "픽업수령" : c.freeShip ? "택배(무료)" : "택배", c.notified ? "안내" : "", closingOrders.filter(o => o.nick === n).length, qtyOf(n), lines, c.cashReceipt || "", c.memo || ""]);
     });
-    s3.push(["합계", "", "", goods, feeSum, total, `입금 ${paidList.length} / 미입금 ${nicks.length - paidList.length}`, refundOrders.length ? `환불 ${won(refundAmt + refundAllList.length * shipFee)}` : "", "", "", closingOrders.length, totalQty, "", "", ""]);
+    s3.push(["합계", "", "", goods, feeSum, total, `입금 ${paidList.length} / 미입금 ${nicks.length - paidList.length}`, refundOrders.length ? `환불 ${won(refundAmt + refundAllList.length * shipFee)}` : "", "", "", orderCount, totalQty, "", "", ""]);
     const ws3 = XLSX.utils.aoa_to_sheet(s3);
     ws3["!cols"] = [{
       wch: 14
@@ -4636,6 +4655,24 @@ function App() {
       }
       apply.push(merged);
     });
+    /* ⭐⭐ 2026-08-14 16차 — 업로드 «직전»으로 되돌릴 수 있게 한다 (사장님 증상 보고)
+          07-22 에 「운송장 업로드 직전으로 되돌리기가 안 되더라」 하셨고, 실서버 자국이 그대로였다:
+          그 날 남은 스냅샷 7건 중 가장 오래된 것이 **이미 운송장 12건이 붙은 뒤**였다.
+       ⚠ 업로드는 단순한 「추가」가 아니다 — 기존 번호를 «덮어쓴다»(changed 갈래).
+          덮인 옛 번호는 줄을 지워도 돌아오지 않는다. 되돌릴 다른 방법이 «없다».
+          (project-map 4-3 「되돌릴 다른 방법이 없는 추가 작업도 찍는다 — 킵 불러오기」와 같은 축)
+       ⚠ 아무것도 안 바뀌면 «찍지 않는다». 같은 파일을 다시 올리는 일이 잦은데
+          그때마다 쌓으면 30개 한도에서 «정작 필요한 기록»이 밀려난다.
+       ⚠ 되돌리기 목록은 「주문 N건」만 보여준다 — 운송장만 바뀐 기록은 화면에서 구별이 안 된다.
+          그래서 무엇을 올린 것인지 «이유 글»에 남긴다.
+       ⚠ setShipData «앞»에 둔다. 다만 **뒤에 둬도 지금은 결과가 같다** —
+          `takeSnap` 은 컴포넌트 상태 `shipData` 를 클로저에서 읽는데, React 상태는
+          리렌더 전까지 옛 값이기 때문이다 (16차 역검증 rv10 으로 확인 · 안 잡혔다).
+          그래도 「읽는 값이 바뀌기 전」에 찍는 편이 뜻이 분명하므로 앞에 둔다.
+          ⚠ 나중에 shipData 를 ref 로 바꾸면 그때는 «순서가 진짜로» 문제가 된다. */
+    if (added || changed) {
+      takeSnap(`${label} 운송장 업로드 직전` + ` (추가 ${added}명${changed ? ` · 변경 ${changed}명` : ""})`);
+    }
     setShipData(prev => {
       const key = d => d.nick + '#' + (Number(d.seq) || 1);
       const idx = {};
@@ -6210,26 +6247,63 @@ function App() {
         const seen = new Set(prev.map(o => o.id));
         return [...prev, ...add.filter(o => !seen.has(o.id))];
       });
+      /* ⭐⭐ 2026-08-13 15차 — 이월이 「입금 표시 + 킵 입금 0」을 만들지 않게 한다
+            (안전장치 176 · 미결 11 · 사장님 결정)
+         5-31 의 확인 카드(keepAsk)는 «킵 칩» 경로만 막고 있었다. 이월은 `keep: true` 를
+         «강제로» 켜면서 오늘 값(cur.paid)은 그대로 둬서, 사장님이 이미 「입금」을 눌러 둔
+         손님에게 지난 킵이 따라오면 **keep · paid · keepPaid 0** 이 «묻지도 않고» 만들어졌다.
+         → 받았다고 표시했는데 받은 돈이 결산·요약본 어디에도 안 남는다
+            (요약본 paid_goods 0 · keep_paid 0). 실서버 07-27 「가나」가 실제로 그 상태였다.
+       ⚠ 판정을 «새로 만들지 않는다» — 킵 칩이 쓰는 조건 그대로다 (money-rules §1).
+       ⚠ 돈을 «지어내지 않는다». keepPaid 를 자동으로 채우면 실제로 안 받은 돈이 잡힌다.
+          「아직 안 받은 것으로 두고 입금 표시를 끈다」 — 5차에 확인 카드에서 정한 처리와 같다.
+       ⚠ 조용히 끄면 사장님이 모른다. 아래에서 «이름»과 함께 알린다. */
+      /* ⚠⚠ 2026-08-14 16차 — 「누구를 껐는가」는 «업데이터 안»에서만 알 수 있는데,
+            업데이터는 React 가 «렌더할 때» 실행한다. 여기서 바로 읽으면 **항상 비어 있다.**
+            (16차 계측: `if(paidOff.length)` 평가 시점 0 → 그 «뒤»에 업데이터가 돈다)
+            그래서 15차본은 상태는 껐는데 **알림이 영영 안 떴다** — 조용히 끄는 것이
+            바로 이 방어가 막으려던 것이다.
+         ⚠ 담을 때 «push 가 아니라 대입»이다. 업데이터는 두 번 실행될 수 있고(동시성 렌더 재시도),
+            push 로 모으면 같은 이름이 두 번 들어간다. */
+      const paidOff = {
+        list: []
+      };
       setCustomers(prev => {
         const next = {
           ...prev
         };
+        const off = [];
         nicks.forEach(nk => {
           const src = (keeps.customers || {})[nk] || {};
           const cur = next[nk] || {};
           /* ⚠ 오늘 값이 우선이되, **돈이 걸린 칸은 지난 킵 값을 잃지 않는다.** */
-          next[nk] = {
+          const kp = Number(cur.keepPaid) || Number(src.keepPaid) || 0;
+          const merged = {
             ...EMPTY_CUST,
             ...src,
             ...cur,
             keep: true,
-            keepPaid: Number(cur.keepPaid) || Number(src.keepPaid) || 0,
+            keepPaid: kp,
             keepPaidLast: Number(cur.keepPaidLast) || Number(src.keepPaidLast) || 0,
             shipPaid: !!(cur.shipPaid || src.shipPaid)
           };
+          if (merged.paid && kp === 0) {
+            merged.paid = false;
+            off.push(nk);
+          }
+          next[nk] = merged;
         });
+        paidOff.list = off; // ⚠ 대입 — 두 번 돌아도 이름이 겹치지 않는다
         return next;
       });
+      /* ⚠ setTimeout(0) 은 렌더가 «끝난 뒤»에 온다. 그때야 위 업데이터가 담아둔 이름을 읽을 수 있다.
+         ⚠ 문구가 ⚠ 로 시작하므로 이 알림은 «자동으로 사라지지 않는다»(showToast 의 warn 갈래).
+            사장님이 닫기 전까지 남는다 — 놓치면 안 되는 알림이기 때문이다. */
+      setTimeout(() => {
+        const off = paidOff.list;
+        if (!off.length) return;
+        showToast(`⚠ 「${off.join(", ")}」 은 킵 입금액이 0원이라 입금 표시를 껐습니다 — 받으셨으면 「입금」을 다시 눌러 주세요`);
+      }, 0);
       const amt = add.reduce((t2, o) => t2 + o.price * o.qty, 0);
       showToast(`🔖 「${nicks.join(", ")}」 지난 킵 ${add.length}건 (${won(amt)}원)을 함께 올렸습니다 — 보내실 때 「킵」을 해제하세요`);
     }, 900);
