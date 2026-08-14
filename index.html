@@ -3423,6 +3423,8 @@ function App() {
       consignCount = 0;
     let lotteBilled = 0,
       cjBilled = 0; // 택배사 단가로 계산할 건수 (위탁 제외)
+    let freeRows = 0,
+      freeCost = 0; // ⭐ 16차 미결 22 — 배송비 «안 받고» 나간 줄 (참고용)
     /* ⚠⚠ 이 날짜에 주문이 없는 사람의 운송장은 운임에서 뺀다 (2026-08-03 6차 · 사장님 결정 「다」).
           업로드가 날짜를 가리지 않아 **다른 날짜 방송분이 섞여 들어온 적이 있다**
           (07-27 을 열어둔 채 07-31 롯데 파일을 올려 3건이 붙었고, 운임이 8,400원 과다였다).
@@ -3458,6 +3460,18 @@ function App() {
         cjCount++;
         if (!isConsign) cjBilled++;
       } else if (isConsign) {/* 택배사 미상 위탁 — 위탁 운임으로만 잡힌다 */}
+      /* ⭐⭐ 2026-08-14 16차 (미결 22) — 「배송비를 «안 받고» 나간 줄」의 운임을 따로 센다.
+            사장님 증상 보고에서 나왔다: 「7.27일 회계탭에 배송비 손익 보면 계산이 이상한데」
+            → 재현해 보니 «계산은 맞았다». 합계 하나만 보여서 «원인»을 못 읽는 것이 문제였다.
+            07-27: 배송비 수입 24,000 − 운임 25,600 = −1,600 인데, 적자는 전부
+            「무료배송 1건(사남매맘) + 실수 발송·보상 무료배송 2건(드리맘)」 = 8,600 에서 왔다.
+         ⚠ 이 값은 «참고»다. 손익에서 또 빼면 이중 계산이 된다 — shipProfit 은 건드리지 않는다.
+         ⚠ 판정을 새로 만들지 않는다. 「배송비를 냈는가」는 feeOfAll 을 그대로 쓴다 (money-rules §1).
+         ⚠ «사람»이 아니라 «줄» 기준이다 — 드리맘은 한 사람인데 두 번 나갔다. */
+      if (feeOfAll(d.nick) === 0) {
+        freeRows++;
+        freeCost += isConsign ? Number(shipCost.consign) || 0 : c.includes("롯데") ? Number(shipCost.lotte) || 0 : c.includes("CJ") ? Number(shipCost.cj) || 0 : 0;
+      }
     });
     /* 배송 손익 (0-7 1단계) — 「받은 배송비」 − 「택배사에 낸 운임」
        ⚠ 운송장을 안 올리면 carrier 가 비어 lotteCount·cjCount 가 0이 된다.
@@ -3570,6 +3584,8 @@ function App() {
       sendList,
       shipCostUnknown,
       prodList,
+      freeRows,
+      freeCost,
       acctOrders,
       unpaidOrders,
       unpaidQtySum,
@@ -3664,6 +3680,8 @@ function App() {
       trkMissing,
       sendList,
       shipCostUnknown,
+      freeRows,
+      freeCost,
       unpaidAmtSum,
       unpaidQtySum,
       acctOrders,
@@ -3683,6 +3701,8 @@ function App() {
     /* 운임 줄 문구 — 회계 화면과 같은 규칙을 쓴다 (문구가 갈리면 어느 쪽이 맞는지 헷갈린다) */
     const carrierNote = (cnt, billed, unit) => {
       if (!cnt) return shipCostUnknown ? `운송장 ${trkMissing}명 미업로드 — 그만큼 운임이 빠져 있다` : "0건";
+      /* ⚠ 16차 미결 22 — 화면 cNote 와 «같은 문구»여야 한다. 한쪽만 고치면 두 곳이 갈라진다. */
+      if (billed === 0) return `${cnt}건 모두 위탁 — 아래 위탁 운임에 있습니다`;
       return cnt === billed ? `${cnt}건 × ${won(unit)}원` : `${cnt}건 중 위탁 ${cnt - billed}건 제외 ${billed}건 × ${won(unit)}원`;
     };
     const shipWarn = shipCostUnknown ? `⚠ 보낼 ${sendList.length}명 중 운송장 ${trkMissing}명이 없습니다 — 그만큼 운임이 빠져 실제 손익은 이보다 낮습니다` : `배송비 수입 ${won(feeSum)} − 운임 ${won(shipCostSum)}`;
@@ -3697,7 +3717,10 @@ function App() {
     /* [배송 손익] 0-7 1단계 — 받은 배송비에서 택배사 운임을 뺀 것.
        ⚠ 운임은 음수로 적는다. 「수입 + 운임 = 손익」이 엑셀에서 눈으로 검산된다.
        ⚠ 운송장을 안 올리면 운임을 모른다. 0원으로 적으면 손익이 부풀려지므로 말로 알려준다. */
-    ["[배송 손익]", ""], ["롯데 운임", -lotteCost, carrierNote(lotteCount, lotteBilled, shipCost.lotte)], ["CJ 운임", -cjCost, carrierNote(cjCount, cjBilled, shipCost.cj)], ["위탁 운임", -consignCost, consignCount ? `${consignCount}건 × ${won(shipCost.consign)}원 (택배사 무관)` : "0건"], ["배송 손익", shipProfit, shipWarn], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0],
+    ["[배송 손익]", ""], ["롯데 운임", -lotteCost, carrierNote(lotteCount, lotteBilled, shipCost.lotte)], ["CJ 운임", -cjCost, carrierNote(cjCount, cjBilled, shipCost.cj)], ["위탁 운임", -consignCost, consignCount ? `${consignCount}건 × ${won(shipCost.consign)}원 (택배사 무관)` : "0건"],
+    /* ⭐ 16차 미결 22 — 참고 줄. 위 운임에 이미 들어 있으므로 손익에서 또 빼지 않는다.
+       ⚠ 화면과 «같은 값»(closing.freeCost)을 쓴다. 여기서 다시 세지 말 것 (money-rules §1). */
+    ["배송비 없이 나감", -freeCost, freeRows ? `${freeRows}건 — 무료배송·배송비 미청구분 (위 운임에 이미 포함 · 또 빼지 않음)` : "0건"], ["배송 손익", shipProfit, shipWarn], [], ["[입금]", ""], ["입금 완료", paidTotal, `${paidList.length}명`], ["입금률 (인원)", nicks.length ? Math.round(paidList.length / nicks.length * 100) / 100 : 0],
     /* ⭐ 15차 — 「입금률 (금액)」은 없앴다. 미입금을 통째로 빼면 분모·분자가 같아져
           «항상 100%» 라 뜻이 없다. 인원 기준은 남긴다 — 누가 아직 안 냈는지는 여전히 쓸모 있다. */
 
@@ -8077,6 +8100,9 @@ function App() {
     /* 운임 줄 문구 — 결산 엑셀과 같은 규칙을 쓴다 (문구가 갈리면 어느 쪽이 맞는지 헷갈린다) */
     const cNote = (cnt, billed, unit) => {
       if (!cnt) return closing.shipCostUnknown ? `운송장 ${closing.trkMissing}명 미업로드 — 그만큼 운임이 빠져 있다` : "0건";
+      /* ⚠ 16차 미결 22 — 「2건 중 위탁 2건 제외 0건」이 «어디로 갔는지» 안 보여 헷갈렸다.
+            전부 위탁이면 아래 「위탁 운임」에 있다고 말해 준다. */
+      if (billed === 0) return `${cnt}건 모두 위탁 — 아래 위탁 운임에 있습니다`;
       return cnt === billed ? `${cnt}건 × ${won(unit)}원` : `${cnt}건 중 위탁 ${cnt - billed}건 제외 ${billed}건 × ${won(unit)}원`;
     };
     const sWarn = closing.shipCostUnknown ? `⚠ 보낼 ${closing.sendList.length}명 중 운송장 ${closing.trkMissing}명이 없습니다 — 그만큼 운임이 빠져 실제 손익은 이보다 낮습니다` : `배송비 수입 ${won(closing.feeSum)} − 운임 ${won(closing.shipCostSum)}`;
@@ -8196,7 +8222,7 @@ function App() {
       className: "acctcard"
     }, /*#__PURE__*/React.createElement("div", {
       className: "acctcaption"
-    }, "배송 손익"), arow("배송비 수입", closing.feeSum, `${closing.paidFeeList.length}명 × ${won(shipFee)}원 (픽업 ${closing.pickList.length}명 · 무료배송 ${closing.freeList.length}명 · 미입금 ${closing.unpaidFeeList.length}명 제외)`), arow("롯데 운임", -closing.lotteCost, cNote(closing.lotteCount, closing.lotteBilled, shipCost.lotte)), arow("CJ 운임", -closing.cjCost, cNote(closing.cjCount, closing.cjBilled, shipCost.cj)), arow("위탁 운임", -closing.consignCost, closing.consignCount ? `${closing.consignCount}건 × ${won(shipCost.consign)}원 (택배사 무관)` : "0건"), arow("배송 손익", closing.shipProfit, sWarn, "anet")), /*#__PURE__*/React.createElement("div", {
+    }, "배송 손익"), arow("배송비 수입", closing.feeSum, `${closing.paidFeeList.length}명 × ${won(shipFee)}원 (픽업 ${closing.pickList.length}명 · 무료배송 ${closing.freeList.length}명 · 미입금 ${closing.unpaidFeeList.length}명 제외)`), arow("롯데 운임", -closing.lotteCost, cNote(closing.lotteCount, closing.lotteBilled, shipCost.lotte)), arow("CJ 운임", -closing.cjCost, cNote(closing.cjCount, closing.cjBilled, shipCost.cj)), arow("위탁 운임", -closing.consignCost, closing.consignCount ? `${closing.consignCount}건 × ${won(shipCost.consign)}원 (택배사 무관)` : "0건"), closing.freeRows > 0 && arow("배송비 없이 나감", -closing.freeCost, `${closing.freeRows}건 — 무료배송·배송비 미청구분 (위 운임에 «이미» 들어 있습니다 · 또 빼지 않습니다)`), arow("배송 손익", closing.shipProfit, sWarn, "anet")), /*#__PURE__*/React.createElement("div", {
       className: "acctcard"
     }, /*#__PURE__*/React.createElement("div", {
       className: "acctcaption"
