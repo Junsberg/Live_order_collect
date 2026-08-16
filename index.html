@@ -2315,7 +2315,16 @@ function App() {
           이 버튼을 누르면 «지금 화면에 친 것»이 통째로 사라진다.
           서버(save_broadcast)는 rev 로 덮어쓰기를 이미 막지만, «버려지는 쪽»은 아무 데도 안 남았다.
        ⚠ 반드시 applyServerPayload «앞»에서 찍는다. 뒤에서 찍으면 이미 서버 내용으로 바뀐 뒤다. */
-    takeSnap(`서버 것 받기 직전 (이 PC 내용 ${orders.filter(o => !o.canceled).length}건)`);
+    /* ⭐⭐ 안전장치 183 (2026-08-16 18차 · 미결 24) — 출처 날짜를 «비워 두지 않는다».
+          takeSnap 의 기본값은 srvSyncedDate 인데, 충돌·선택 카드가 뜬 시점엔 «아직 비어 있다».
+          그래서 실서버 08-16 20:03 기록의 srcDate 가 null 이었다.
+          → 되돌릴 때 undoBlocked 가 «못 걸러» 출처 불명으로 취급되고 헛경고가 떴다.
+       ⚠ bdate 로 덮어쓰지 «않는다». srvSyncedDate 에 앞 날짜가 남아 있는 경우
+          (날짜를 옮겼는데 새 날짜 로드 전에 충돌 카드가 뜬 상황) 화면에 앞 날짜 잔재가
+          있을 수 있으므로, 그때는 «막히는 쪽»이 안전하다. 비어 있을 때만 bdate 로 메운다. */
+    takeSnap(`서버 것 받기 직전 (이 PC 내용 ${orders.filter(o => !o.canceled).length}건)`, {
+      srcDate: srvSyncedDate || bdate
+    });
     applyServerPayload(r);
     showToast(`✓ 서버 데이터를 불러왔습니다 · 주문 ${(r.payload.orders || []).length}건`);
   };
@@ -5715,6 +5724,20 @@ function App() {
         }
         const now = Date.now();
         const mine = `${auth.uid}|${dev}`;
+        /* ⭐⭐ 안전장치 184 (2026-08-16 18차 · 미결 23 (나))
+              브라우저를 «그냥 닫으면» beforeunload 의 삭제 요청이 중간에 잘려 자리가 남는다.
+              실서버에서 07-27 자리가 몇 시간째 남아 있는 것을 확인했다.
+              → 다음 사람이 들어올 때 «3분 넘게 조용한» 자리를 함께 치운다.
+           ⚠ 살아 있는 자리는 «절대» 건드리지 않는다. 지우면 상대가 최대 15초간 안 보인다.
+           ⚠ 실패해도 «던지지 않는다» — 청소가 안 돼도 장사는 돌아가야 한다.
+              화면 표시는 아래 만료 거르기가 따로 하므로 이것과 무관하게 정확하다.
+           ⚠ then 을 붙여야 요청이 «실제로» 나간다 (아래 leave 와 같은 함정). */
+        const stale = r.data.filter(x => now - new Date(x.last_active).getTime() >= LOCK_STALE_MS);
+        stale.forEach(x => {
+          try {
+            c.from("edit_locks").delete().eq("date", x.date).eq("seq", x.seq || 1).eq("account", x.account).eq("device_id", x.device_id).then(() => {}, () => {});
+          } catch (e) {}
+        });
         const others = r.data.filter(x => `${x.account}|${x.device_id}` !== mine).filter(x => now - new Date(x.last_active).getTime() < LOCK_STALE_MS).map(x => ({
           key: `${x.account}|${x.device_id}`,
           label: x.label || "다른 사람"
@@ -5731,8 +5754,13 @@ function App() {
     const leave = () => {
       const c = sb();
       if (!c) return;
+      /* ⭐⭐ 안전장치 184 (2026-08-16 18차 · 미결 23 (가))
+            ⚠⚠ `.then()` 을 «반드시» 붙인다. Supabase 쿼리 빌더는 then 이 불려야 요청을 만든다.
+               17차까지는 이 줄에 then 도 await 도 없어 «요청이 아예 안 나갔다» —
+               코드는 있는데 자리가 안 지워졌고, 실서버에 몇 시간짜리 행이 남았다 (18차 재현).
+            ⚠ await 는 하지 않는다 — 언마운트·beforeunload 에서 기다릴 수 없다. */
       try {
-        c.from("edit_locks").delete().eq("date", bdate).eq("device_id", dev);
+        c.from("edit_locks").delete().eq("date", bdate).eq("device_id", dev).then(() => {}, () => {});
       } catch (e) {}
     };
     window.addEventListener("beforeunload", leave);
