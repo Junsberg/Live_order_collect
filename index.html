@@ -6748,6 +6748,65 @@ function App() {
     return () => clearTimeout(t);
   }, [regulars]);
 
+  /* ---------- ⭐⭐ 안전장치 185 : 단골 배송지를 «계속» 서버에 올린다 (2026-08-17 18차) ----------
+     실서버 자국에서 찾았다 — `regulars` 49행의 last_used 최근이 «2026-08-07» 인데 08-10 방송이 있었다.
+     08-10 의 「우아빠」·「차우」는 적립 조건(paidAnyOf + 주소 + 연락처)을 «셋 다» 갖췄는데
+     서버에 «없었다». 재현으로 확정했다 (t_regsrv ㉵ — 로컬엔 쌓이고 서버엔 안 간다).
+      원인: `regulars` 에 «쓰는» 코드가 promoteToServer 안의 upsert «하나»뿐이었고,
+       그 함수는 PROMO_KEY 표시가 있으면 즉시 return 한다 = «일회성 이사»였다.
+       14차에 «내려받기»(pullRegulars)는 만들었지만 «올리기»는 그대로였다.
+      ⚠ 왜 위험했나 — «데이터 유실 경로»다:
+       · 매니저 PC 에서는 그 뒤 단골이 영영 안 보인다 (14차 169 가 고친 것과 같은 증상)
+       · 이 PC 가 고장나면 그 뒤 단골 배송지가 «전부» 사라진다
+       · ⚙️ 「서버 전체 백업」도 서버 것만 받으므로 그 백업에도 «안 들어간다»
+      ⚠⚠ 여기는 «오배송»이 걸린 자리다 (설계안이 두 곳에 경고).
+        옛 값으로 최신 배송지를 덮으면 물건이 엉뚱한 데로 간다.
+        → PK 가 (nick, addr) 이므로 «주소가 같은 행»만 갱신되고, 다른 주소 행은 «안 건드린다».
+        → 그래도 같은 주소를 남이 더 최근에 고쳤을 수 있으므로 «내 것이 최신일 때만» 올린다.
+     ⚠ .then() 을 반드시 붙인다 — 없으면 요청이 «아예 안 나간다» (18차 184 에서 겪었다).
+     ⚠ 실패해도 던지지 않는다 — 서버가 안 되어도 장사는 돌아가야 한다.
+     ⚠ 지우지 않는다 — 올리기가 «지우개»가 되면 안 된다 (upsert 만 쓴다). */
+  const regPushed = useRef({});
+  useEffect(() => {
+    /* ⚠⚠ regPullRan — 서버를 «읽어본 뒤»에만 올린다.
+          못 읽었는데 올리면 «내가 서버 최신을 모르는 채» 덮어쓰게 된다.
+          같은 주소를 남이 방금 고쳤다면 내 옛 값이 이겨 «오배송»이 난다.
+          승격(promoteToServer)이 「읽기 실패면 통째로 중단」하는 것과 «같은 이유»다.
+          ⭐ 18차에 이 조건을 빠뜨렸다가 기존 검사 t_promote 의
+             「읽기만 실패해도 단골을 «안» 올린다」가 잡아 주었다. */
+    if (!regLoaded.current || !loaded || !regPullRan.current) return;
+    const c = sb();
+    if (!c || !serverOn()) return;
+    const t = setTimeout(() => {
+      const rows = [];
+      Object.entries(regulars || {}).forEach(([nick, v]) => {
+        ((v || {}).addrs || []).forEach(a => {
+          if (!nick || !a || !a.addr) return;
+          const last = Number(a.last) || 0;
+          const key = `${nick}|${a.addr}`;
+          /* 같은 내용을 되풀이해 올리지 않는다 — 서버 호출을 아낀다 */
+          if ((regPushed.current[key] || 0) >= last) return;
+          regPushed.current[key] = last;
+          rows.push({
+            nick,
+            addr: a.addr,
+            name: a.name || null,
+            phone: a.phone || null,
+            req: a.req || null,
+            uses: Number(a.uses) || 1,
+            last_used: new Date(last || Date.now()).toISOString(),
+            last_date: a.lastDate || null
+          });
+        });
+      });
+      if (!rows.length) return;
+      try {
+        c.from("regulars").upsert(rows).then(() => {}, () => {});
+      } catch (e) {}
+    }, 1500); // 입력 중에 계속 올리지 않게 넉넉히 기다린다
+    return () => clearTimeout(t);
+  }, [regulars, loaded]);
+
   // 적립 — 입금 완료 + 주소·연락처가 모두 있는 사람만.
   // 반쯤 입력된 정보가 쌓이면 오히려 방해가 된다. 픽업은 주소가 없으므로 자연히 제외된다.
   const addrKey = c => `${String(c.addr || "").replace(/\s+/g, " ").trim()}`;
