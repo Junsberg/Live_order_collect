@@ -1491,6 +1491,39 @@ function App() {
   const [acctOpen, setAcctOpen] = useState(false); // 📊 회계 화면 (0-7 2단계)
   const [acctOnlyMissing, setAcctOnlyMissing] = useState(false); // 「미입력만 보기」
   const [recentId, setRecentId] = useState(null);
+  /* ⭐ 방금 담은 줄을 «보이게» 끌어온다 (2026-08-21 21차).
+        「현재 주문」 목록은 높이가 고정이라 주문이 5건을 넘으면 새로 담은 줄이 칸 «밖»으로 밀린다.
+        그러면 방금 담은 것이 맞는지 확인할 수 없고, recent 강조도 안 보인다.
+     ⚠ block:'nearest' 를 쓴다 — 이미 보이는 줄이면 «안 움직인다».
+        'center' 를 쓰면 담을 때마다 목록이 튀어 오히려 눈을 어지럽힌다.
+     ⚠ 목록 «안»에서만 스크롤되어야 한다. 페이지 전체가 튀면 상품 버튼 자리가 흔들려
+        이번에 고친 결함이 되살아난다 — 그래서 부모를 직접 스크롤한다.
+     ⚠ 이 동작을 지키는 검사는 t_padstay.js 5절이다. */
+  /* ⭐⭐ 담는 순간 «페이지 스크롤이 튀는 것»을 되돌린다 (2026-08-21 21차).
+        원인: 닉네임 칸의 자동완성 목록(<datalist id="nicks">)에 «새 닉»이 추가되면
+        크롬이 페이지 스크롤을 맨 위로 되돌린다. 방송 중에는 새 손님이 계속 들어오므로
+        그때마다 상품 버튼이 «화면상» 357px 아래로 내려가 다른 상품이 눌린다 (PC 1280 실측).
+        ⚠ 자동완성은 쓸모가 있어 «없애지 않는다» — 대신 튄 스크롤을 제자리로 돌린다.
+        ⚠ 담는 순간에만 되돌린다. 사장님이 «직접» 스크롤한 것을 방해하면 안 된다. */
+  const scrollKeep = useRef(null);
+  useEffect(() => {
+    if (scrollKeep.current == null) return;
+    const want = scrollKeep.current;
+    scrollKeep.current = null;
+    if (Math.abs(window.scrollY - want) > 2) window.scrollTo(0, want);
+  });
+  useEffect(() => {
+    if (!recentId) return;
+    const el = document.querySelector(`.curordlist [data-oid="${recentId}"]`);
+    const box = el && el.closest(".curordlist");
+    if (!el || !box) return;
+    /* ⚠⚠ offsetTop 을 쓰면 «틀린다» — offsetParent 기준이라, 목록에 position 이 없으면
+          훨씬 위 조상 기준 값이 나와 엉뚱한 데로 스크롤한다 (21차에 실제로 당했다).
+          화면 좌표(rect) 차이로 «상대 거리»를 재야 정확하다. */
+    const eR = el.getBoundingClientRect(),
+      bR = box.getBoundingClientRect();
+    if (eR.top < bR.top) box.scrollTop -= bR.top - eR.top;else if (eR.bottom > bR.bottom) box.scrollTop += eR.bottom - bR.bottom;
+  }, [recentId]);
   const flashRecent = id => {
     setRecentId(id);
     window.clearTimeout(flashRecent._t);
@@ -2860,6 +2893,9 @@ function App() {
       nickRef.current && nickRef.current.focus();
       return;
     }
+    /* ⭐ 담기 «직전» 스크롤 위치를 적어 둔다 — 자동완성 목록이 갱신되며 튀는 것을 되돌리기 위해서다
+          (안전장치 187-d). 되돌리는 일은 바로 위 useEffect 가 한다. */
+    scrollKeep.current = window.scrollY;
     // ⚠ 마감된(출고완료) 주문에는 합치지 않는다. 합치면 새 주문이 이미 보낸 건에 흡수돼 사라진다.
     const existing = orders.find(o => o.nick === n && o.name === name && o.price === price && !o.canceled && !o.done);
     const rid = existing ? existing.id : uid();
@@ -8685,7 +8721,7 @@ function App() {
     className: "tlabel"
   }, "입금"), /*#__PURE__*/React.createElement("span", {
     className: "tval"
-  }, "₩", won(paidWithShip)))), shipPayNickCount > 0 && shipFee > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "₩", won(paidWithShip)))), shipFee > 0 && /*#__PURE__*/React.createElement("div", {
     className: "topship"
   }, "상품 ₩", won(totalSales), " + 배송비 ₩", won(shipFee), "×", shipPayNickCount, "명 (배송비 포함)"), /*#__PURE__*/React.createElement("div", {
     className: "topmeta"
@@ -9165,21 +9201,29 @@ function App() {
     }, n)));
   })(), !nick.trim() && /*#__PURE__*/React.createElement("div", {
     className: "hint"
-  }, "닉네임을 먼저 입력하면 상품 버튼·직접입력이 활성화됩니다.")), nick.trim() && (byNickAll[nick.trim()] || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "닉네임을 먼저 입력하면 상품 버튼·직접입력이 활성화됩니다.")), nick.trim() && /*#__PURE__*/React.createElement("div", {
     className: "card focus"
   }, /*#__PURE__*/React.createElement("div", {
     className: "rowbetween"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "cardtitle",
+    className: "cardtitle curordhead",
     style: {
       margin: 0
     }
-  }, "「", nick.trim(), "」 현재 주문 · 합계 ", won((byNick[nick.trim()] || []).reduce((s, o) => s + o.price * o.qty, 0)), "원", doneOrders.filter(o => o.nick === nick.trim()).length > 0 && /*#__PURE__*/React.createElement("span", {
-    className: "sub"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "cohnick"
+  }, "「", nick.trim(), "」 현재 주문"), /*#__PURE__*/React.createElement("span", {
+    className: "cohsum"
+  }, " · 합계 ", won((byNick[nick.trim()] || []).reduce((s, o) => s + o.price * o.qty, 0)), "원"), doneOrders.filter(o => o.nick === nick.trim()).length > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "sub cohdone"
   }, " · 출고완료 ", doneOrders.filter(o => o.nick === nick.trim()).length, "건은 합계에서 제외")), /*#__PURE__*/React.createElement("button", {
     className: "btn sm delordbtn" + (delNickArm === nick.trim() ? " armed" : ""),
     onClick: () => delNickOrders(nick.trim())
-  }, delNickArm === nick.trim() ? "한 번 더 누르면 삭제!" : "주문서 삭제")), orders.filter(o => o.nick === nick.trim()).map(o => /*#__PURE__*/React.createElement(OrderRow, {
+  }, delNickArm === nick.trim() ? "한 번 더 누르면 삭제!" : "주문서 삭제")), /*#__PURE__*/React.createElement("div", {
+    className: "curordlist"
+  }, (byNickAll[nick.trim()] || []).length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "curordempty"
+  }, "아직 담은 상품이 없습니다 · 아래에서 상품을 고르세요") : orders.filter(o => o.nick === nick.trim()).map(o => /*#__PURE__*/React.createElement(OrderRow, {
     key: o.id,
     o: o,
     chgQty: chgQty,
@@ -9189,7 +9233,7 @@ function App() {
     relockDone: relockDone,
     hideNick: true,
     recent: o.id === recentId
-  })), /*#__PURE__*/React.createElement("input", {
+  }))), /*#__PURE__*/React.createElement("input", {
     className: "in",
     style: {
       marginTop: 8
@@ -10823,6 +10867,7 @@ function OrderRow({
 }) {
   const done = !!o.done;
   return /*#__PURE__*/React.createElement("div", {
+    "data-oid": o.id,
     className: "orow" + (o.canceled ? " canceled" : "") + (done ? " donelock" : "") + (recent ? " recent" : "")
   }, !hideNick && /*#__PURE__*/React.createElement("span", {
     className: "onick" + (onNickClick && !done ? " clickable" : ""),
@@ -11187,6 +11232,33 @@ const CSS = `
 .pane { display: flex; flex-direction: column; gap: 12px; }
 .card { background: #fff; border: 1px solid #e6e9ee; border-radius: 14px; padding: 14px; }
 .card.focus { border-color: #16191f; }
+/* 주문 탭 「현재 주문」 목록 — 높이 «고정» + 안에서만 스크롤 (2026-08-21 21차)
+   이 카드가 상품 선택 버튼 «위»에 있어서, 주문이 늘 때마다 아래 상품 버튼이 밀려 내려갔다.
+   손가락이 겨눈 버튼과 실제 눌리는 버튼이 어긋나 «다른 상품이 담기는» 사고가 났다.
+   ⚠ height 를 «고정»한다. max-height 만 주면 1건일 때와 8건일 때 높이가 달라져 여전히 밀린다.
+   ⭐ 210px = PC 주문 한 줄 42px × 5줄 (2026-08-21 실측).
+      실서버 전체 방송의 손님별 주문 건수 분포에서 «5건 이하가 76.6%» 라 넷 중 셋은 스크롤이 없다.
+      6줄로 늘리면 커버는 7%p 느는 대신 상품 버튼 자리가 42px 줄어 손해가 크다.
+      ⚠ 사장님은 «PC 기준»으로 쓰신다 (2026-08-21 확인). 폰 값에 맞추지 마라.
+   ⚠ overflow-anchor: none — 브라우저가 스크롤을 붙잡으며 내용을 밀어 올리는 것을 막는다.
+   ⚠ 이 값을 바꾸면 t_padstay.js 가 실패한다. */
+/* 「현재 주문」 제목 — «항상 한 줄» (2026-08-21 21차 · 안전장치 187-f)
+   두 줄이 되면 카드가 31px 커져 아래 상품 버튼이 밀린다. 닉네임만 말줄임한다. */
+/* ⚠⚠ 제목과 「주문서 삭제」 버튼이 «한 줄»에 있어야 한다 (2026-08-21 21차 실측).
+   .rowbetween 은 flex-wrap 이라, 합계 금액이 길어지면 버튼이 «아래 줄»로 내려가며
+   카드가 31px 커지고 그만큼 상품 버튼이 밀린다. 줄바꿈을 막고 제목만 줄인다. */
+.card.focus > .rowbetween { flex-wrap: nowrap; align-items: center; gap: 8px; }
+.card.focus > .rowbetween > .delordbtn { flex: 0 0 auto; }
+.curordhead { display: flex; align-items: baseline; white-space: nowrap; min-width: 0; flex: 1 1 0; }
+.cohnick { overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+.cohsum { flex: 0 0 auto; }
+.cohdone { overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+.curordempty { color: #98a1ad; font-size: 13px; padding: 10px 2px; }
+.curordlist {
+  height: 210px; overflow-y: auto; overflow-x: hidden; overflow-anchor: none;
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+  margin-top: 6px; padding-right: 2px;
+}
 .card.paidcard { border-color: #b6e2d3; background: #f4fbf8; }
 .card.freecard { border-color: #a9c9f0; background: #f2f7fd; }
 .chip.free.on { background: #1d6fd6; border-color: #1d6fd6; color: #fff; }
