@@ -2138,7 +2138,144 @@ function App() {
     };
   }, [bdate, loaded, auth, srvLoadTick]);
 
+  /* ═══════════════════════════════════════════════════════════════════════
+     🔄 서버 «조용한 따라가기» (2026-08-22 21차 · 미결 20-b)
+      사장님 질문(2026-08-21 방송 중): 「둘중 누군가 한명 수정하면 바로 반영돼서 보이는거지?」
+       → 아니었다. 위 useEffect 는 `syncedDate.current === bdate` 에서 돌아가
+         «같은 날짜를 보고 있으면 서버를 다시 안 읽었다».
+       → 실서버 자국: 08-21 15:50 ~ 08-22 10:25 에 「서버 것 받기」 «14회».
+         자동으로 안 따라오니 사장님·매니저가 손으로 계속 받아오고 계셨다.
+      ⚠⚠ 이 기능의 «가장 큰 위험»은 「사장님이 입력 중인 것을 덮어쓰는 것」이다.
+        그래서 「안 올린 변경이 있으면 «절대» 받지 않는다」가 첫 번째 조건이다.
+     ⚠⚠ 그 판정을 «새로 만들지 않는다». 저장 게이트가 쓰는 것과 «같은 값»(srvSyncedRef)을 본다.
+        두 벌이 되는 순간 반드시 어긋난다 (안전장치 165·166 과 같은 축).
+     ⚠ 사용량 가드가 «없으면» 앱을 켜둔 채 두었을 때 통신량이 월 22GB 까지 간다(21차 계산).
+        무료 플랜 5GB 를 넘기면 «저장이 막힐» 수 있다 — 그때는 데이터가 위험해진다.
+        → ① 3분 무활동이면 쉰다  ② 탭이 안 보이면 쉰다  ③ 앞 요청 중이면 건너뛴다
+     ⚠ 이 규칙을 지키는 검사는 t_poll.js 다. 조건을 하나라도 빼면 그 검사가 실패한다. */
+  const POLL_MS = 10000; // 📌 사장님 결정 (2026-08-22): 10초
+  const POLL_IDLE_MS = 180000; // 3분 무활동이면 쉰다
+  const pollBusy = useRef(false);
+  /* ⚠⚠ 「마지막 활동」은 auth:at 을 쓴다 — 3시간 만료(expired)가 쓰는 «그 값»이다.
+        판정을 두 벌로 만들지 않는다.
+     ⚠ 다만 auth:at 은 «로그인 화면으로 직접 로그인할 때만» 생긴다(677줄).
+        그 경로를 안 탄 경우(세션 복원·검사 환경) auth:at 이 «없어»
+        폴링이 «영영 안 도는» 상태가 된다 (2026-08-22 계측으로 발견).
+        → 그때만 «앱을 연 시각»을 대신 쓴다. 조작으로 갱신하지 «않는다» —
+          갱신하면 auth:at 을 되돌려도 이쪽이 최신이라 무활동 가드가 «안 먹는다». */
+  const bootRef = useRef(Date.now());
+  const liveRef = useRef({}); // 폴링이 볼 «지금» 값 (타이머 클로저가 낡지 않게)
+  liveRef.current = {
+    products,
+    orders,
+    customers,
+    shipFee,
+    shipCost,
+    bdate,
+    pickState,
+    settleHeader,
+    trackHeader,
+    shipData,
+    place
+  };
+
+  /* 통신량을 «스스로» 센다 (사장님 요청 2026-08-22).
+     ⚠ Supabase 사용량 API 는 관리자 키가 필요해 앱에서 못 부른다 (설계안 5-17).
+        그래서 «앱이 받은 바이트»를 세어 보여준다 — 실제 값과 조금 다를 수 있다. */
+  const bumpNet = (rx, tx) => {
+    try {
+      const now = new Date();
+      const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+      const dd = todayISO();
+      let n = {};
+      try {
+        n = JSON.parse(localStorage.getItem("saja:net") || "{}") || {};
+      } catch (e) {
+        n = {};
+      }
+      if (n.ym !== ym) n = {
+        ym,
+        rx: 0,
+        tx: 0,
+        polls: 0
+      };
+      if (n.day !== dd) {
+        n.day = dd;
+        n.dayRx = 0;
+        n.dayPolls = 0;
+      }
+      n.rx = (n.rx || 0) + (rx || 0);
+      n.tx = (n.tx || 0) + (tx || 0);
+      n.dayRx = (n.dayRx || 0) + (rx || 0);
+      if (rx) {
+        n.polls = (n.polls || 0) + 1;
+        n.dayPolls = (n.dayPolls || 0) + 1;
+      }
+      localStorage.setItem("saja:net", JSON.stringify(n));
+    } catch (e) {}
+  };
+  const pollOnce = async () => {
+    if (pollBusy.current) return; // ③ 앞 요청이 아직 안 끝났다
+    if (typeof document !== "undefined" && document.hidden) return; // ② 안 보고 있다
+    if (!serverOn()) return;
+    if (srvPick) return; // 고르는 중에는 건드리지 않는다
+    if (srvState === "fail" || srvState === "conflict") return;
+    const live = liveRef.current;
+    if (srvSyncedDate !== live.bdate) return; // 날짜를 바꾼 직후에는 손대지 않는다
+    /* ① 3분 무활동이면 쉰다 — 켜두고 자리를 비워도 통신량이 안 는다 */
+    let at = 0;
+    try {
+      at = Number(localStorage.getItem("saja:auth:at")) || 0;
+    } catch (e) {}
+    const lastAct = at || bootRef.current; // auth:at 이 «있으면» 그것이 기준이다
+    if (!lastAct || Date.now() - lastAct > POLL_IDLE_MS) return;
+    /* ⭐⭐ 안 올린 «내» 변경이 있으면 받지 않는다.
+          저장 게이트(1093줄)와 «같은 값»을 본다 — 판정을 두 벌로 만들지 않는다. */
+    const str = JSON.stringify({
+      products: live.products,
+      orders: live.orders,
+      customers: live.customers,
+      shipFee: live.shipFee,
+      shipCost: live.shipCost,
+      bdate: live.bdate,
+      pickState: live.pickState,
+      settleHeader: live.settleHeader,
+      trackHeader: live.trackHeader,
+      shipData: live.shipData
+    });
+    if (srvSyncedRef.current !== str) return;
+    if (srvPlaceRef.current !== live.place) return;
+    pollBusy.current = true;
+    try {
+      const r = await serverLoad(live.bdate);
+      if (!r.ok || !r.exists) return;
+      bumpNet(JSON.stringify(r).length, 0);
+      if (srvPick) return; // 기다리는 사이에 카드가 떴다
+      if (liveRef.current.bdate !== live.bdate) return; // 기다리는 사이에 날짜가 바뀌었다
+      if (srvSyncedRef.current !== str) return; // 기다리는 사이에 내가 입력했다
+      if (srvRevRef.current != null && Number(r.rev) <= Number(srvRevRef.current)) return; // 새것이 아니다
+      const before = (liveRef.current.orders || []).length;
+      applyServerPayload(r);
+      const after = (r.payload && r.payload.orders || []).length;
+      const who = r.updatedBy ? `${r.updatedBy}님이 ` : "";
+      const diff = after - before;
+      showToast(diff > 0 ? `🔄 ${who}넣은 주문 ${diff}건을 받았습니다` : `🔄 ${who}바꾼 내용을 받았습니다`);
+    } finally {
+      pollBusy.current = false;
+    }
+  };
+  const pollRef = useRef(pollOnce);
+  pollRef.current = pollOnce;
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => {
+      pollRef.current();
+    }, POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded]);
+
   // 「빈 날짜」 안내에서 고른 결과
+
   /* 출고완료 잠금해제 — 아직 안 보냈는데 잘못 마감된 건을 되돌린다.
      ⚠ 운송장 기록은 건드리지 않는다. 그 주문만 다시 「이번 차수」로 돌려놓는다. */
   const unlockDone = orderId => {
@@ -10454,6 +10591,47 @@ function App() {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "cardtitle"
+  }, "서버 통신량 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "이 PC 가 서버와 주고받은 양 (앱이 스스로 센 값)")), (() => {
+    let n = null;
+    try {
+      n = JSON.parse(localStorage.getItem("saja:net") || "null");
+    } catch (e) {
+      n = null;
+    }
+    const mb = b => !b ? "0 MB" : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(1)} MB`;
+    if (!n) return /*#__PURE__*/React.createElement("div", {
+      className: "hint"
+    }, "아직 기록이 없습니다 — 서버를 한 번 읽으면 쌓이기 시작합니다.");
+    const pct = Math.round((n.rx || 0) / (5 * 1024 * 1024 * 1024) * 1000) / 10;
+    return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      className: "netrow"
+    }, /*#__PURE__*/React.createElement("b", null, "이번 달 (", n.ym, ")"), " 받음 ", /*#__PURE__*/React.createElement("b", null, mb(n.rx)), " · 보냄 ", mb(n.tx), " · 따라가기 ", n.polls || 0, "회"), /*#__PURE__*/React.createElement("div", {
+      className: "netrow"
+    }, "오늘 (", n.day || "-", ") 받음 ", /*#__PURE__*/React.createElement("b", null, mb(n.dayRx)), " · 따라가기 ", n.dayPolls || 0, "회"), /*#__PURE__*/React.createElement("div", {
+      className: "netrow"
+    }, "무료 플랜 한 달 몫(5 GB) 중 ", /*#__PURE__*/React.createElement("b", null, pct, "%")), /*#__PURE__*/React.createElement("div", {
+      className: "hint",
+      style: {
+        marginTop: 8
+      }
+    }, "· ", /*#__PURE__*/React.createElement("b", null, "10초마다"), " 서버를 확인해 상대가 넣은 내용을 따라옵니다.", /*#__PURE__*/React.createElement("br", null), "· ", /*#__PURE__*/React.createElement("b", null, "3분 동안 안 만지면 쉽니다."), " 켜두고 자리를 비우셔도 통신량이 늘지 않습니다.", /*#__PURE__*/React.createElement("br", null), "· 다른 창을 보고 계실 때도 쉽니다.", /*#__PURE__*/React.createElement("br", null), "· ", /*#__PURE__*/React.createElement("b", null, "입력하시던 것이 아직 서버에 안 올라갔으면 받아오지 않습니다"), " — 덮어쓸 일이 없습니다.", /*#__PURE__*/React.createElement("br", null), "· ⚠ 이 숫자가 ", /*#__PURE__*/React.createElement("b", null, "월 60% 를 넘으면"), " 알려주세요. 확인 주기를 늘리겠습니다."), /*#__PURE__*/React.createElement("button", {
+      className: "btn sm",
+      style: {
+        marginTop: 8
+      },
+      onClick: () => {
+        try {
+          localStorage.removeItem("saja:net");
+          showToast("통신량 기록을 지웠습니다");
+        } catch (e) {}
+      }
+    }, "기록 지우기"));
+  })()), /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
   }, "🔎 전체 기간 조회 ", /*#__PURE__*/React.createElement("span", {
     className: "sub"
   }, "지난 방송에서 사람·운송장을 찾습니다")), !findOpen && /*#__PURE__*/React.createElement("button", {
@@ -11253,6 +11431,7 @@ const CSS = `
 .cohnick { overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
 .cohsum { flex: 0 0 auto; }
 .cohdone { overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+.netrow { padding: 4px 0; font-size: 14px; }
 .curordempty { color: #98a1ad; font-size: 13px; padding: 10px 2px; }
 .curordlist {
   height: 210px; overflow-y: auto; overflow-x: hidden; overflow-anchor: none;
