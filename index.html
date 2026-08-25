@@ -2618,6 +2618,38 @@ function App() {
   // ⚠ 킵 주문건은 「아직 거래가 끝나지 않은 것」이라 집계에서 통째로 뺀다.
   //    출고·창고·매출·마감점검이 전부 activeOrders 를 쓰므로 여기 한 곳만 막으면 따라온다. (5-19)
   const isKeep = nick => !!(customers[nick] && customers[nick].keep);
+  /* ⭐⭐ 2026-08-25 23차 (안전장치 191) — 「지난 날짜를 «열기만» 해도 킵 목록이 되살아나는」 것을 막는다.
+     🔴 사장님 실사용 보고: 「8/21 에 킵 넣고 8/24 에 가져와서 풀었는데 여전히 8/21 자 킵으로 남아 있어」
+        재현해 보니 08-21 payload 에 `keep:true` 가 남아 있어, 그 날짜를 «여는 것만»으로
+        앱이 킵 목록에 «다시» 올리고 있었다 (실서버 자국도 같았다 — 푼 뒤 다시 1행이 생겼다).
+     ⭐ 「킵 자동 이월은 오늘 날짜일 때만」(안전장치 64)과 «같은 축»이다 —
+        지난 날짜를 열어본 것만으로 데이터가 바뀌면 안 된다.
+     ⚠ 다만 «과거 날짜에서 킵을 새로 거는 것»은 막지 않는다 — 방송이 자정을 넘겨
+        어제 날짜로 정리하시는 일이 잦다 (안전장치 64 주석과 같은 이유).
+        그래서 «날짜»가 아니라 「이 화면에서 «직접» 켠 킵인가」로 가른다.
+     ⚠ 날짜를 옮기면 비운다 — 다른 날짜에서 켠 기억이 따라가면 안 된다. */
+  const keepTouch = useRef(new Set());
+  /* ⚠⚠ ref 만 바꾸면 아래 동기화 effect 가 «다시 안 돈다» — 23차에 실제로 걸렸다.
+        「킵 목록에 넣기」를 눌러도 아무 일도 안 일어났다. 그래서 tick 을 함께 올린다. */
+  const [keepTouchTick, setKeepTouchTick] = useState(0);
+  const touchKeep = nick => {
+    keepTouch.current.add(nick);
+    setKeepTouchTick(v => v + 1);
+  };
+  useEffect(() => {
+    keepTouch.current = new Set();
+  }, [bdate]);
+  /* ⭐⭐ 2026-08-25 23차 (안전장치 191-b · 사장님 결정 「다」)
+     🔴 191 만으로는 «안전장치를 하나 약하게» 만든다 —
+        과거 날짜에서 킵을 켠 그 순간 인터넷이 끊겼다면, 지금까지는 그 날짜를 다시 열 때
+        킵 목록에 «다시» 올라가 복구됐다. 191 뒤에는 영영 안 올라간다.
+        킵에는 «이미 받은 돈»(keepPaid)이 들어 있다 — 잃으면 안 된다.
+     ⭐ 사장님 결정: **자동으로 넣지 말고 «물어본다».**
+        「어쨋든 킵인 사람이 목록에 없으면 안 되니까」 (2026-08-25)
+     ⚠ 오늘 날짜에서는 «묻지 않는다» — 지금까지처럼 자동이다. 방송 중에 카드가 뜨면 안 된다.
+     ⚠ 「그냥 두기」를 누르면 그 날짜·그 사람은 다시 묻지 않는다. */
+  const keepAskDone = useRef(new Set());
+  const [keepMissing, setKeepMissing] = useState(null); // { date, nicks: [] }
   /* ---------- 차수(출고 마감) ----------
      같은 날 오전에 출고까지 끝낸 손님이 오후 방송에서 또 주문하는 경우가 있다.
      운송장이 붙은 시점에 그때까지의 주문을 「마감」하고, 이후 주문은 새 차수로 본다.
@@ -6814,11 +6846,18 @@ function App() {
         const onScreen = new Set(orders.map(o => o.id));
         const keptOrders = (prev.orders || []).filter(o => !onScreen.has(o.id) || isKeep(o.nick));
         // 오늘 킵으로 체크된 것을 넣는다 (같은 주문 id 는 덮어씀)
+        /* ⭐⭐ 2026-08-25 23차 (안전장치 191) — «지난 날짜»에서는 「직접 켠 킵」만 올린다.
+              지난 날짜를 «열기만» 해도 그 화면의 keep:true 가 목록에 다시 올라가고 있었다.
+           ⚠ 해제 쪽(위 keptOrders)은 «건드리지 않는다» — 과거 날짜에서 킵을 푸는 것은 정상이다.
+              올리는 쪽만 좁힌다. */
+        const past = bdate !== todayISO();
+        const upOrders = past ? keepOrders.filter(o => keepTouch.current.has(o.nick)) : keepOrders;
+        const upNicks = past ? keepNicks.filter(nk => keepTouch.current.has(nk)) : keepNicks;
         const byId = {};
         keptOrders.forEach(o => {
           byId[o.id] = o;
         });
-        keepOrders.forEach(o => {
+        upOrders.forEach(o => {
           byId[o.id] = o;
         });
         const nextOrders = Object.values(byId);
@@ -6827,7 +6866,7 @@ function App() {
         Object.entries(prev.customers || {}).forEach(([nk, c]) => {
           if (left.has(nk)) keptCusts[nk] = c;
         });
-        keepNicks.forEach(nk => {
+        upNicks.forEach(nk => {
           keptCusts[nk] = {
             ...(customers[nk] || {})
           };
@@ -6840,7 +6879,41 @@ function App() {
       });
     }, 800);
     return () => clearTimeout(t);
-  }, [keepOrders, keepNicks, customers, orders, loaded]);
+  }, [keepOrders, keepNicks, customers, orders, loaded, bdate, keepTouchTick]);
+
+  /* 🔖 «과거 날짜»에서 「화면은 킵인데 킵 목록에 없는 사람」을 찾아 사장님께 묻는다 (191-b) */
+  useEffect(() => {
+    if (!loaded || !keepsLoaded.current) return;
+    if (bdate === todayISO()) {
+      setKeepMissing(v => v ? null : v);
+      return;
+    }
+    const have = new Set(Object.keys(keeps.customers || {}));
+    const miss = keepNicks.filter(nk => !have.has(nk) && !keepTouch.current.has(nk) && !keepAskDone.current.has(bdate + "|" + nk));
+    setKeepMissing(v => {
+      const same = v && v.date === bdate && v.nicks.join("\u241f") === miss.join("\u241f");
+      if (same) return v;
+      return miss.length ? {
+        date: bdate,
+        nicks: miss
+      } : null;
+    });
+  }, [keepNicks, keeps, bdate, loaded, keepTouchTick]);
+
+  /* 「킵 목록에 넣기」 — 넣는 것은 «직접 켠 것»과 같은 길을 쓴다 (판정을 두 곳에 두지 않는다) */
+  const adoptMissingKeeps = () => {
+    const nicks = keepMissing && keepMissing.nicks || [];
+    if (!nicks.length) return;
+    nicks.forEach(nk => touchKeep(nk));
+    setKeepMissing(null);
+    showToast(`✓ 「${nicks.join(", ")}」 을 킵 목록에 넣었습니다 — 받아둔 돈도 함께 올라갑니다`);
+  };
+  const dismissMissingKeeps = () => {
+    const nicks = keepMissing && keepMissing.nicks || [];
+    nicks.forEach(nk => keepAskDone.current.add(bdate + "|" + nk));
+    setKeepMissing(null);
+    showToast("이 날짜에서는 다시 묻지 않습니다 — 킵 목록은 그대로 둡니다");
+  };
 
   /* ⭐ 지난 킵 자동 이월 (2026-08-03 6차 · 사장님 결정 A안 + ㉮)
      그 손님이 오늘 새로 주문하면 지난 킵도 이 날짜로 따라온다 — 합쳐서 한 번에 보내기 위해.
@@ -9863,7 +9936,24 @@ function App() {
     }, "배송비는 받음"))));
   }))), tab === "settle" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
-  }, keepPending.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, keepMissing && keepMissing.date === bdate && /*#__PURE__*/React.createElement("div", {
+    className: "card keepmiss"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
+  }, "🔖 킵 목록에 없는 분이 있습니다 — ", keepMissing.nicks.length, "명"), /*#__PURE__*/React.createElement("div", {
+    className: "sub"
+  }, bdate, " 화면에서는 ", /*#__PURE__*/React.createElement("b", null, "「킵」"), " 인데 킵 목록에는 없습니다 · ", keepMissing.nicks.slice(0, 4).join(", "), keepMissing.nicks.length > 4 ? " 외" : "", /*#__PURE__*/React.createElement("br", null), "다른 날짜에서 ", /*#__PURE__*/React.createElement("b", null, "이미 보내셨다면"), " 그대로 두시고,", /*#__PURE__*/React.createElement("b", null, " 아직 안 보낸 킵"), " 이면 넣어 주세요 (받아둔 돈도 함께 올라갑니다).")), /*#__PURE__*/React.createElement("div", {
+    className: "keepmissbtns"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn primary",
+    onClick: adoptMissingKeeps
+  }, "킵 목록에 넣기"), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost",
+    onClick: dismissMissingKeeps
+  }, "그냥 두기"))), keepPending.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "card keepbar"
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     className: "cardtitle",
@@ -10052,6 +10142,7 @@ function App() {
           });
           return; // ⭐ 확인 전에는 킵을 켜지 않는다
         }
+        if (on) touchKeep(n); // ⭐ 「직접 켠 킵」 표시 (191)
         setCust(n, {
           keep: on
         });
@@ -10087,6 +10178,7 @@ function App() {
     }, /*#__PURE__*/React.createElement("button", {
       className: "btn primary",
       onClick: () => {
+        touchKeep(n); // ⭐ 「직접 켠 킵」 표시 (191)
         setCust(n, {
           keep: true,
           paid: true,
@@ -10101,6 +10193,7 @@ function App() {
       className: "btn",
       onClick: () => {
         // ⚠ 「입금 표시 + 킵 입금 0」이라는 애매한 상태를 남기지 않는다 (사장님 결정 · 5차)
+        touchKeep(n); // ⭐ 「직접 켠 킵」 표시 (191)
         setCust(n, {
           keep: true,
           paid: false
@@ -12145,6 +12238,9 @@ const CSS = `
 .boxadd .boxadd-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 6px 10px; border: 1px solid #eee; border-radius: 8px; background: #fafafa; }
 .boxadd .boxtrk { font-weight: 800; letter-spacing: 0.3px; }
+.keepmiss { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  border: 1px solid #f0d3a8; background: #fffaf2; }
+.keepmiss .keepmissbtns { display: flex; gap: 8px; flex-shrink: 0; }
 .donebadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   background: #e8f6ec; color: #1f7a3d; font-weight: 700; }
 .shipdonebadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
