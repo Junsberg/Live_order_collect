@@ -2642,6 +2642,22 @@ function App() {
         두 축을 절대 섞지 않는다.
      ⚠ 옛 자료에는 box 가 없다 — 없으면 «1번 박스»로 본다. */
   const boxOf = d => Number(d && d.box) || 1;
+  /* ⭐⭐ 2026-08-25 사장님 체계 — 「몇 차 출고인가」를 «한 곳»에서 만든다.
+        첫 박스는 번호가 «안 붙고», 추가한 박스부터 -1 · -2 · -3 이 붙는다.
+          1차 1번 → (표시 없음) · 1차 2번 → 「1-1차」 · 1차 3번 → 「1-2차」
+          2차 1번 → 「2차」      · 2차 2번 → 「2-1차」
+     ⚠ 화면 뱃지·후보 목록·스냅샷 이유 글이 «전부» 이것을 쓴다. 따로 만들면 조용히 어긋난다. */
+  const seqLabel = d => {
+    const q = seqOf(d),
+      b = boxOf(d);
+    if (b > 1) return `${q}-${b - 1}차`;
+    return q > 1 ? `${q}차` : "";
+  };
+  /* ⭐ 「복사됨 ✓」 표시의 열쇠 — «차수»까지 본다 (23차 · 사장님 실사용 보고).
+     🔴 전에는 «닉네임뿐»이라 그 사람의 «모든 줄»이 같이 「복사됨」으로 바뀌었다.
+        같은 차수의 박스는 «한 번에» 담기므로 함께 바뀌는 것이 맞지만,
+        «2차»는 다른 날 나간 택배라 같이 바뀌면 안 된다. */
+  const trkCopyId = d => `trk-${d.nick}#${seqOf(d)}`;
   /* 「그 사람의 지금 차수 · 1번 박스」 줄 표.
      ⚠⚠ 출고 시트가 2번 박스 번호를 쓰면 그대로 «오배송»이다.
         그래서 「어느 줄을 대표로 쓰는가」 판정을 여기 «한 곳»에만 둔다 (money-rules §1 과 같은 취지). */
@@ -3408,9 +3424,19 @@ function App() {
   /* ---------- 출고 ---------- */
 
   // 운송장 안내 문구 (업로드 탭 · 고객에게 보낼 내용). 택배사는 조회된 값 그대로 사용.
+  /* ⭐⭐ 2026-08-25 23차 — 「같은 차수의 박스」를 «한 번에» 담는다 (사장님 결정).
+     🔴 «차수»는 절대 안 섞는다 — 2차는 다른 날 나간 택배다. 1차 안내에 들어가면
+        손님이 «옛 번호»를 새 것으로 알고 기다린다.
+     ⚠ 손님께 가는 글에는 「1-1차」 같은 우리 용어를 쓰지 않는다. 순번(1/2)만 보여준다.
+     ⚠ 순번은 박스가 «2개 이상»일 때만 붙인다 — 하나뿐이면 지금까지와 «똑같은» 글이다.
+     ⚠ 이유(상품이 많아서 / 출고지가 달라서)는 «적지 않는다» — 위탁은 출고지가 달라
+        나뉜 것이라 「상품이 많아서」라고 쓰면 거짓말이 된다 (2026-08-25 사장님 지적). */
   const trackMsg = d => {
-    const carrier = (d.carrier || "").trim() || "택배";
-    return `${trackHeader}\n\n[운송장 정보]\n${carrier} ${fmtTrk(d.tracking)}`;
+    const q = seqOf(d);
+    const rows = shipData.filter(x => x.nick === d.nick && seqOf(x) === q && normTrk(x.tracking)).sort((a, b) => boxOf(a) - boxOf(b));
+    const list = rows.length ? rows : [d];
+    const body = list.map((x, i) => `${list.length > 1 ? `${i + 1}/${list.length} ` : ""}${(x.carrier || "").trim() || "택배"} ${fmtTrk(x.tracking)}`).join("\n");
+    return `${trackHeader}\n\n[운송장 정보]\n${body}`;
   };
   // 창고 픽업 집계 — ③ 정산에서 「안내」를 보낸 주문만 카운팅 (아직 안내 전이면 확정 전으로 보고 제외)
   /* ---------- 출고완료 판정 (7/27) ----------
@@ -5353,7 +5379,7 @@ function App() {
         따로 쓰면 한쪽만 고객정보 정리를 빠뜨려 «유령 송장»이 되살아난다 (안전장치 1~3). */
   const removeTrkRows = gone => {
     // 화면에서 사라지는 작업이므로 스냅샷을 찍는다 (설계안 4장)
-    takeSnap(`운송장 줄 삭제 직전 (${gone.slice(0, 3).map(d => `${d.nick}${seqOf(d) > 1 ? ` ${seqOf(d)}차` : ""}${boxOf(d) > 1 ? ` ${boxOf(d)}번 박스` : ""}`).join(", ")}${gone.length > 3 ? " 외" : ""})`);
+    takeSnap(`운송장 줄 삭제 직전 (${gone.slice(0, 3).map(d => `${d.nick}${seqOf(d) > 1 ? ` ${seqOf(d)}차` : ""}${boxOf(d) > 1 ? ` ${seqLabel(d)}` : ""}`).join(", ")}${gone.length > 3 ? " 외" : ""})`);
     const goneKeys = new Set(gone.map(trkKey));
     const rest = shipData.filter(d => !goneKeys.has(trkKey(d)));
     setShipData(rest);
@@ -5452,7 +5478,7 @@ function App() {
       return;
     }
     const c = cust(nick);
-    takeSnap(`📦 박스 추가 직전 (${nick} ${tgt.nextBox}번 박스)`);
+    takeSnap(`📦 박스 추가 직전 (${nick} ${tgt.seq}-${tgt.nextBox - 1}차)`);
     setShipData(prev => [...prev, {
       nick,
       seq: tgt.seq,
@@ -5471,12 +5497,12 @@ function App() {
       trk: "",
       consign: false
     });
-    showToast(`✓ 「${nick}」 ${tgt.nextBox}번 박스 ${fmtTrk(val)} — 배송비는 «더 받지 않습니다» (같은 1차)`);
+    showToast(`✓ 「${nick}」 ${tgt.seq}-${tgt.nextBox - 1}차 ${fmtTrk(val)} — 배송비는 «더 받지 않습니다» (같은 ${tgt.seq}차)`);
   };
   const [boxDelArm, setBoxDelArm] = useState("");
   const delBoxRow = d => {
     if (!canDelTrk(d)) {
-      showToast("⚠ 1번 박스는 실제로 나간 기록이라 여기서 지울 수 없습니다.");
+      showToast("⚠ 첫 박스는 실제로 나간 기록이라 여기서 지울 수 없습니다.");
       return;
     }
     const k = trkKey(d);
@@ -10318,7 +10344,7 @@ function App() {
     className: "sub"
   }, "한 사람에게 택배가 2개 이상 나갈 때")), /*#__PURE__*/React.createElement("div", {
     className: "sub"
-  }, "상품이 많아 ", /*#__PURE__*/React.createElement("b", null, "한 번에 못 보내서"), " 운송장을 여러 장 뽑으셨으면 여기에 넣으세요.", /*#__PURE__*/React.createElement("b", null, " 배송비는 더 받지 않습니다"), " (같은 1차 · 운임만 늘어납니다). 손님이 ", /*#__PURE__*/React.createElement("b", null, "또 주문"), "하신 것은 박스가 아니라 ", /*#__PURE__*/React.createElement("b", null, "2차 출고"), "입니다 — 그때는 운송장을 그냥 올리시면 됩니다."), boxTargets.length === 0 ? /*#__PURE__*/React.createElement("div", {
+  }, "상품이 많거나 ", /*#__PURE__*/React.createElement("b", null, "출고지가 달라"), "(위탁 등) 택배가 ", /*#__PURE__*/React.createElement("b", null, "2개 이상"), " 나갔으면 여기에 넣으세요.", /*#__PURE__*/React.createElement("b", null, " 배송비는 더 받지 않습니다"), " (같은 1차 · 운임만 늘어납니다). 손님이 ", /*#__PURE__*/React.createElement("b", null, "또 주문"), "하신 것은 박스가 아니라 ", /*#__PURE__*/React.createElement("b", null, "2차 출고"), "입니다 — 그때는 운송장을 그냥 올리시면 됩니다."), boxTargets.length === 0 ? /*#__PURE__*/React.createElement("div", {
     className: "empty"
   }, "아직 운송장이 붙은 사람이 없습니다. ⑤ 업로드에서 운송장을 먼저 올려주세요.") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     className: "boxaddrow"
@@ -10334,7 +10360,7 @@ function App() {
   }, "누구의 박스입니까?"), boxTargets.map(x => /*#__PURE__*/React.createElement("option", {
     key: x.nick,
     value: x.nick
-  }, x.nick, " — ", x.seq, "차 ", x.nextBox, "번 박스"))), /*#__PURE__*/React.createElement("select", {
+  }, x.nick, " — ", x.seq, "-", x.nextBox - 1, "차"))), /*#__PURE__*/React.createElement("select", {
     className: "in boxadd-car",
     value: boxAdd.carrier,
     onChange: e => setBoxAdd({
@@ -10380,7 +10406,7 @@ function App() {
     key: trkKey(d)
   }, /*#__PURE__*/React.createElement("span", {
     className: "boxbadge"
-  }, "📦 ", boxOf(d), "번 박스"), /*#__PURE__*/React.createElement("span", {
+  }, "📦 ", seqLabel(d)), /*#__PURE__*/React.createElement("span", {
     className: "boxtrk"
   }, fmtTrk(d.tracking)), /*#__PURE__*/React.createElement("span", {
     className: "sub"
@@ -10567,11 +10593,9 @@ function App() {
         className: "whnick"
       }, d.nick), /*#__PURE__*/React.createElement("div", {
         className: "whbadges"
-      }, dq > 1 && /*#__PURE__*/React.createElement("span", {
-        className: "seqbadge"
-      }, dq, "차"), boxOf(d) > 1 && /*#__PURE__*/React.createElement("span", {
-        className: "boxbadge"
-      }, "📦 ", boxOf(d), "번 박스"), isDoneRow && /*#__PURE__*/React.createElement("span", {
+      }, seqLabel(d) && /*#__PURE__*/React.createElement("span", {
+        className: boxOf(d) > 1 ? "boxbadge" : "seqbadge"
+      }, boxOf(d) > 1 ? `📦 ${seqLabel(d)}` : seqLabel(d)), isDoneRow && /*#__PURE__*/React.createElement("span", {
         className: "donebadge"
       }, "출고완료"), orphan && /*#__PURE__*/React.createElement("span", {
         className: "orphanbadge"
@@ -10651,8 +10675,8 @@ function App() {
       }, /*#__PURE__*/React.createElement("button", {
         className: "btn sm primary",
         disabled: !d.tracking,
-        onClick: () => copyText(trackMsg(d), "trk-" + d.nick, d.nick)
-      }, copiedId === "trk-" + d.nick ? "복사됨 ✓" : "운송장 복사"), /*#__PURE__*/React.createElement("button", {
+        onClick: () => copyText(trackMsg(d), trkCopyId(d), d.nick)
+      }, copiedId === trkCopyId(d) ? "복사됨 ✓" : "운송장 복사"), /*#__PURE__*/React.createElement("button", {
         className: "btn sm tracebtn",
         disabled: !d.tracking || !traceKeyOf(d.carrier),
         title: traceKeyOf(d.carrier) ? "택배사 페이지에서 배송조회" : "택배사를 알 수 없어 조회할 수 없습니다",
