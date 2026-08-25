@@ -2634,6 +2634,26 @@ function App() {
   const doneSeqOf = n => orders.reduce((m, o) => o.nick === n && o.done ? Math.max(m, Number(o.doneSeq) || 1) : m, 0);
   const curSeq = n => doneSeqOf(n) + 1;
   const seqOf = d => Number(d && d.seq) || 1;
+  /* ⭐⭐ 2026-08-25 23차 (미결 28) — 「1차인데 박스가 여러 개」 = 1-1차
+        상품이 많아 택배 한 번에 못 보내면 운송장을 2~3장 뽑는다.
+        이것은 «2차 출고가 아니다» — 같은 1차를 나눠 보낸 것이라 **배송비를 또 받지 않는다**(우리 손실).
+          · 차수(seq) = 손님이 «또» 주문한 것 → 배송비를 «받는다»
+          · 박스(box) = 같은 주문을 «나눠» 보낸 것 → 배송비를 «안 받는다»
+        두 축을 절대 섞지 않는다.
+     ⚠ 옛 자료에는 box 가 없다 — 없으면 «1번 박스»로 본다. */
+  const boxOf = d => Number(d && d.box) || 1;
+  /* 「그 사람의 지금 차수 · 1번 박스」 줄 표.
+     ⚠⚠ 출고 시트가 2번 박스 번호를 쓰면 그대로 «오배송»이다.
+        그래서 「어느 줄을 대표로 쓰는가」 판정을 여기 «한 곳»에만 둔다 (money-rules §1 과 같은 취지). */
+  const headBoxMap = () => {
+    const m = {};
+    shipData.forEach(d => {
+      if (seqOf(d) !== curSeq(d.nick)) return;
+      const p = m[d.nick];
+      if (!p || boxOf(d) < boxOf(p)) m[d.nick] = d;
+    });
+    return m;
+  };
   const rowFor = (n, q) => shipData.find(d => d.nick === n && seqOf(d) === (q || curSeq(n)));
   const activeOrders = useMemo(() => orders.filter(o => !o.canceled && !o.done && !(customers[o.nick] && customers[o.nick].keep)), [orders, customers]);
   // 킵 주문건 (화면·목록용)
@@ -3422,11 +3442,15 @@ function App() {
              마감 부수효과로 그 손님 입금 표시(paid)까지 꺼진다.
        ⚠ 해제 쪽(inOpen)은 처음부터 「nick + 차수」로 봤다. 판정을 그쪽에 맞춘 것이다.
        ⚠ 여기를 지우면 nick 만 맞으면 어느 차수 줄로든 마감된다 — t_closeseq 가 잡는다. */
-    const toClose = shipData.filter(d => normTrk(d.tracking) && d.tracking !== d.closedTrk).map(d => ({
+    /* ⭐ 2026-08-25 23차 (미결 28) — 박스가 여러 개면 그 차수가 «여러 번» 후보로 잡힌다.
+          닉+차수로 한 번만 남기고, 대표 운송장(doneTrk)은 «1번 박스» 것을 쓴다.
+       ⚠ 배송비(doneFee)는 아래 firstOf 가 «주문 한 건»에만 붙이므로 이중으로 붙지 않는다.
+          여기서 줄이는 것은 스냅샷·알림 글의 중복과 doneTrk 가 어느 박스 것인가다. */
+    const toClose = [...shipData].sort((a, b) => boxOf(a) - boxOf(b)).filter(d => normTrk(d.tracking) && d.tracking !== d.closedTrk).map(d => ({
       nick: d.nick,
       seq: seqOf(d),
       trk: d.tracking
-    })).filter(x => orders.some(o => o.nick === x.nick && !o.done && !o.canceled)).filter(x => x.seq === curSeq(x.nick));
+    })).filter(x => orders.some(o => o.nick === x.nick && !o.done && !o.canceled)).filter(x => x.seq === curSeq(x.nick)).filter((x, i, a) => a.findIndex(y => y.nick === x.nick && y.seq === x.seq) === i);
 
     // 해제 — 그 차수의 운송장이 사라졌으면 마감을 되돌린다 (초기화·삭제)
     const doneBatches = [];
@@ -4250,10 +4274,15 @@ function App() {
   const buildShipSheet = (lines, withTracking) => {
     // 업로드 탭에서 반영된 송장번호(닉네임 → 송장번호)
     // ⚠ 목록에 행이 있으면 그 값이 절대 우선. 손으로 지운 사람에게 고객정보의 옛 번호가 되살아나면 오배송이 된다.
+    /* ⚠⚠ 2026-08-25 23차 (미결 28) — 박스가 여러 개면 «1번 박스» 번호를 쓴다.
+          전에는 마지막 줄이 이겨서 «2번 박스» 번호가 시트에 실렸다. 그대로 접수하면 오배송이다. */
     const trackByNick = {};
-    if (withTracking) shipData.forEach(d => {
-      if (seqOf(d) === curSeq(d.nick)) trackByNick[d.nick] = normTrk(d.tracking);
-    });
+    if (withTracking) {
+      const hm = headBoxMap();
+      Object.keys(hm).forEach(n => {
+        trackByNick[n] = normTrk(hm[n].tracking);
+      });
+    }
     const rows = [["이름", "전화번호", "휴대폰번호", "우편번호", "주소", "상품명", "옵션명", "추가구성", "수량", "주문번호", "운임구분", "배송시요구사항", "송장번호", "주문처", "보내는분", "전화번호", "운임", "송장번호"]];
     sortLinesByName(lines).forEach(o => {
       const c = cust(o.nick);
@@ -4352,11 +4381,14 @@ function App() {
   // CJ 접수용 다운로드 파일은 양식이 깨지면 안 되므로 false(A~K 원본 그대로),
   // 전체저장의 보관용 시트만 true 로 호출한다.
   const buildCjSheet = (lines, withTracking) => {
-    // ⚠ 롯데와 같은 규칙: 조회 목록에 행이 있으면 그 값이 절대 우선
+    // ⚠ 롯데와 같은 규칙: 조회 목록에 행이 있으면 그 값이 절대 우선 · 박스가 여러 개면 «1번 박스» (23차)
     const trackByNick = {};
-    shipData.forEach(d => {
-      if (seqOf(d) === curSeq(d.nick)) trackByNick[d.nick] = normTrk(d.tracking);
-    });
+    {
+      const hm = headBoxMap();
+      Object.keys(hm).forEach(n => {
+        trackByNick[n] = normTrk(hm[n].tracking);
+      });
+    }
     const head = ["보내는분성명", "보내는분전화번호", "보내는분주소(전체, 분할)", "품목명", "내품수량", "박스타입", "받는분성명", "받는분전화번호", "받는분주소(전체, 분할)", "배송메세지1", "고객주문번호"];
     if (withTracking) head.push("송장번호");
     const rows = [head];
@@ -4866,6 +4898,14 @@ function App() {
   // 파일에서 온 행을 기존 행에 얹는다. 파일에 운송장이 비어 있으면 기존 번호를 지우지 않는다.
   const mergeOne = (prev, d) => ({
     ...d,
+    /* ⭐⭐ 2026-08-25 23차 — 차수·박스는 «파일이 아니라 기존 줄»의 것이다.
+          파서가 준 줄에는 seq·box 가 없다. 그대로 두면 아래 setShipData 의
+          `seq: Number(d0.seq) || 1` 이 걸려 **무조건 1차로** 간다.
+       🔴 실제로 재현했다 (23차 m_box2.js): 2차 줄이 있는 사람에게 파일을 다시 올리면
+          새 번호가 2차가 아니라 «1차(마감된) 줄»을 덮었다.
+          → 손님에게 안내한 1차 번호가 사라지고, 정작 2차에는 새 번호가 안 붙었다. */
+    seq: seqOf(prev),
+    box: boxOf(prev),
     tracking: d.tracking || prev.tracking || "",
     carrier: d.tracking ? d.carrier : prev.carrier || d.carrier || "",
     manual: d.tracking ? false : !!prev.manual // 파일 값이 들어오면 「직접 수정」 표식 해제
@@ -4889,10 +4929,9 @@ function App() {
     // 집계는 현재 상태 기준으로 미리 계산 (setState 갱신 함수는 나중에 실행되므로 그 안에서 세면 0이 됨)
     // ⚠ 닉네임만으로 맞추면 2차 운송장이 1차를 덮어써 1차 번호가 사라진다.
     //    지금 받고 있는 차수의 줄에만 붙인다.
-    const byNick = {};
-    shipData.forEach(d => {
-      if (seqOf(d) === curSeq(d.nick)) byNick[d.nick] = d;
-    });
+    /* ⭐⭐ 2026-08-25 23차 — 파일은 «1번 박스»에만 붙인다 (미결 28).
+          전에는 마지막 줄이 이겨서, 박스가 여러 개면 «2번 박스»가 파일 값으로 덮였다. */
+    const byNick = headBoxMap();
     let added = 0,
       same = 0,
       changed = 0;
@@ -4936,6 +4975,7 @@ function App() {
         apply.push({
           ...d,
           seq: curSeq(d.nick),
+          box: 1,
           manual: false
         });
         if (d.tracking) trkOwned.add(normTrk(d.tracking));
@@ -4994,7 +5034,8 @@ function App() {
       takeSnap(`${label} 운송장 업로드 직전` + ` (추가 ${added}명${changed ? ` · 변경 ${changed}명` : ""})`);
     }
     setShipData(prev => {
-      const key = d => d.nick + '#' + (Number(d.seq) || 1);
+      // ⭐ 2026-08-25 23차 — 열쇠는 「닉네임#차수#박스」다 (미결 28). 박스가 빠지면 서로 덮는다.
+      const key = d => d.nick + '#' + (Number(d.seq) || 1) + '#' + (Number(d.box) || 1);
       const idx = {};
       prev.forEach((d, i) => {
         idx[key(d)] = i;
@@ -5003,7 +5044,8 @@ function App() {
       apply.forEach(d0 => {
         const d = {
           ...d0,
-          seq: Number(d0.seq) || 1
+          seq: Number(d0.seq) || 1,
+          box: Number(d0.box) || 1
         };
         if (idx[key(d)] != null) {
           next[idx[key(d)]] = d;
@@ -5060,9 +5102,11 @@ function App() {
   const [trkEdit, setTrkEdit] = useState(null); // { nick, value, carrier }
   const [trkConflict, setTrkConflict] = useState(null); // 재업로드 충돌 확인 대기
 
+  // ⚠ 박스가 여러 개면 «그 박스 줄»만 고쳐야 한다 (23차 · 미결 28)
   const openTrkEdit = d => setTrkEdit({
     nick: d.nick,
     seq: seqOf(d),
+    box: boxOf(d),
     value: normTrk(d.tracking),
     carrier: d.carrier || ""
   });
@@ -5070,8 +5114,9 @@ function App() {
   /* 위탁출고 표시 — 파일에는 구분이 없으므로 손으로 체크한다.
      ⚠ 표시 전용이다. 택배사·다운로드·엑셀 어디에도 영향을 주지 않는다.
      (우리가 직접 접수한 건은 운송장 조회·배송흐름이 보이지만, 위탁은 번호만 받아서 넣기 때문에 구분이 필요) */
-  const toggleConsign = (nick, seq) => {
-    setShipData(prev => prev.map(d => d.nick === nick && seqOf(d) === seq ? {
+  const toggleConsign = (nick, seq, box) => {
+    const bx = Number(box) || 1;
+    setShipData(prev => prev.map(d => d.nick === nick && seqOf(d) === seq && boxOf(d) === bx ? {
       ...d,
       consign: !d.consign
     } : d));
@@ -5083,8 +5128,9 @@ function App() {
       nick
     } = trkEdit;
     const eseq = Number(trkEdit.seq) || 1;
+    const ebox = Number(trkEdit.box) || 1;
     const val = normTrk(trkEdit.value);
-    const cur = shipData.find(d => d.nick === nick && seqOf(d) === eseq);
+    const cur = shipData.find(d => d.nick === nick && seqOf(d) === eseq && boxOf(d) === ebox);
     if (!cur) {
       setTrkEdit(null);
       return;
@@ -5100,7 +5146,7 @@ function App() {
       return;
     }
     // 지우기·중복은 사고로 이어질 수 있어 앱 공통 「한 번 더」 방식으로 확인받는다
-    const dup = val ? shipData.find(d => !(d.nick === nick && seqOf(d) === eseq) && normTrk(d.tracking) === val) : null;
+    const dup = val ? shipData.find(d => !(d.nick === nick && seqOf(d) === eseq && boxOf(d) === ebox) && normTrk(d.tracking) === val) : null;
     const risk = !val ? "empty" : dup ? "dup" : "";
     if (risk && trkEdit.arm !== risk) {
       setTrkEdit({
@@ -5112,15 +5158,17 @@ function App() {
     }
     // 이미 안내한 사람의 번호를 바꾸면 재안내가 필요하다 (업로드와 같은 규칙)
     const needRenotify = !!(before && val && cust(nick).notified);
-    setShipData(prev => prev.map(d => d.nick === nick && seqOf(d) === eseq ? {
+    setShipData(prev => prev.map(d => d.nick === nick && seqOf(d) === eseq && boxOf(d) === ebox ? {
       ...d,
       tracking: val,
       carrier,
       manual: !!val,
       renotify: needRenotify
     } : d));
-    // ⚠ 고객정보에도 옛 운송장이 남아 있으면 출고 시트가 그 값으로 되살아난다 (buildShipSheet 의 c.tracking 폴백)
-    if (normTrk(cust(nick).tracking) !== val) setCust(nick, {
+    /* ⚠ 고객정보에도 옛 운송장이 남아 있으면 출고 시트가 그 값으로 되살아난다 (buildShipSheet 의 c.tracking 폴백)
+       ⚠⚠ 2026-08-25 23차 — «1번 박스»를 고칠 때만 옮긴다.
+          2번 박스 번호를 고객정보에 넣으면 시트 폴백이 그 번호를 써서 «오배송»이 된다 (미결 28). */
+    if (ebox === 1 && normTrk(cust(nick).tracking) !== val) setCust(nick, {
       tracking: val
     });
     setTrkEdit(null);
@@ -5284,13 +5332,53 @@ function App() {
   const [trkEditMode, setTrkEditMode] = useState(false);
   const [trkPicked, setTrkPicked] = useState({}); // "닉#차수" → true
   const [trkDelArm, setTrkDelArm] = useState(false);
-  const trkKey = d => `${d.nick}#${seqOf(d)}`;
+  const trkKey = d => `${d.nick}#${seqOf(d)}#${boxOf(d)}`;
   const isClosedRow = d => orders.some(o => o.nick === d.nick && o.done && (Number(o.doneSeq) || 1) === seqOf(d));
-  const trkPickedList = useMemo(() => shipData.filter(d => trkPicked[trkKey(d)] && !isClosedRow(d)), [shipData, trkPicked, orders]);
+  /* ⭐⭐ 2026-08-25 23차 (미결 28) — 「지울 수 있는 줄인가」 판정을 «한 곳»에만 둔다.
+        화면(체크칸 disabled)과 실제 삭제(trkPickedList)가 «같은 식»을 봐야 한다.
+     ⚠ 1번 박스는 마감되면 못 지운다 — 실제로 나간 기록이다 (안전장치 68 · 사장님 결정).
+     ⭐ 2번 이상 «박스 줄»은 마감돼 있어도 지울 수 있다.
+        박스 추가는 운송장 «한 장»을 손으로 넣는 일이라 잘못 넣기 쉽고,
+        그대로 두면 운임이 «과다» 계산된다. 되돌릴 길이 없는 쪽이 더 위험하다 (사장님 결정 2026-08-25).
+        1번 박스가 남아 있으므로 「나간 기록」 자체는 지워지지 않는다. */
+  const canDelTrk = d => boxOf(d) > 1 || !isClosedRow(d);
+  const trkPickedList = useMemo(() => shipData.filter(d => trkPicked[trkKey(d)] && canDelTrk(d)), [shipData, trkPicked, orders]);
   const toggleTrkPick = d => setTrkPicked(s => ({
     ...s,
     [trkKey(d)]: !s[trkKey(d)]
   }));
+
+  /* ⭐ 2026-08-25 23차 — 실제 삭제는 «한 곳»에서만 한다.
+        ⑤ 업로드 탭의 「선택 삭제」와 ④ 출고 탭의 「박스 지우기」가 이 함수를 같이 쓴다.
+        따로 쓰면 한쪽만 고객정보 정리를 빠뜨려 «유령 송장»이 되살아난다 (안전장치 1~3). */
+  const removeTrkRows = gone => {
+    // 화면에서 사라지는 작업이므로 스냅샷을 찍는다 (설계안 4장)
+    takeSnap(`운송장 줄 삭제 직전 (${gone.slice(0, 3).map(d => `${d.nick}${seqOf(d) > 1 ? ` ${seqOf(d)}차` : ""}${boxOf(d) > 1 ? ` ${boxOf(d)}번 박스` : ""}`).join(", ")}${gone.length > 3 ? " 외" : ""})`);
+    const goneKeys = new Set(gone.map(trkKey));
+    const rest = shipData.filter(d => !goneKeys.has(trkKey(d)));
+    setShipData(rest);
+    /* ⚠ 고객정보에 남은 운송장을 정리한다.
+          그 사람의 «지금 차수 · 1번 박스» 줄이 남아 있으면 그 번호로, 없으면 비운다.
+       ⚠⚠ 2026-08-25 23차 — 남은 줄 중 «아무거나»가 아니라 1번 박스여야 한다.
+          2번 박스 번호가 고객정보에 들어가면 출고 시트가 그 번호를 쓴다 (오배송). */
+    const nicks = [...new Set(gone.map(d => d.nick))];
+    setCustomers(prev => {
+      const next = {
+        ...prev
+      };
+      nicks.forEach(nk => {
+        const keepRow = rest.reduce((best, d) => d.nick === nk && seqOf(d) === curSeq(nk) && (!best || boxOf(d) < boxOf(best)) ? d : best, null);
+        const val = keepRow ? keepRow.tracking || "" : "";
+        if (next[nk] && normTrk(next[nk].tracking) !== normTrk(val)) next[nk] = {
+          ...next[nk],
+          tracking: val
+        };
+      });
+      return next;
+    });
+    setTrkPicked({});
+    showToast(`✓ 운송장 ${gone.length}줄을 지웠습니다 — 되돌리기로 되살릴 수 있습니다`);
+  };
   const deletePickedTrk = () => {
     const gone = trkPickedList;
     if (!gone.length) {
@@ -5303,30 +5391,102 @@ function App() {
       return;
     }
     setTrkDelArm(false);
-    // 화면에서 사라지는 작업이므로 스냅샷을 찍는다 (설계안 4장)
-    takeSnap(`운송장 줄 삭제 직전 (${gone.slice(0, 3).map(d => `${d.nick}${seqOf(d) > 1 ? ` ${seqOf(d)}차` : ""}`).join(", ")}${gone.length > 3 ? " 외" : ""})`);
-    const goneKeys = new Set(gone.map(trkKey));
-    const rest = shipData.filter(d => !goneKeys.has(trkKey(d)));
-    setShipData(rest);
-    /* ⚠ 고객정보에 남은 운송장을 정리한다.
-          그 사람의 «지금 차수» 줄이 남아 있으면 그 번호로, 없으면 비운다. */
-    const nicks = [...new Set(gone.map(d => d.nick))];
-    setCustomers(prev => {
-      const next = {
-        ...prev
+    removeTrkRows(gone);
+  };
+
+  /* ---------- 📦 박스 추가 (2026-08-25 23차 · 미결 28) ----------
+     사장님 요구: 상품이 많아 한 번에 못 보내면 운송장을 2~3장 뽑는데,
+     두 번째를 올리면 «기존 것만 남는다». 「2차 출고가 아니라 동일하게 1차」다.
+     ⚠⚠ 배송비를 «또 받지 않는다». 그래서 주문(orders)·차수(seq)는 «건드리지 않는다».
+        여기서 만드는 것은 운송장 줄 하나뿐이다. 배송비는 차수 마감이 정하고, 이 함수는 그 근처에도 안 간다.
+     ⚠ 운임은 줄마다 잡히므로 (회계 seenTrk) 이 줄을 넣으면 그 박스 운임이 «정확히 한 건» 늘어난다. */
+  const [boxAdd, setBoxAdd] = useState({
+    nick: "",
+    carrier: "",
+    trk: "",
+    consign: false
+  });
+  // 대상 후보 — 이미 운송장이 붙은 사람만. 아직 없는 사람은 「박스 추가」가 아니라 그냥 업로드 대상이다.
+  const boxTargets = useMemo(() => {
+    const m = {};
+    shipData.forEach(d => {
+      if (!normTrk(d.tracking)) return;
+      const q = seqOf(d),
+        b = boxOf(d);
+      const p = m[d.nick];
+      if (!p || q > p.seq || q === p.seq && b > p.box) m[d.nick] = {
+        seq: q,
+        box: b
       };
-      nicks.forEach(nk => {
-        const keepRow = rest.find(d => d.nick === nk && seqOf(d) === curSeq(nk));
-        const val = keepRow ? keepRow.tracking || "" : "";
-        if (next[nk] && normTrk(next[nk].tracking) !== normTrk(val)) next[nk] = {
-          ...next[nk],
-          tracking: val
-        };
-      });
-      return next;
     });
-    setTrkPicked({});
-    showToast(`✓ 운송장 ${gone.length}줄을 지웠습니다 — 되돌리기로 되살릴 수 있습니다`);
+    return Object.keys(m).sort((a, b) => a.localeCompare(b, "ko")).map(nick => ({
+      nick,
+      seq: m[nick].seq,
+      nextBox: m[nick].box + 1
+    }));
+  }, [shipData]);
+  const boxRowsOf = nick => shipData.filter(d => d.nick === nick && boxOf(d) > 1);
+  const addBox = () => {
+    const nick = boxAdd.nick;
+    const tgt = boxTargets.find(x => x.nick === nick);
+    if (!tgt) {
+      showToast("먼저 «박스를 나눠 보낼 사람»을 골라주세요.");
+      return;
+    }
+    const val = normTrk(boxAdd.trk);
+    if (!val) {
+      showToast("⚠ 운송장번호를 넣어주세요 (숫자만)");
+      return;
+    }
+    if (!trkLenOk(val)) {
+      showToast(`⚠ 운송장 자릿수가 이상합니다 (${TRK_MIN}~${TRK_MAX}자리)`);
+      return;
+    }
+    if (!boxAdd.carrier) {
+      showToast("⚠ 택배사를 골라주세요 — 비어 있으면 운임이 안 잡힙니다");
+      return;
+    }
+    // ⚠ 같은 번호를 두 줄에 넣으면 회계가 «한 건»으로만 세어 운임이 조용히 빠진다 (seenTrk)
+    if (shipData.some(d => normTrk(d.tracking) === val)) {
+      showToast(`⚠ 이미 있는 운송장번호입니다 (${fmtTrk(val)})`);
+      return;
+    }
+    const c = cust(nick);
+    takeSnap(`📦 박스 추가 직전 (${nick} ${tgt.nextBox}번 박스)`);
+    setShipData(prev => [...prev, {
+      nick,
+      seq: tgt.seq,
+      box: tgt.nextBox,
+      name: c.name || "",
+      phone: c.phone || "",
+      addr: c.addr || "",
+      carrier: boxAdd.carrier,
+      tracking: val,
+      consign: !!boxAdd.consign,
+      manual: true
+    }]);
+    setBoxAdd({
+      nick: "",
+      carrier: "",
+      trk: "",
+      consign: false
+    });
+    showToast(`✓ 「${nick}」 ${tgt.nextBox}번 박스 ${fmtTrk(val)} — 배송비는 «더 받지 않습니다» (같은 1차)`);
+  };
+  const [boxDelArm, setBoxDelArm] = useState("");
+  const delBoxRow = d => {
+    if (!canDelTrk(d)) {
+      showToast("⚠ 1번 박스는 실제로 나간 기록이라 여기서 지울 수 없습니다.");
+      return;
+    }
+    const k = trkKey(d);
+    if (boxDelArm !== k) {
+      setBoxDelArm(k);
+      setTimeout(() => setBoxDelArm(""), 4000);
+      return;
+    }
+    setBoxDelArm("");
+    removeTrkRows([d]);
   };
 
   /* ---------- 상품목록 파일 (방송 장소별 세팅) ---------- */
@@ -10148,6 +10308,86 @@ function App() {
   }, "엑셀 다운로드 (", shipNickCount, "명)"), /*#__PURE__*/React.createElement("div", {
     className: "hint"
   }, "CJ_사자창고_출고_", dateCode, ".xlsx"))), /*#__PURE__*/React.createElement("div", {
+    className: "card boxadd"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
+  }, "📦 박스 추가 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "한 사람에게 택배가 2개 이상 나갈 때")), /*#__PURE__*/React.createElement("div", {
+    className: "sub"
+  }, "상품이 많아 ", /*#__PURE__*/React.createElement("b", null, "한 번에 못 보내서"), " 운송장을 여러 장 뽑으셨으면 여기에 넣으세요.", /*#__PURE__*/React.createElement("b", null, " 배송비는 더 받지 않습니다"), " (같은 1차 · 운임만 늘어납니다). 손님이 ", /*#__PURE__*/React.createElement("b", null, "또 주문"), "하신 것은 박스가 아니라 ", /*#__PURE__*/React.createElement("b", null, "2차 출고"), "입니다 — 그때는 운송장을 그냥 올리시면 됩니다."), boxTargets.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "empty"
+  }, "아직 운송장이 붙은 사람이 없습니다. ⑤ 업로드에서 운송장을 먼저 올려주세요.") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "boxaddrow"
+  }, /*#__PURE__*/React.createElement("select", {
+    className: "in boxadd-nick",
+    value: boxAdd.nick,
+    onChange: e => setBoxAdd({
+      ...boxAdd,
+      nick: e.target.value
+    })
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "누구의 박스입니까?"), boxTargets.map(x => /*#__PURE__*/React.createElement("option", {
+    key: x.nick,
+    value: x.nick
+  }, x.nick, " — ", x.seq, "차 ", x.nextBox, "번 박스"))), /*#__PURE__*/React.createElement("select", {
+    className: "in boxadd-car",
+    value: boxAdd.carrier,
+    onChange: e => setBoxAdd({
+      ...boxAdd,
+      carrier: e.target.value
+    })
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "택배사 선택"), /*#__PURE__*/React.createElement("option", {
+    value: "롯데택배"
+  }, "롯데택배"), /*#__PURE__*/React.createElement("option", {
+    value: "CJ대한통운"
+  }, "CJ대한통운")), /*#__PURE__*/React.createElement("input", {
+    className: "in boxadd-trk",
+    inputMode: "numeric",
+    placeholder: "운송장번호 (숫자만)",
+    value: boxAdd.trk,
+    onChange: e => setBoxAdd({
+      ...boxAdd,
+      trk: normTrk(e.target.value)
+    }),
+    onKeyDown: e => {
+      if (e.key === "Enter") addBox();
+    }
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "boxaddconsign",
+    title: "위탁출고로 나간 박스면 체크하세요"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    className: "boxadd-consign",
+    checked: !!boxAdd.consign,
+    onChange: e => setBoxAdd({
+      ...boxAdd,
+      consign: e.target.checked
+    })
+  }), /*#__PURE__*/React.createElement("span", null, "위탁")), /*#__PURE__*/React.createElement("button", {
+    className: "btn primary",
+    onClick: addBox
+  }, "📦 박스 추가")), boxAdd.nick && boxRowsOf(boxAdd.nick).length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "boxlist"
+  }, boxRowsOf(boxAdd.nick).map(d => /*#__PURE__*/React.createElement("div", {
+    className: "boxadd-row",
+    key: trkKey(d)
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "boxbadge"
+  }, "📦 ", boxOf(d), "번 박스"), /*#__PURE__*/React.createElement("span", {
+    className: "boxtrk"
+  }, fmtTrk(d.tracking)), /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, d.carrier || "택배사 미상", d.consign ? " · 위탁" : ""), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm " + (boxDelArm === trkKey(d) ? "danger" : "ghost"),
+    onClick: () => delBoxRow(d)
+  }, boxDelArm === trkKey(d) ? "한 번 더 누르면 지움" : "지우기")))))), /*#__PURE__*/React.createElement("div", {
     className: "card shipprint"
   }, /*#__PURE__*/React.createElement("div", {
     className: "rowbetween"
@@ -10317,9 +10557,9 @@ function App() {
         className: "trkdelbox"
       }, /*#__PURE__*/React.createElement("input", {
         type: "checkbox",
-        disabled: isDoneRow,
-        title: isDoneRow ? "출고완료된 줄은 지울 수 없습니다 — 잠금해제를 먼저 하세요" : "지울 줄 고르기",
-        checked: !isDoneRow && !!trkPicked[`${d.nick}#${dq}`],
+        disabled: !canDelTrk(d),
+        title: !canDelTrk(d) ? "출고완료된 줄은 지울 수 없습니다 — 잠금해제를 먼저 하세요" : "지울 줄 고르기",
+        checked: canDelTrk(d) && !!trkPicked[trkKey(d)],
         onChange: () => toggleTrkPick(d)
       })), /*#__PURE__*/React.createElement("td", {
         className: "whname"
@@ -10329,7 +10569,9 @@ function App() {
         className: "whbadges"
       }, dq > 1 && /*#__PURE__*/React.createElement("span", {
         className: "seqbadge"
-      }, dq, "차"), isDoneRow && /*#__PURE__*/React.createElement("span", {
+      }, dq, "차"), boxOf(d) > 1 && /*#__PURE__*/React.createElement("span", {
+        className: "boxbadge"
+      }, "📦 ", boxOf(d), "번 박스"), isDoneRow && /*#__PURE__*/React.createElement("span", {
         className: "donebadge"
       }, "출고완료"), orphan && /*#__PURE__*/React.createElement("span", {
         className: "orphanbadge"
@@ -10348,10 +10590,10 @@ function App() {
       }, /*#__PURE__*/React.createElement("input", {
         type: "checkbox",
         checked: !!d.consign,
-        onChange: () => toggleConsign(d.nick, dq)
+        onChange: () => toggleConsign(d.nick, dq, boxOf(d))
       }))), /*#__PURE__*/React.createElement("td", {
         className: "trackcell"
-      }, trkEdit && trkEdit.nick === d.nick && (Number(trkEdit.seq) || 1) === dq ? /*#__PURE__*/React.createElement("div", {
+      }, trkEdit && trkEdit.nick === d.nick && (Number(trkEdit.seq) || 1) === dq && (Number(trkEdit.box) || 1) === boxOf(d) ? /*#__PURE__*/React.createElement("div", {
         className: "trkedit"
       }, /*#__PURE__*/React.createElement("input", {
         className: "in trkin",
@@ -11868,6 +12110,17 @@ const CSS = `
   background: #e8f6ec; color: #1f7a3d; font-weight: 700; text-decoration: none; vertical-align: middle; }
 .seqbadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   background: #eef2ff; color: #3b4bc9; font-weight: 700; }
+/* 📦 박스 뱃지 — 차수(파랑)와 «눈에 띄게 다른 색»으로 둔다. 헷갈리면 배송비를 또 받는다 (23차) */
+.boxbadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+  background: #fff3e0; color: #a85c00; font-weight: 700; white-space: nowrap; }
+.boxadd .boxaddrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.boxadd .boxaddrow .in { min-width: 150px; }
+.boxadd .boxaddconsign { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; color: #a85c00;
+  padding: 6px 10px; border: 1px solid #f0d3a8; border-radius: 8px; background: #fffaf2; cursor: pointer; }
+.boxadd .boxlist { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.boxadd .boxadd-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 10px; border: 1px solid #eee; border-radius: 8px; background: #fafafa; }
+.boxadd .boxtrk { font-weight: 800; letter-spacing: 0.3px; }
 .donebadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   background: #e8f6ec; color: #1f7a3d; font-weight: 700; }
 .shipdonebadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
