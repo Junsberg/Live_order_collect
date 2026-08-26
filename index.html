@@ -648,7 +648,12 @@ const isBlankDay = p => !!p && !(p.orders || []).length && !(p.products || []).l
       안 올리면 옛 규칙으로 만든 요약이 서버에 그대로 남는다. 본문은 안 바뀌었으니
       src_hash 로는 절대 못 잡는다 — 「틀린 걸 알아도 어느 날짜가 틀렸는지」 못 찾게 된다.
    1 = 2026-07-28 최초 (킵 제외 · 차수 마감분 포함 · noFee 4종 · 환불 분리) */
-const CALC_VER = 6; /* ⭐ 2026-08-14 16차 — 「주문 건수」가 «취소만» 뺀 값이 되었다 (미결 16 해소).
+const CALC_VER = 7; /* ⭐⭐ 2026-08-25 23차 — **2차 출고는 배송비를 «두 번» 받는다** (미결 29 · 사장님 결정).
+                          전에는 「배송비 내는 사람 수 × 단가」라 두 번 나가도 한 건만 잡혔다.
+                          이제 `feeOfAll`(차수마다 쌓인 값)을 합한다. **금액이 실제로 달라진다.**
+                          ⚠ 영향받는 날짜는 «2차 출고가 있던 날»뿐이다 — 실서버 실측 2026-07-27 「드리맘」 1건.
+                          ⚠ 그 날짜를 열어 다시 저장해야 요약본이 갱신된다. 그 전까지 「계산 규칙이 다릅니다」가 뜬다.
+                       ⭐ 2026-08-14 16차 — 「주문 건수」가 «취소만» 뺀 값이 되었다 (미결 16 해소).
                           전에는 킵을 뺐다 — 킵을 넣는 상품 매출과 서로 다른 집합을 세고 있었다.
                           금액 자체는 안 바뀌지만 요약본 값이 바뀌므로 판 번호를 올린다 (money-rules §4).
                           ⚠ 지난 날짜 요약본은 그 날짜를 열어 다시 저장해야 갱신된다.
@@ -3787,8 +3792,19 @@ function App() {
        ⚠ 미입금분은 사라지지 않는다. 요약본 unpaid_goods 와 결산 「미입금」 줄에 그대로 남는다. */
     const goods = acctOrders.reduce((s, o) => s + o.price * o.qty, 0);
     const paidGoods = paidList.reduce((s, n) => s + sumOf(n), 0);
-    const paidShipFee = paidFeeList.length * shipFee;
-    const unpaidShipFee = unpaidFeeList.length * shipFee; // ⭐ 15차 — 아직 안 받은 배송비
+    /* 🔴🔴 2026-08-25 23차 (미결 29 · 사장님 결정) — **2차 출고는 배송비를 «두 번» 받는다.**
+          > 「2차 출고는 배송비를 두번 받는거야. 1차 출고하고나서 다시 주문하는거이기 때문에
+          >   추가 출고로 봐야돼」
+       ⚠⚠ 전에는 `paidFeeList.length * shipFee` 로 «사람 수»를 다시 셌다.
+          두 번 나갔어도 한 명이라 배송비가 «한 건»만 잡혔다 (실측: 8,000 이어야 할 것이 4,000).
+       ⭐ `feeOfAll(n) = feeOf(n) + doneFeeOf(n)` 은 «이미» 차수마다 맞게 쌓여 있었다.
+          길이를 곱하면서 그 값을 «버리고» 있었던 것이다 — 판정을 새로 만들지 않는다 (money-rules §1).
+       ⭐ 상단바는 «원래 맞았다» (`doneFees` 를 그대로 더한다) — 즉 상단바와 회계가 «어긋나» 있었다.
+          이제 둘이 같은 값을 낸다 (안전장치 50).
+       ⚠⚠ 「1차인데 박스가 여러 개(1-1차)」와 «다른 축»이다 — 박스는 배송비를 «안» 받는다 (190).
+          박스는 `shipData` 줄만 늘리고 `doneFee` 를 안 만들므로 여기 영향이 없다. */
+    const paidShipFee = paidFeeList.reduce((t, n) => t + feeOfAll(n), 0);
+    const unpaidShipFee = unpaidFeeList.reduce((t, n) => t + feeOfAll(n), 0); // ⭐ 15차 — 아직 안 받은 배송비
     const feeSum = paidShipFee; // ⭐ 15차 — 「배송비 수입」 = 입금된 것만
     const total = goods + feeSum;
     const paidTotal = paidGoods + paidShipFee;
