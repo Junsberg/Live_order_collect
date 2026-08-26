@@ -529,6 +529,47 @@ const toEmail = id => {
   return v.includes("@") ? v : v + ID_DOMAIN; // 사장님은 실제 이메일, 매니저는 아이디
 };
 let _sb = null;
+/* ⭐⭐ 2026-08-26 23차 (사장님 결정 「가」) — 서버와 주고받은 양을 «한 곳»에서 센다.
+   🔴 전에는 이 함수를 부르는 곳이 «폴링 한 자리»뿐이었고 그것도 tx 인자가 0 이었다.
+      → 「보냄」이 «영원히 0 MB» 였고, 저장·불러오기·스냅샷은 아예 안 세었다.
+      재현(`m_net1.js`): 주문 5건으로 저장이 «6번» 나갔는데 기록이 `null` 이었다.
+      사장님이 이 숫자를 보고 «안심»하시면 실제보다 «적게» 보신 것이 된다.
+   ⭐ 그래서 컴포넌트 «밖»으로 올렸다 — `sb()` 의 rpc 래퍼가 부를 수 있어야 한다.
+      state 를 안 쓰고 localStorage 만 만지므로 밖에서도 그대로 돈다.
+   ⚠⚠ `isPoll` 을 «반드시» 가려라 — 저장까지 세면서 `polls` 를 같이 올리면
+      사장님이 보시는 「따라가기 N회」가 «부풀려진다». */
+const bumpNet = (rx, tx, isPoll) => {
+  try {
+    const now = new Date();
+    const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const dd = todayISO();
+    let n = {};
+    try {
+      n = JSON.parse(localStorage.getItem("saja:net") || "{}") || {};
+    } catch (e) {
+      n = {};
+    }
+    if (n.ym !== ym) n = {
+      ym,
+      rx: 0,
+      tx: 0,
+      polls: 0
+    };
+    if (n.day !== dd) {
+      n.day = dd;
+      n.dayRx = 0;
+      n.dayPolls = 0;
+    }
+    n.rx = (n.rx || 0) + (rx || 0);
+    n.tx = (n.tx || 0) + (tx || 0);
+    n.dayRx = (n.dayRx || 0) + (rx || 0);
+    if (isPoll) {
+      n.polls = (n.polls || 0) + 1;
+      n.dayPolls = (n.dayPolls || 0) + 1;
+    }
+    localStorage.setItem("saja:net", JSON.stringify(n));
+  } catch (e) {}
+};
 const sb = () => {
   if (_sb) return _sb;
   const lib = window.supabase;
@@ -540,6 +581,22 @@ const sb = () => {
       storageKey: "saja:auth"
     }
   });
+  /* ⭐ 서버 호출은 «전부» 여기를 지난다 — 저장·불러오기·킵·원가·스냅샷·요약본.
+     ⚠ 자리를 여러 곳에 두면 새 호출이 생길 때 «조용히» 빠진다. 한 곳에서 센다. */
+  const _rpc = _sb.rpc.bind(_sb);
+  _sb.rpc = async (name, params, opts) => {
+    let out = 0;
+    try {
+      out = JSON.stringify(params || {}).length + String(name || "").length;
+    } catch (e) {}
+    const r = await _rpc(name, params, opts);
+    let inLen = 0;
+    try {
+      inLen = JSON.stringify(r && r.data || null).length;
+    } catch (e) {}
+    bumpNet(inLen, out, false); // ⚠ 폴링이 «아니다» — 따라가기 횟수는 안 올린다
+    return r;
+  };
   return _sb;
 };
 
@@ -2187,38 +2244,6 @@ function App() {
   /* 통신량을 «스스로» 센다 (사장님 요청 2026-08-22).
      ⚠ Supabase 사용량 API 는 관리자 키가 필요해 앱에서 못 부른다 (설계안 5-17).
         그래서 «앱이 받은 바이트»를 세어 보여준다 — 실제 값과 조금 다를 수 있다. */
-  const bumpNet = (rx, tx) => {
-    try {
-      const now = new Date();
-      const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-      const dd = todayISO();
-      let n = {};
-      try {
-        n = JSON.parse(localStorage.getItem("saja:net") || "{}") || {};
-      } catch (e) {
-        n = {};
-      }
-      if (n.ym !== ym) n = {
-        ym,
-        rx: 0,
-        tx: 0,
-        polls: 0
-      };
-      if (n.day !== dd) {
-        n.day = dd;
-        n.dayRx = 0;
-        n.dayPolls = 0;
-      }
-      n.rx = (n.rx || 0) + (rx || 0);
-      n.tx = (n.tx || 0) + (tx || 0);
-      n.dayRx = (n.dayRx || 0) + (rx || 0);
-      if (rx) {
-        n.polls = (n.polls || 0) + 1;
-        n.dayPolls = (n.dayPolls || 0) + 1;
-      }
-      localStorage.setItem("saja:net", JSON.stringify(n));
-    } catch (e) {}
-  };
   const pollOnce = async () => {
     if (pollBusy.current) return; // ③ 앞 요청이 아직 안 끝났다
     if (typeof document !== "undefined" && document.hidden) return; // ② 안 보고 있다
@@ -2254,7 +2279,7 @@ function App() {
     try {
       const r = await serverLoad(live.bdate);
       if (!r.ok || !r.exists) return;
-      bumpNet(JSON.stringify(r).length, 0);
+      bumpNet(0, 0, true); // ⭐ 바이트는 rpc 래퍼가 «이미» 셌다 — 여기서는 «따라가기 횟수»만 올린다
       if (srvPick) return; // 기다리는 사이에 카드가 떴다
       if (liveRef.current.bdate !== live.bdate) return; // 기다리는 사이에 날짜가 바뀌었다
       if (srvSyncedRef.current !== str) return; // 기다리는 사이에 내가 입력했다
@@ -3753,6 +3778,12 @@ function App() {
           **받은 배송비가 통째로 증발한다.** unlockDone 이 wasDone.fee 에 보관해 둔 값을 쓴다. */
     const doneFeeOf = n => doneOrders.filter(o => o.nick === n).reduce((t, o) => t + (Number(o.doneFee) || 0), 0);
     const feeOfAll = n => feeOf(n) + doneFeeOf(n);
+    /* ⭐ 2026-08-26 23차 — 「배송비를 몇 «건» 받았나」. 설명 글이 이것을 쓴다.
+       🔴 전에는 설명 글이 「N명 × 단가」였는데, 2차 출고가 있는 날은 금액과 «안 맞았다»
+          (2명 × 4,000 이라 적혀 있는데 실제는 12,000원 — 사장님이 보시면 계산이 안 맞는다).
+       ⚠ 금액(`feeOfAll`)과 «같은 근거»를 센다 — 열린 차수 1건 + `doneFee` 가 붙은 마감 주문 수.
+          따로 세면 금액과 설명이 조용히 어긋난다 (money-rules §1). */
+    const feeCountOf = n => (feeOf(n) > 0 ? 1 : 0) + doneOrders.filter(o => o.nick === n && (Number(o.doneFee) || 0) > 0).length;
     const paidOf = n => cust(n).paid || doneOrders.some(o => o.nick === n && o.donePaid !== false);
     /* ⭐⭐ 「그날 주문이 몇 건이었나」 — 2026-08-14 16차 · 미결 16 해소 (사장님 결정 (가-2))
        ⚠ 전에는 `closingOrders.length`(= active + done) 였다. 그것은 킵을 «뺀» 값이라,
@@ -3804,6 +3835,7 @@ function App() {
        ⚠⚠ 「1차인데 박스가 여러 개(1-1차)」와 «다른 축»이다 — 박스는 배송비를 «안» 받는다 (190).
           박스는 `shipData` 줄만 늘리고 `doneFee` 를 안 만들므로 여기 영향이 없다. */
     const paidShipFee = paidFeeList.reduce((t, n) => t + feeOfAll(n), 0);
+    const paidFeeCount = paidFeeList.reduce((t, n) => t + feeCountOf(n), 0); // ⭐ 설명 글용 «건수»
     const unpaidShipFee = unpaidFeeList.reduce((t, n) => t + feeOfAll(n), 0); // ⭐ 15차 — 아직 안 받은 배송비
     const feeSum = paidShipFee; // ⭐ 15차 — 「배송비 수입」 = 입금된 것만
     const total = goods + feeSum;
@@ -3951,6 +3983,7 @@ function App() {
       feeList,
       paidFeeList,
       unpaidFeeList,
+      paidFeeCount,
       refundOrders,
       refundAmt,
       refundAllList,
@@ -4083,6 +4116,7 @@ function App() {
       paidShipFee,
       unpaidShipFee,
       paidFeeList,
+      paidFeeCount,
       orderCount
     } = closing; // ⭐ 14·15차 — 입금 기준 집계 · 16차 orderCount
     // ⚠ 상품별 집계는 closing.prodList 를 그대로 쓴다 — 여기서 다시 세지 않는다 (money-rules §1)
@@ -4108,7 +4142,9 @@ function App() {
     /* ⭐ 14차 — 「상품 매출」은 «입금된 주문»만이다 (안전장치 171).
           미입금분을 따로 한 줄로 적어 「입금 + 미수 = 총 매출」이 엑셀에서 눈으로 검산되게 한다.
           ⚠ 이 줄이 없으면 「상품 매출 + 배송비 = 총 매출」이 안 맞아 보인다. */
-    ["[매출]", ""], ["상품 매출", goods, "⭐ 입금된 주문만 · 환불분 제외 (2026-08-12부터)"], ["배송비 수입", feeSum, `${paidFeeList.length}명 × ${shipFee}원 (픽업 ${pickList.length}명 · 무료배송 ${freeList.length}명 · 전체환불 ${refundAllList.length}명 · 미입금 ${feeList.length - paidFeeList.length}명 제외)`], ["총 매출", goods + feeSum, "입금된 것만 — 미입금은 주문 무효로 본다"], [],
+    ["[매출]", ""], ["상품 매출", goods, "⭐ 입금된 주문만 · 환불분 제외 (2026-08-12부터)"],
+    // ⭐ 2026-08-26 23차 — 「N명」이 아니라 «출고 N건»이다. 2차 출고가 있으면 사람 수와 «다르다» (192)
+    ["배송비 수입", feeSum, `출고 ${paidFeeCount}건 × ${shipFee}원 (${paidFeeList.length}명 · 픽업 ${pickList.length}명 · 무료배송 ${freeList.length}명 · 전체환불 ${refundAllList.length}명 · 미입금 ${feeList.length - paidFeeList.length}명 제외)`], ["총 매출", goods + feeSum, "입금된 것만 — 미입금은 주문 무효로 본다"], [],
     /* [배송 손익] 0-7 1단계 — 받은 배송비에서 택배사 운임을 뺀 것.
        ⚠ 운임은 음수로 적는다. 「수입 + 운임 = 손익」이 엑셀에서 눈으로 검산된다.
        ⚠ 운송장을 안 올리면 운임을 모른다. 0원으로 적으면 손익이 부풀려지므로 말로 알려준다. */
@@ -8825,7 +8861,7 @@ function App() {
         return;
       }
       const costSum = rows.reduce((t, r) => t + (r.price * r.qty - marginOf(r.name, r.price, r.qty)), 0);
-      const s1 = [["회계", bdate], ["기준", "입금된 주문만 — 킵·픽업이어도 입금됐으면 포함 · 미입금은 제외"], [], ["항목", "금액", "비고"], ["상품 매출 (입금)", closing.goods, "입금된 주문만 · 환불분 제외"], ["상품 원가 합계", costSum, missing.length ? `⚠ 원가 미입력 ${missing.length}종은 원가 0으로 잡힘` : ""], ["상품 마진", marginSum, missing.length ? `⚠ 원가 미입력 ${missing.length}종 포함 — 실제보다 높다` : ""], [], ["배송비 수입", closing.feeSum, `${closing.paidFeeList.length}명 × ${shipFee}원 (입금된 사람만)`], ["운임", -closing.shipCostSum, closing.shipCostUnknown ? `⚠ 운송장 ${closing.trkMissing}명 미업로드 — 운임이 그만큼 빠져 있다` : ""], ["배송 손익", closing.shipProfit, ""], [], ["환불", -refundSum, refundSum ? `전체환불 ${closing.refundAllList.length}명 · 부분환불 ${closing.refundNickCount}명` : ""], ["순이익", net, "상품 마진 + 배송 손익 − 환불"], [], ["킵 입금액 (참고)", keepPaidSum, "킵으로 미리 받은 돈"]];
+      const s1 = [["회계", bdate], ["기준", "입금된 주문만 — 킵·픽업이어도 입금됐으면 포함 · 미입금은 제외"], [], ["항목", "금액", "비고"], ["상품 매출 (입금)", closing.goods, "입금된 주문만 · 환불분 제외"], ["상품 원가 합계", costSum, missing.length ? `⚠ 원가 미입력 ${missing.length}종은 원가 0으로 잡힘` : ""], ["상품 마진", marginSum, missing.length ? `⚠ 원가 미입력 ${missing.length}종 포함 — 실제보다 높다` : ""], [], ["배송비 수입", closing.feeSum, `출고 ${closing.paidFeeCount}건 × ${shipFee}원 (${closing.paidFeeList.length}명 · 입금된 사람만)`], ["운임", -closing.shipCostSum, closing.shipCostUnknown ? `⚠ 운송장 ${closing.trkMissing}명 미업로드 — 운임이 그만큼 빠져 있다` : ""], ["배송 손익", closing.shipProfit, ""], [], ["환불", -refundSum, refundSum ? `전체환불 ${closing.refundAllList.length}명 · 부분환불 ${closing.refundNickCount}명` : ""], ["순이익", net, "상품 마진 + 배송 손익 − 환불"], [], ["킵 입금액 (참고)", keepPaidSum, "킵으로 미리 받은 돈"]];
       const s2 = [["상품명", "판매가", "수량", "매출", "공급가", "수수료%", "원가합계", "마진", "마진율", "산 사람", "원가입력"]];
       rows.forEach(r => {
         const c = costOf(r.name, r.price) || {};
@@ -8998,7 +9034,7 @@ function App() {
       className: "acctcard"
     }, /*#__PURE__*/React.createElement("div", {
       className: "acctcaption"
-    }, "배송 손익"), arow("배송비 수입", closing.feeSum, `${closing.paidFeeList.length}명 × ${won(shipFee)}원 (픽업 ${closing.pickList.length}명 · 무료배송 ${closing.freeList.length}명 · 미입금 ${closing.unpaidFeeList.length}명 제외)`), arow("롯데 운임", -closing.lotteCost, cNote(closing.lotteCount, closing.lotteBilled, shipCost.lotte)), arow("CJ 운임", -closing.cjCost, cNote(closing.cjCount, closing.cjBilled, shipCost.cj)), arow("위탁 운임", -closing.consignCost, closing.consignCount ? `${closing.consignCount}건 × ${won(shipCost.consign)}원 (택배사 무관)` : "0건"), closing.freeRows > 0 && arow("배송비 없이 나감", -closing.freeCost, `${closing.freeRows}건 — 무료배송·배송비 미청구분 (위 운임에 «이미» 들어 있습니다 · 또 빼지 않습니다)`), arow("배송 손익", closing.shipProfit, sWarn, "anet")), /*#__PURE__*/React.createElement("div", {
+    }, "배송 손익"), arow("배송비 수입", closing.feeSum, `출고 ${closing.paidFeeCount}건 × ${won(shipFee)}원 (${closing.paidFeeList.length}명 · 픽업 ${closing.pickList.length}명 · 무료배송 ${closing.freeList.length}명 · 미입금 ${closing.unpaidFeeList.length}명 제외)`), arow("롯데 운임", -closing.lotteCost, cNote(closing.lotteCount, closing.lotteBilled, shipCost.lotte)), arow("CJ 운임", -closing.cjCost, cNote(closing.cjCount, closing.cjBilled, shipCost.cj)), arow("위탁 운임", -closing.consignCost, closing.consignCount ? `${closing.consignCount}건 × ${won(shipCost.consign)}원 (택배사 무관)` : "0건"), closing.freeRows > 0 && arow("배송비 없이 나감", -closing.freeCost, `${closing.freeRows}건 — 무료배송·배송비 미청구분 (위 운임에 «이미» 들어 있습니다 · 또 빼지 않습니다)`), arow("배송 손익", closing.shipProfit, sWarn, "anet")), /*#__PURE__*/React.createElement("div", {
       className: "acctcard"
     }, /*#__PURE__*/React.createElement("div", {
       className: "acctcaption"
