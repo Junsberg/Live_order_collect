@@ -2452,6 +2452,45 @@ function App() {
   };
 
   // 잠금해제를 되돌린다 — 그 주문 하나만 원래대로 잠근다
+  /* ⭐⭐ 안전장치 204 — 킵 입금완료 잠금해제 (사장님 결정 3-다)
+     ⚠ 「킵을 해제하면 저절로 풀린다」로 하지 «않았다». 돈을 이미 받은 주문이라
+        지울 때도·고칠 때도 «한 단계 더» 거치게 하는 것이 사장님 뜻이다.
+     ⚠ 스냅샷을 찍는다 — 푼 뒤에 수량을 고치거나 지우면 되돌릴 방법이 없다.
+     ⚠ `wasKeepLock` 을 남겨 「🔒 다시 잠금」으로 되돌릴 수 있게 한다 (실수로 푸는 것을 대비).
+        출고완료의 `wasDone` 과 «같은 방식»이다 — 새 방식을 만들지 않는다. */
+  const unlockKeepLock = orderId => {
+    const o = orders.find(x => x.id === orderId);
+    if (!o || !o.keepLock) return;
+    takeSnap(`킵 입금완료 잠금해제 직전 (${o.nick} · ${o.name})`);
+    setOrders(prev => prev.map(x => {
+      if (x.id !== orderId) return x;
+      const {
+        keepLock,
+        ...rest
+      } = x;
+      return {
+        ...rest,
+        wasKeepLock: true
+      };
+    }));
+    showToast(`🔓 「${o.nick}」 ${o.name} — 잠금을 풀었습니다. 킵으로 ${won(Number(cust(o.nick).keepPaid) || 0)}원을 «이미 받은» 주문입니다`);
+  };
+  const relockKeepLock = orderId => {
+    const o = orders.find(x => x.id === orderId);
+    if (!o || !o.wasKeepLock) return;
+    setOrders(prev => prev.map(x => {
+      if (x.id !== orderId) return x;
+      const {
+        wasKeepLock,
+        ...rest
+      } = x;
+      return {
+        ...rest,
+        keepLock: true
+      };
+    }));
+    showToast(`🔒 「${o.nick}」 ${o.name} — 다시 잠갔습니다`);
+  };
   const relockDone = orderId => {
     const o = orders.find(x => x.id === orderId);
     if (!o || !o.wasDone) return;
@@ -3212,6 +3251,47 @@ function App() {
   };
 
   /* ---------- 주문 ---------- */
+  /* ⭐⭐ 안전장치 204 (2026-08-28 25차 · 미결 40 · 사장님 요구) — 「킵 입금완료」 주문을 잠근다
+     🔴 무엇을 막는가 — 킵으로 «이미 돈을 받은» 상품을 다음 방송에 불러오면, 손님이 같은 상품을
+        또 주문할 때 «같은 줄에 합산»돼 수량이 5 → 6 이 된다. 이미 받은 몫과 새 몫이 한 줄로
+        뭉개져 무엇을 얼마에 받았는지 구분이 사라지고, 그대로 출고되면 이중 출고가 된다.
+        (실서버 2026-08-28 「가실이」가 정확히 그 상태다 — keepPaid 14,000)
+     ⭐ 사장님 결정: 잠그고 · 새로 담으면 «별도 줄» · 「잠금해제」를 눌러야만 풀린다.
+     ⚠⚠ **`o.done`(출고완료)을 재사용하지 «않는다».** done 을 켜면
+          doneOrders 로 들어가 «그날 매출»이 되고(이미 받은 keepPaid 가 또 매출이 된다),
+          keepOrders 에서 빠져 킵 목록·요약본에서 사라지고, activeOrders 에도 없어
+          «출고 시트에서 빠진다»(출고 누락). doneSeq 가 없어 차수까지 꼬인다.
+       → `keepLock` 은 **«편집 잠금»이지 «집계 잠금»이 아니다.** 매출·출고·차수는 안 건드린다.
+     ⚠ 「입금 완료」 판정은 **`keepPaid > 0`** 이다 — 입금 «칩»이 아니다.
+        칩만 켜지고 금액이 0 인 상태가 실제로 있었다(2026-07-27 「가나」 · 안전장치 176).
+        돈이 실제로 기록된 것만 잠근다.
+     ⚠ 킵은 «손님 단위» 플래그라(6차 ㉠) 그 분의 킵 주문은 «전부» 잠긴다.
+        상품별 부분 입금이라는 개념이 앱에 없다 — 있는 척하면 조용히 틀린다. */
+  const keepLockNeeded = (nick, srcCust) => {
+    const c = srcCust || (keeps.customers || {})[nick] || {};
+    return (Number(c.keepPaid) || 0) > 0;
+  };
+  /* ⚠⚠ 킵이 화면으로 들어오는 길은 «둘»이다 — 「킵 불러오기」 버튼 · 그 손님이 새로 주문할 때의
+        자동 이월. 한쪽만 잠그면 다른 쪽이 «구멍»이 된다. 그래서 둘 다 이 함수를 지난다. */
+  const withKeepLock = list => list.map(o => keepLockNeeded(o.nick) ? {
+    ...o,
+    keepLock: true
+  } : o);
+
+  /* ⭐⭐ 「이 줄에 합칠 수 있는가」 판정은 여기 «한 벌»이다 (안전장치 204 · 197 교훈).
+     🔴 전에는 같은 조건이 `find` 와 `findIndex` «두 줄»에 복사돼 있었다. 조건을 두 곳에 따로
+        더하면 한쪽만 고쳐진 채 지나가고, 역검증까지 무뎌진다(197 이 실제 사례다). */
+  const canMergeOrder = (o, n, name, price) => o.nick === n && o.name === name && o.price === price && !o.canceled && !o.done && !o.keepLock;
+
+  /* ⚠ 잠긴 줄은 «어느 경로로 와도» 못 고친다 — 화면에서 버튼을 숨기는 것만으로는 한 겹뿐이다.
+        조용히 무시하면 사장님이 「왜 안 되지」 하신다. 무엇을 하셔야 하는지 함께 알린다. */
+  const keepLockedOrder = id => {
+    const t = orders.find(o => o.id === id);
+    return t && t.keepLock ? t : null;
+  };
+  const warnKeepLocked = t => {
+    showToast(`🔒 「${t.nick}」 ${t.name} — 킵으로 입금까지 받은 주문입니다. 「잠금해제」를 먼저 눌러 주세요`);
+  };
   const tapProduct = p => addResolvedOrder(p.id, p.name, p.price);
   // 주문 추가 코어 (이름·금액 확정본). 옵션 상품 드릴다운도 이걸 사용.
   const addResolvedOrder = (productId, name, price) => {
@@ -3223,11 +3303,13 @@ function App() {
     /* ⭐ 담기 «직전» 스크롤 위치를 적어 둔다 — 자동완성 목록이 갱신되며 튀는 것을 되돌리기 위해서다
           (안전장치 187-d). 되돌리는 일은 바로 위 useEffect 가 한다. */
     scrollKeep.current = window.scrollY;
-    // ⚠ 마감된(출고완료) 주문에는 합치지 않는다. 합치면 새 주문이 이미 보낸 건에 흡수돼 사라진다.
-    const existing = orders.find(o => o.nick === n && o.name === name && o.price === price && !o.canceled && !o.done);
+    /* ⚠ 마감된(출고완료) 주문에는 합치지 않는다. 합치면 새 주문이 이미 보낸 건에 흡수돼 사라진다.
+       ⚠ 킵 입금완료로 «잠긴» 줄에도 합치지 않는다 — 별도 줄로 새로 생긴다 (안전장치 204).
+       ⚠⚠ 두 줄이 «같은 판정»(canMergeOrder)을 쓴다. 조건을 여기 직접 적지 마라. */
+    const existing = orders.find(o => canMergeOrder(o, n, name, price));
     const rid = existing ? existing.id : uid();
     setOrders(os => {
-      const i = os.findIndex(o => o.nick === n && o.name === name && o.price === price && !o.canceled && !o.done);
+      const i = os.findIndex(o => canMergeOrder(o, n, name, price));
       if (i >= 0) {
         const cp = [...os];
         cp[i] = {
@@ -3304,15 +3386,36 @@ function App() {
       warnSimilarNick(n);
     }
   };
-  const chgQty = (id, d) => setOrders(os => os.map(o => o.id === id ? {
-    ...o,
-    qty: Math.max(1, o.qty + d)
-  } : o));
-  const toggleCancel = id => setOrders(os => os.map(o => o.id === id ? {
-    ...o,
-    canceled: !o.canceled
-  } : o));
+  /* ⚠ 안전장치 204 — 잠긴 줄은 수량·취소·삭제를 «코어에서» 막는다.
+        화면 버튼을 숨기는 것만으로는 한 겹이다. 다른 경로가 생겨도 여기서 걸린다. */
+  const chgQty = (id, d) => {
+    const lk = keepLockedOrder(id);
+    if (lk) {
+      warnKeepLocked(lk);
+      return;
+    }
+    setOrders(os => os.map(o => o.id === id ? {
+      ...o,
+      qty: Math.max(1, o.qty + d)
+    } : o));
+  };
+  const toggleCancel = id => {
+    const lk = keepLockedOrder(id);
+    if (lk) {
+      warnKeepLocked(lk);
+      return;
+    }
+    setOrders(os => os.map(o => o.id === id ? {
+      ...o,
+      canceled: !o.canceled
+    } : o));
+  };
   const delOrder = id => {
+    const lk = keepLockedOrder(id);
+    if (lk) {
+      warnKeepLocked(lk);
+      return;
+    }
     const target = orders.find(o => o.id === id);
     const rest = orders.filter(o => o.id !== id);
     setOrders(rest);
@@ -3373,6 +3476,14 @@ function App() {
     });
   };
   const doRefund = (n, ids, whole) => {
+    /* ⚠⚠ 안전장치 204 — 잠긴 킵 주문은 환불하지 않는다 (사장님: 「잠금해제해서 환불하는 게 맞아」).
+          ⚠ 조용히 «빼고 진행»하지 «않는다». 전체환불에서 일부만 빠지면 사장님은 다 환불된 줄
+            아시는데 실제로는 남는다 — 그것이 더 위험하다. 그래서 «막고» 알린다. */
+    const lockedR = orders.filter(o => o.keepLock && (whole ? o.nick === n && !o.canceled : (ids || []).includes(o.id)));
+    if (lockedR.length) {
+      showToast(`🔒 「${n}」 킵 입금완료 주문 ${lockedR.length}건이 들어 있습니다 — 그 줄의 「잠금해제」를 먼저 눌러 주세요`);
+      return;
+    }
     const target = new Set(ids || []);
     const gone = orders.filter(o => whole ? o.nick === n && !o.canceled : target.has(o.id));
     if (!gone.length) {
@@ -3423,6 +3534,15 @@ function App() {
 
   // 전체주문(닉네임별)에서 그 사람 주문 전체 삭제 — 실수 방지 2단 탭
   const delNickOrders = n => {
+    /* ⚠⚠ 안전장치 204 — 잠긴 킵 주문이 하나라도 있으면 «통째 삭제»를 막는다.
+          여기를 안 막으면 「주문서 삭제」 한 번으로 돈 받은 킵이 통째로 사라진다 —
+          줄 단위 삭제만 막는 것은 «반쪽 방어»다 (사장님: 「지울 때도 신중해야 한다」). */
+    const locked = orders.filter(o => o.nick === n && o.keepLock);
+    if (locked.length) {
+      setDelNickArm(null);
+      showToast(`🔒 「${n}」 은 킵으로 입금까지 받은 주문이 ${locked.length}건 있습니다 — 그 줄의 「잠금해제」를 먼저 눌러 주세요`);
+      return;
+    }
     if (delNickArm !== n) {
       setDelNickArm(n);
       setTimeout(() => setDelNickArm(c => c === n ? null : c), 3000);
@@ -3534,7 +3654,9 @@ function App() {
     const head = rs === "all" ? "[환불 처리된 주문입니다]\n\n" : rs ? "[일부 상품이 환불 처리되었습니다]\n\n" : "";
     const list = byNick[n] || [];
     const sum = list.reduce((s, o) => s + o.price * o.qty, 0);
-    const lines = list.map(o => `${o.name}_${o.qty}개*${o.price}원=${o.price * o.qty}원`);
+    /* ⭐ 안전장치 204 — 킵으로 이미 받은 줄임을 손님 안내문에도 적는다 (사장님 예시 그대로).
+       ⚠ 금액 계산은 «한 글자도» 안 바뀐다 — 표시만 늘어난다. `CALC_VER` 를 올릴 일이 아니다. */
+    const lines = list.map(o => `${o.name}_${o.qty}개*${o.price}원=${o.price * o.qty}원` + (o.keepLock ? "(지난 킵-입금완료)" : ""));
     const fee = feeOf(n);
     const c = cust(n);
     const why = c.pickup ? "픽업수령" : c.freeShip ? "무료배송" : c.shipPaid ? "배송비 기입금" : "배송비 없음";
@@ -7189,7 +7311,9 @@ function App() {
     const t = setTimeout(() => {
       const have = new Set(orders.map(o => o.id));
       const mine = new Set(settleNickList);
-      const add = (keeps.orders || []).filter(o => mine.has(o.nick) && !have.has(o.id));
+      /* ⭐⭐ 안전장치 204 — 「불러오기」 버튼과 «같은 판정»을 쓴다.
+            여기를 빼먹으면 「손님이 새로 주문해서 따라온 킵」만 안 잠기는 구멍이 된다. */
+      const add = withKeepLock((keeps.orders || []).filter(o => mine.has(o.nick) && !have.has(o.id)));
       if (!add.length) return;
       const nicks = [...new Set(add.map(o => o.nick))];
       setOrders(prev => {
@@ -7379,7 +7503,9 @@ function App() {
           사람이 구분해 지우고 원래 날짜에 다시 넣어야 해서 되돌릴 방법이 사실상 없다. */
     takeSnap(`킵 불러오기 직전 (${bdate} · ${keepPendingNicks.slice(0, 3).join(", ")})`);
     const exist = new Set(orders.map(o => o.id));
-    const add = keepPending.filter(o => !exist.has(o.id));
+    /* ⭐⭐ 안전장치 204 — 킵으로 «입금까지 받은» 분의 주문은 «잠근 채» 올린다.
+          미입금 킵은 지금과 똑같이 그대로 올라온다 (사장님: 「미입금이라면 그냥 그대로」). */
+    const add = withKeepLock(keepPending.filter(o => !exist.has(o.id)));
     setOrders(prev => [...prev, ...add]);
     setCustomers(prev => {
       const next = {
@@ -9955,6 +10081,8 @@ function App() {
     delOrder: delOrder,
     unlockDone: unlockDone,
     relockDone: relockDone,
+    unlockKeepLock: unlockKeepLock,
+    relockKeepLock: relockKeepLock,
     hideNick: true,
     recent: o.id === recentId
   }))), /*#__PURE__*/React.createElement("input", {
@@ -11730,42 +11858,61 @@ function OrderRow({
   recent,
   onNickClick,
   unlockDone,
-  relockDone
+  relockDone,
+  unlockKeepLock,
+  relockKeepLock
 }) {
   const done = !!o.done;
+  /* ⭐⭐ 안전장치 204 — 킵 입금완료 잠금 (2026-08-28 25차 · 미결 40)
+     ⚠ 잠금 «모양»은 출고완료와 같게 두되, 뱃지 글자를 달리해 «다른 것»임을 보이게 한다.
+        같은 글자로 두면 사장님이 「이미 보낸 건」으로 오해하신다 — 아직 안 보낸 건이다.
+     ⚠ 숨기지 않는다 — 안 보이면 「주문이 사라졌다」고 놀라신다 (출고완료와 같은 이유). */
+  const klock = !!o.keepLock;
+  const lock = done || klock;
   return /*#__PURE__*/React.createElement("div", {
     "data-oid": o.id,
-    className: "orow" + (o.canceled ? " canceled" : "") + (done ? " donelock" : "") + (recent ? " recent" : "")
+    className: "orow" + (o.canceled ? " canceled" : "") + (done ? " donelock" : "") + (klock ? " keeplock" : "") + (recent ? " recent" : "")
   }, !hideNick && /*#__PURE__*/React.createElement("span", {
-    className: "onick" + (onNickClick && !done ? " clickable" : ""),
-    onClick: onNickClick && !done ? () => onNickClick(o.nick) : undefined
+    className: "onick" + (onNickClick && !lock ? " clickable" : ""),
+    onClick: onNickClick && !lock ? () => onNickClick(o.nick) : undefined
   }, o.nick), /*#__PURE__*/React.createElement("span", {
     className: "oname"
   }, o.name, o.canceled && " (취소)", done && /*#__PURE__*/React.createElement("span", {
     className: "lockbadge",
     title: o.doneTrk ? `운송장 ${fmtTrk(o.doneTrk)}` : ""
-  }, "📦 출고완료", o.doneSeq > 1 ? ` ${o.doneSeq}차` : "")), /*#__PURE__*/React.createElement("span", {
+  }, "📦 출고완료", o.doneSeq > 1 ? ` ${o.doneSeq}차` : ""), !done && klock && /*#__PURE__*/React.createElement("span", {
+    className: "lockbadge keeplockbadge",
+    title: "킵으로 이미 입금까지 받은 주문입니다 — 「잠금해제」 후에 고치거나 지울 수 있습니다"
+  }, "🔒 킵 입금완료")), /*#__PURE__*/React.createElement("span", {
     className: "qtybox"
   }, /*#__PURE__*/React.createElement("button", {
     className: "qbtn",
     onClick: () => chgQty(o.id, -1),
-    disabled: o.canceled || done
+    disabled: o.canceled || lock
   }, "−"), /*#__PURE__*/React.createElement("span", {
     className: "qty"
   }, o.qty), /*#__PURE__*/React.createElement("button", {
     className: "qbtn",
     onClick: () => chgQty(o.id, +1),
-    disabled: o.canceled || done
+    disabled: o.canceled || lock
   }, "+")), /*#__PURE__*/React.createElement("span", {
     className: "oamt"
   }, won(o.price * o.qty), "원"), done ? unlockDone ? /*#__PURE__*/React.createElement("button", {
     className: "btn ghost sm",
     title: "잘못 출고완료로 잡힌 경우 되돌립니다",
     onClick: () => unlockDone(o.id)
+  }, "잠금해제") : null : klock ? unlockKeepLock ? /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm",
+    title: "킵으로 이미 받은 주문입니다 — 고치거나 지우시려면 먼저 푸세요",
+    onClick: () => unlockKeepLock(o.id)
   }, "잠금해제") : null : /*#__PURE__*/React.createElement(React.Fragment, null, o.wasDone && relockDone && /*#__PURE__*/React.createElement("button", {
     className: "btn ghost sm relockbtn",
     title: "잠금해제를 되돌립니다 — 이 주문만 다시 출고완료로",
     onClick: () => relockDone(o.id)
+  }, "🔒 다시 잠금"), o.wasKeepLock && relockKeepLock && /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm relockbtn",
+    title: "킵 입금완료 잠금을 되돌립니다",
+    onClick: () => relockKeepLock(o.id)
   }, "🔒 다시 잠금"), /*#__PURE__*/React.createElement("button", {
     className: "btn ghost sm",
     onClick: () => toggleCancel(o.id)
@@ -12555,6 +12702,11 @@ const CSS = `
   text-decoration: line-through; color: #7b8494; }
 .lockbadge { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   background: #e8f6ec; color: #1f7a3d; font-weight: 700; text-decoration: none; vertical-align: middle; }
+/* 🔒 킵 입금완료 잠금 (안전장치 204 · 25차)
+   ⚠ 출고완료(회색 취소선)와 «다른 색»으로 둔다 — 같으면 「이미 보낸 건」으로 오해하신다.
+      아직 «안 보낸» 건이고, 오히려 이번에 보내실 건이다. 취소선도 «긋지 않는다». */
+.orow.keeplock { background: #fff8ec; box-shadow: inset 3px 0 0 #e5a13a; }
+.keeplockbadge { background: #fff3e0; color: #a85c00; }
 .seqbadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   background: #eef2ff; color: #3b4bc9; font-weight: 700; }
 /* 📦 박스 뱃지 — 차수(파랑)와 «눈에 띄게 다른 색»으로 둔다. 헷갈리면 배송비를 또 받는다 (23차) */
