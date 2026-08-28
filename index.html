@@ -2231,6 +2231,9 @@ function App() {
         ⚠ 조건에 걸려 «쉰» 것은 읽은 것이 아니다 — serverLoad 를 부른 자리에서만 찍는다. */
   const lastPollAtRef = useRef(0);
   const pollStuckAtRef = useRef(0);
+  /* ⭐⭐ 안전장치 201 (2026-08-27 24차 · 미결 37) — 원가 사전도 따라오게 한다.
+        실제 함수는 «훨씬 아래»(원가 영역)에서 채운다. 서로 앞뒤로 부르므로 ref 로 잇는다. */
+  const costPollRef = useRef(null);
   /* ⚠⚠ 「마지막 활동」은 auth:at 을 쓴다 — 3시간 만료(expired)가 쓰는 «그 값»이다.
         판정을 두 벌로 만들지 않는다.
      ⚠ 다만 auth:at 은 «로그인 화면으로 직접 로그인할 때만» 생긴다(677줄).
@@ -2321,6 +2324,11 @@ function App() {
     pollBusy.current = true;
     try {
       lastPollAtRef.current = Date.now(); // ⭐ 194 — 실제로 읽은 자리
+      /* ⭐⭐ 201 — 여기까지 왔다는 것은 «보고 있고 · 활동 중이고 · 안 올린 변경이 없다»는 뜻이다.
+            원가 사전도 그 김에 확인한다. 가드를 새로 만들지 않는다 — 폴링의 것을 그대로 쓴다. */
+      try {
+        costPollRef.current && costPollRef.current();
+      } catch (e) {}
       const r = await serverLoad(live.bdate);
       if (!r.ok || !r.exists) return;
       bumpNet(0, 0, true); // ⭐ 바이트는 rpc 래퍼가 «이미» 셌다 — 여기서는 «따라가기 횟수»만 올린다
@@ -4465,7 +4473,14 @@ function App() {
   // withTracking=false 면 송장번호 칸을 비운다.
   // 출고탭 다운로드는 「접수용」이라 운송장이 들어가면 안 되고,
   // 전체저장의 보관용 시트만 true 로 호출한다.
-  const buildShipSheet = (lines, withTracking) => {
+  /* ⭐⭐ 안전장치 198 (2026-08-27 24차 · 미결 31 · 사장님 (나)안)
+        withBoxes=true 면 «박스(1-1차) 운송장»을 그 사람 줄 «바로 뒤»에 함께 싣는다.
+     🔴🔴 «확인용 파일에서만» 켠다 (⑤ 업로드 「⬇ … 엑셀 다운」).
+        전체저장의 «보관용» 출고 시트는 «1번 박스만» 그대로 둔다 —
+        박스 줄이 섞이면 그대로 접수돼 **오배송**이다 (190-c).
+     ⚠ 그래서 인자를 «따로» 두었다. withTracking 만으로 가르면 보관용까지 바뀐다.
+     ⚠ 수량 칸은 «비운다» — 채우면 사장님이 「여러 개 주문한 것」으로 보신다 (사장님이 걱정하신 지점). */
+  const buildShipSheet = (lines, withTracking, withBoxes) => {
     // 업로드 탭에서 반영된 송장번호(닉네임 → 송장번호)
     // ⚠ 목록에 행이 있으면 그 값이 절대 우선. 손으로 지운 사람에게 고객정보의 옛 번호가 되살아나면 오배송이 된다.
     /* ⚠⚠ 2026-08-25 23차 (미결 28) — 박스가 여러 개면 «1번 박스» 번호를 쓴다.
@@ -4478,7 +4493,8 @@ function App() {
       });
     }
     const rows = [["이름", "전화번호", "휴대폰번호", "우편번호", "주소", "상품명", "옵션명", "추가구성", "수량", "주문번호", "운임구분", "배송시요구사항", "송장번호", "주문처", "보내는분", "전화번호", "운임", "송장번호"]];
-    sortLinesByName(lines).forEach(o => {
+    const sortedLines = sortLinesByName(lines);
+    sortedLines.forEach((o, i) => {
       const c = cust(o.nick);
       const trk = withTracking ? Object.prototype.hasOwnProperty.call(trackByNick, o.nick) ? trackByNick[o.nick] : normTrk(c.tracking) : "";
       rows.push([c.name || o.nick,
@@ -4517,6 +4533,33 @@ function App() {
       // Q 운임 (빈 컬럼 유지)
       trk // R 송장번호 — 업로드 반영값 우선
       ]);
+      /* ⭐⭐ 198 — 그 사람의 «마지막 주문 줄» 뒤에 박스 줄을 붙인다.
+         ⚠ 사람마다 «한 번»만 붙여야 한다. 주문이 여러 건이면 매 줄마다 붙어 중복된다. */
+      if (!withBoxes) return;
+      const last = i === sortedLines.length - 1 || sortedLines[i + 1].nick !== o.nick;
+      if (!last) return;
+      /* ⚠⚠ 「지금 차수(curSeq)」로 거르면 «아무것도 안 나온다» — 24차에 걸렸다.
+            확인용 파일은 «방금 올려 출고완료된» 차수를 보는 것인데, curSeq 는 그 «다음» 차수다.
+            → 그 사람의 «모든» 박스 줄을 차수·박스 순으로 담는다.
+            🟢 라벨에 차수가 들어가므로(1-1차 · 2-1차) 섞이지 않는다. 확인용이라 «빠지는 것»이 더 나쁘다. */
+      shipData.filter(d => d.nick === o.nick && boxOf(d) > 1).sort((a, b) => seqOf(a) - seqOf(b) || boxOf(a) - boxOf(b)).forEach(d => {
+        rows.push([c.name || o.nick,
+        // A 이름 — 누구 것인지 보이게
+        "", null, "", "",
+        // B~E 비운다 (체크용이라 양식 제약이 없다)
+        "\u21b3 " + seqLabel(d),
+        // F 상품명 자리 — 「↳ 1-1차」
+        "", "",
+        // G·H
+        "",
+        // I 수량 — ⚠ «비운다»
+        o.nick,
+        // J 주문번호(닉네임)
+        "", "", "", "", "", "", "",
+        // K~Q 비운다
+        normTrk(d.tracking) // R 송장번호 — «그 박스» 번호
+        ]);
+      });
     });
     const ws = XLSX.utils.aoa_to_sheet(rows);
     ws["!cols"] = [{
@@ -4574,7 +4617,8 @@ function App() {
   // withTracking=true 일 때만 맨 뒤(L열)에 송장번호를 붙인다.
   // CJ 접수용 다운로드 파일은 양식이 깨지면 안 되므로 false(A~K 원본 그대로),
   // 전체저장의 보관용 시트만 true 로 호출한다.
-  const buildCjSheet = (lines, withTracking) => {
+  /* ⭐ 안전장치 198 — 롯데와 같은 규칙 (24차). 확인용에서만 박스 줄을 싣는다. */
+  const buildCjSheet = (lines, withTracking, withBoxes) => {
     // ⚠ 롯데와 같은 규칙: 조회 목록에 행이 있으면 그 값이 절대 우선 · 박스가 여러 개면 «1번 박스» (23차)
     const trackByNick = {};
     {
@@ -4586,7 +4630,8 @@ function App() {
     const head = ["보내는분성명", "보내는분전화번호", "보내는분주소(전체, 분할)", "품목명", "내품수량", "박스타입", "받는분성명", "받는분전화번호", "받는분주소(전체, 분할)", "배송메세지1", "고객주문번호"];
     if (withTracking) head.push("송장번호");
     const rows = [head];
-    sortLinesByName(lines).forEach(o => {
+    const sortedCj = sortLinesByName(lines);
+    sortedCj.forEach((o, i) => {
       // 롯데처럼 상품별 1행 · 이름 가나다순
       const c = cust(o.nick);
       const req = (c.req || "").trim();
@@ -4615,6 +4660,15 @@ function App() {
       ];
       if (withTracking) row.push(Object.prototype.hasOwnProperty.call(trackByNick, o.nick) ? trackByNick[o.nick] : normTrk(c.tracking)); // L 송장번호
       rows.push(row);
+      if (!withBoxes) return;
+      const lastCj = i === sortedCj.length - 1 || sortedCj[i + 1].nick !== o.nick;
+      if (!lastCj) return;
+      /* ⚠ 롯데와 같은 규칙 — curSeq 로 거르면 안 된다 (24차) */
+      shipData.filter(d => d.nick === o.nick && boxOf(d) > 1).sort((a, b) => seqOf(a) - seqOf(b) || boxOf(a) - boxOf(b)).forEach(d => {
+        const br = ["", "", "", "\u21b3 " + seqLabel(d), "", "", c.name || o.nick, "", "", "", o.nick];
+        if (withTracking) br.push(normTrk(d.tracking));
+        rows.push(br);
+      });
     });
     const ws = XLSX.utils.aoa_to_sheet(rows);
     ws["!cols"] = [{
@@ -5922,8 +5976,23 @@ function App() {
         const row = Array.isArray(data) ? data[0] : data;
         if (!row || !row.found) continue; // 행이 없는 날짜는 정상 (건너뛴다)
         const os = row.payload && row.payload.orders || [];
+        const cs = row.payload && row.payload.customers || {};
         os.forEach(o => {
           if (!o || !o.id) return;
+          /* ⭐⭐ 안전장치 200 (2026-08-27 24차 · 미결 36 · **사장님 실사용 보고**)
+             🔴 킵을 다음 방송으로 넘기면 «같은 주문 id 가 두 날짜에» 남는다 — 그것이 설계다.
+                앞 날짜에서는 keep:true 라 매출에서 «빠지고»(activeOrders 가 킵을 뺀다),
+                넘어간 날짜에서 발송하면 그날 매출이 된다. **매출이 부풀려지지 않는다.**
+             🔴🔴 그런데 전에는 id 만 세어 «반드시» 오탐이 떴고, 화면은
+                「한쪽 날짜에서 지워야 합계가 맞습니다」라고 안내했다 —
+                그대로 하시면 **킵 주문이 진짜로 사라진다.** 실사용에서 5건이 떴다(2026-08-26·27).
+             ⚠ 그렇다고 중복 검사를 끄면 안 된다 — 3차·12차에 «진짜» 중복 사고가 있었다.
+                → 「그 날짜에서 킵인 주문」만 세지 «않는다». 킵이 아닌 중복은 그대로 잡힌다.
+             ⚠ 취소된 주문도 매출이 아니다 — 함께 뺀다.
+             ⚠ 판정을 새로 만들지 않는다: 화면의 activeOrders 와 «같은 뜻»이다. */
+          if (o.canceled) return;
+          const ct = cs[o.nick];
+          if (ct && ct.keep) return;
           seen[o.id] = seen[o.id] || [];
           if (!seen[o.id].includes(d)) seen[o.id].push(d);
         });
@@ -6038,6 +6107,61 @@ function App() {
       hasNone
     };
   })();
+
+  /* ⭐⭐ 안전장치 202 — 기간 합산을 «엑셀로» 내려받는다 (2026-08-27 24차 · 미결 38 · 사장님 요청)
+     🔴 지금까지는 «그날 하루» 결산 엑셀만 있었다. 기간 합산은 화면으로만 볼 수 있었다.
+     ⚠⚠ **화면에 «보이는 그것»을 그대로 쓴다** — periodCalc 하나에서 나온다.
+        여기서 다시 더하면 화면과 파일이 조용히 어긋난다 (안전장치 50 · money-rules §1).
+     ⚠⚠ **경고를 «파일에도» 싣는다.** 화면에서만 알리면 파일만 받아 본 사람은
+        운송장이 빠졌는지·계산 규칙이 섞였는지·주문이 두 날짜에 있는지 «알 방법이 없다».
+     ⚠ 장소 필터도 따른다 — periodCalc.rows 가 이미 걸러진 것이다. */
+  const exportPeriodXlsx = () => {
+    const {
+      rows,
+      t
+    } = periodCalc;
+    if (!rows.length) {
+      showToast("이 기간에 방송이 없습니다.");
+      return;
+    }
+    const n = v => Number(v) || 0;
+    const place = perPlace === "" ? "전체" : perPlace === PLACE_NONE ? "장소 없음" : perPlace;
+    const aoa = [["사자창고 기간 합산"], ["기간", perFrom, "~", perTo], ["장소", place], ["뽑은 때", new Date().toLocaleString("ko-KR")], [], ["방송 횟수", t.days], ["주문 건수", t.orders], ["주문자 수", t.custs], ["매출", t.sales, "입금된 것만 · 킵 제외"], ["배송 손익", t.shipProfit], ["환불", -t.refund], ["킵 금액", t.keepGoods, "아직 안 보낸 물건 — 위 매출에 없음"], ["킵 받은 돈", t.keepPaid], ["현금영수증 대기", t.cashPending], []];
+    if (t.missDays.length) {
+      aoa.push(["⚠ 운송장이 빠진 날이 있습니다", `${t.trkMissing}명 (${t.missDays.join(" · ")}) — 그만큼 운임이 안 잡혀 배송 손익이 실제보다 높습니다`]);
+    }
+    if (t.vers.length > 1) {
+      aoa.push(["⚠ 계산 규칙(calc_ver)이 다른 요약본이 섞여 있습니다", `${t.vers.join(" · ")} — 기준이 다른 값을 더한 것이라 합계를 그대로 믿지 마세요`]);
+    }
+    if (perDup.state === "fail") {
+      aoa.push(["⚠ 중복 검사를 못 했습니다", "방송 본문을 못 읽었습니다 — 같은 주문이 두 날짜에 있어도 알 수 없습니다"]);
+    } else if (perDup.state === "ok" && perDup.dups.length) {
+      aoa.push(["⚠ 같은 주문이 두 날짜에 들어가 있습니다", `${perDup.dups.length}건 — ${perDup.dups.slice(0, 5).map(d => d.id + "(" + d.dates.join("·") + ")").join(" · ")}`]);
+    }
+    aoa.push([]);
+    aoa.push(["날짜", "장소", "주문 건수", "매출", "배송 손익", "계산 규칙"]);
+    rows.forEach(r => {
+      const sc = r.ship_cost || {};
+      aoa.push([String(r.date), r.place || "장소 없음", n(r.total_orders), n(r.paid_goods) + n(r.paid_ship_fee), n(sc.shipProfit), r.calc_ver == null ? "" : r.calc_ver]);
+    });
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = [{
+      wch: 30
+    }, {
+      wch: 18
+    }, {
+      wch: 12
+    }, {
+      wch: 14
+    }, {
+      wch: 12
+    }, {
+      wch: 10
+    }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "기간합산");
+    XLSX.writeFile(wb, `기간합산_사자창고_${perFrom.replace(/-/g, "")}_${perTo.replace(/-/g, "")}.xlsx`);
+  };
 
   /* ---------- 📅 초기셋팅 달력 (0-6 · 2026-08-06 9차) ----------
       상단바 날짜 «왼쪽» 📅 → 그 달의 방송 기록을 보여주고, 날짜를 눌러 이동한다.
@@ -7684,6 +7808,39 @@ function App() {
     return out;
   }, [costBook, costSrv]);
 
+  /* ⭐⭐ 안전장치 201 — 원가 사전을 «따라간다» (2026-08-27 24차 · 미결 37)
+     🔴 무엇이 틀려 있었나 — 서버를 읽는 조건이 `costSrvOk.current` 라
+        **한 번 성공하면 다시는 안 읽었다.** 매니저님이 그 뒤에 넣으신 공급가가
+        사장님 화면에 «새로고침 전까지 영영» 안 왔다. 마진이 100% 로 잡힌 채 보인다.
+     ⚠⚠ 그렇다고 마구 받아오면 «내가 방금 넣은 원가»를 서버 옛값이 덮는다 —
+        adoptServerCosts 는 같은 열쇠가 겹치면 «서버 것»을 쓴다. 마진이 걸린 값이라 더 위험하다.
+        → `costPending`(아직 안 올라간 내 원가)이 «하나라도» 있으면 «안 받는다».
+          폴링의 「안 올린 내 변경이 있으면 안 받는다」(188-b)와 «같은 원리»다.
+     ⚠ 주기는 따로 둔다 — 원가는 자주 안 바뀐다.
+     ⚠ 이 함수는 폴링이 «실제로 서버를 읽는» 자리에서만 불린다.
+        그래서 「안 보고 있다·무활동·충돌 중」 가드가 «저절로» 걸린다. */
+  const COST_POLL_MS = 60000;
+  const lastCostPollRef = useRef(0);
+  const costPendingRef = useRef([]);
+  useEffect(() => {
+    costPendingRef.current = costPending;
+  }, [costPending]);
+  useEffect(() => {
+    costPollRef.current = async () => {
+      if (!serverOn() || !costSrvOk.current) return;
+      if ((costPendingRef.current || []).length) return; // 🔴 안 올린 내 원가가 있으면 «안 받는다»
+      if (Date.now() - lastCostPollRef.current < COST_POLL_MS) return;
+      lastCostPollRef.current = Date.now();
+      const r = await costsRpc("load_costs");
+      if (!r.ok) return; // 조용히 넘어간다 — 다음 차례에 다시 본다
+      if ((costPendingRef.current || []).length) return; // ⚠ 기다리는 사이에 내가 입력했다
+      adoptServerCosts(r);
+    };
+    return () => {
+      costPollRef.current = null;
+    };
+  }, [auth]);
+
   /* 「지금 올리기」 — 서버가 돌아온 뒤 사장님이 직접 밀어 넣는 수단.
      ⚠ 올라가지 않았는데 「올렸다」고 말하지 않는다. 틀린 안내는 없느니만 못하다 (안전장치 71). */
   const pushCostsNow = async () => {
@@ -7997,28 +8154,57 @@ function App() {
 
   // 주문서가 살아있는 닉네임 (주문 삭제된 송장 기록 구분용)
   const activeNickSet = useMemo(() => new Set(activeOrders.map(o => o.nick)), [activeOrders]);
-  // 택배사별 조회 건수 — 실제 다운로드 파일에 담길 인원 기준 (주문 삭제된 사람 제외)
-  const lotteShipCount = useMemo(() => shipData.filter(d => (d.carrier || "").includes("롯데") && activeNickSet.has(d.nick)).length, [shipData, activeNickSet]);
-  const cjShipCount = useMemo(() => shipData.filter(d => (d.carrier || "").includes("CJ") && activeNickSet.has(d.nick)).length, [shipData, activeNickSet]);
+  /* ⭐⭐ 안전장치 197 (2026-08-27 24차 · 미결 32 · **사장님 실사용 보고**)
+     🔴 무엇이 틀려 있었나 — 「⬇ … 업로드 엑셀 다운」의 판정이 «두 곳»에 따로 있었다.
+          버튼: shipData 「줄」 중 activeNickSet(아직 «출고 안 된» 사람)  → 0 이면 꺼진다
+          함수: [...activeOrders, ...doneOrders] — 출고완료도 «담는다»
+        운송장을 올리면 그 동작에서 «출고완료까지» 되므로 전원이 done 이 되어
+        **올리자마자 버튼이 꺼졌다.** 정작 파일에는 담길 것이 있는데 못 받으셨다.
+        (실서버 2026-08-26: 롯데 12줄 · 10명인데 버튼 판정 «0»)
+     ⭐ 그래서 「실제로 파일에 담길 사람」을 돌려주는 함수를 «한 곳»에 두고
+        버튼·함수가 «그것을» 함께 쓴다 (23차 교훈 — 두 곳에 두면 역검증까지 무뎌진다).
+     ⚠ 「N명」도 이 값이라 «사람 수»다. 전에는 «줄 수»여서 박스가 여러 개면 부풀었다.
+     ⚠ 주문서가 삭제된 사람은 여전히 빠진다 — lines 가 비면 people 도 빈다. */
+  const trackDownPeople = which => {
+    const isLotte = which === "롯데";
+    const nicks = new Set(shipData.filter(d => (d.carrier || "").includes(isLotte ? "롯데" : "CJ")).map(d => d.nick));
+    if (!nicks.size) return {
+      nicks,
+      lines: [],
+      people: new Set()
+    };
+    const lines = [...activeOrders, ...doneOrders].filter(o => nicks.has(o.nick));
+    return {
+      nicks,
+      lines,
+      people: new Set(lines.map(o => o.nick))
+    };
+  };
+  const lotteShipCount = useMemo(() => trackDownPeople("롯데").people.size, [shipData, activeOrders, doneOrders]);
+  const cjShipCount = useMemo(() => trackDownPeople("CJ").people.size, [shipData, activeOrders, doneOrders]);
 
   // 업로드 탭 — 조회된 운송장을 택배사별로 엑셀 저장
   // 양식은 ④ 출고탭 다운로드와 동일하게 하되, 송장번호만 채워서 내보낸다. (합계 행 없음)
   const exportTrackXlsx = which => {
     const isLotte = which === "롯데";
-    const nicks = new Set(shipData.filter(d => (d.carrier || "").includes(isLotte ? "롯데" : "CJ")).map(d => d.nick));
+    /* ⭐⭐ 197 — 버튼을 켜고 끄는 «그 판정»을 그대로 쓴다. 두 벌로 만들지 않는다. */
+    const {
+      nicks,
+      lines,
+      people: saved
+    } = trackDownPeople(which);
     if (nicks.size === 0) {
       showToast(`${which} 운송장 조회 결과가 없습니다.`);
       return;
     }
-    const lines = [...activeOrders, ...doneOrders].filter(o => nicks.has(o.nick));
     if (lines.length === 0) {
       showToast("⚠ 송장은 있는데 주문서가 없는 사람뿐입니다 — 주문서 삭제 또는 환불 처리를 확인하세요");
       return;
     }
-    const saved = new Set(lines.map(o => o.nick));
     const skipped = [...nicks].filter(n => !saved.has(n));
     const wb = XLSX.utils.book_new();
-    if (isLotte) XLSX.utils.book_append_sheet(wb, buildShipSheet(lines, true), "4. 송장출력_복사용(롯데)");else XLSX.utils.book_append_sheet(wb, buildCjSheet(lines, true), "Sheet1");
+    /* ⭐⭐ 198 — 여기가 «확인용»이다. 박스 줄을 «켠다» (세 번째 인자). */
+    if (isLotte) XLSX.utils.book_append_sheet(wb, buildShipSheet(lines, true, true), "4. 송장출력_복사용(롯데)");else XLSX.utils.book_append_sheet(wb, buildCjSheet(lines, true, true), "Sheet1");
     XLSX.writeFile(wb, `운송장_${isLotte ? "롯데" : "CJ"}_사자창고_${dateCode}.xlsx`);
     showToast(`✓ ${which} 운송장 ${saved.size}명 저장했습니다.` + (skipped.length ? ` (주문서 없는 ${skipped.length}명 제외: ${skipped.slice(0, 3).join(", ")}${skipped.length > 3 ? " 외" : ""})` : ""));
   };
@@ -8188,6 +8374,8 @@ function App() {
       const c = carrierOfNick[o.nick];
       return !c || c.includes(key);
     });
+    /* 🔴🔴 여기는 «보관용»이다 — 박스 줄을 «켜지 마라» (190-c · 오배송).
+          세 번째 인자를 빼 둔 것이 «의도»다. 실수로 true 를 넣으면 t_trkscope 12절 대조군이 잡는다. */
     XLSX.utils.book_append_sheet(wb, buildShipSheet(linesFor("롯데"), true), "4. 송장출력_복사용(롯데)");
     XLSX.utils.book_append_sheet(wb, buildCjSheet(linesFor("CJ"), true), "5. 송장출력_복사용(CJ대한통운)");
 
@@ -9151,7 +9339,11 @@ function App() {
         setPerFrom(m.from);
         setPerTo(m.to);
       }
-    }, "이번 달"), /*#__PURE__*/React.createElement("select", {
+    }, "이번 달"), /*#__PURE__*/React.createElement("button", {
+      className: "btn sm perxls",
+      onClick: exportPeriodXlsx,
+      disabled: perData.state !== "ok" || periodCalc.rows.length === 0
+    }, "⬇ 엑셀 내려받기"), /*#__PURE__*/React.createElement("select", {
       className: "perplace",
       value: perPlace,
       onChange: e => setPerPlace(e.target.value)
