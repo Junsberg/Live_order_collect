@@ -6218,7 +6218,19 @@ function App() {
         t.missDays.push(String(r.date));
         t.trkMissing += n(sc.trkMissing);
       }
-      if (r.calc_ver != null && !t.vers.includes(r.calc_ver)) t.vers.push(r.calc_ver);
+      /* ⭐⭐ 안전장치 205 (2026-08-29 25차 · 미결 41 · **사장님 실사용 보고**)
+         🔴 무엇을 막는가 — 「계산 규칙(calc_ver)이 다릅니다」 경고가 «합계에 한 톨도 안 보탠 날»
+            때문에 떴다. 실서버 2026-08 실측: `calc_ver` 1인 날은 08-05·08-06 둘뿐이고
+            둘 다 매출·환불·배송손익·주문 건수·주문자·킵·현금영수증이 «전부 0» 인 「준비」만 한 날이다.
+            더한 것이 «없는데» 「기준이 다른 값을 더한 것이라 합계를 믿지 마세요」라고 알렸다.
+            24차 안전장치 200(킵 이월을 중복으로 세던 오탐)과 «같은 성격»이다.
+         ⚠⚠ 그렇다고 경고를 «약하게 만들면 안 된다.** 기준이 다른 값이 실제로 섞이면 반드시 떠야 한다.
+            그래서 **더한 값이 하나라도 0이 아니면 그대로 센다.** 「매출이 0이니 안 센다」가 아니다 —
+            매출이 0이어도 «주문 건수»를 보탰으면 그것도 규칙(178)이 걸린 값이다.
+         ⚠⚠ 목록은 «위에서 실제로 더한 것»과 같아야 한다. 여기서 새로 고르면 조용히 어긋난다
+            (money-rules §1 · 197 교훈). 위 t.xxx += 줄과 «한 줄씩» 짝이 맞는지 보고 고쳐라. */
+      const added = n(r.paid_goods) || n(r.paid_ship_fee) || n(r.refund_goods) || n(r.refund_ship_fee) || n(sc.shipProfit) || n(r.total_orders) || n(r.total_custs) || n(r.keep_goods) || n(r.keep_paid) || n(r.cash_pending);
+      if (r.calc_ver != null && added && !t.vers.includes(r.calc_ver)) t.vers.push(r.calc_ver);
     });
     const places = [...new Set(all.map(r => r.place).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ko"));
     const hasNone = all.some(r => !r.place);
