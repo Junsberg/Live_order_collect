@@ -3267,16 +3267,60 @@ function App() {
         돈이 실제로 기록된 것만 잠근다.
      ⚠ 킵은 «손님 단위» 플래그라(6차 ㉠) 그 분의 킵 주문은 «전부» 잠긴다.
         상품별 부분 입금이라는 개념이 앱에 없다 — 있는 척하면 조용히 틀린다. */
+  /* ⭐⭐ 안전장치 209 (2026-08-31 26차 · 미결 45 · 📌 **사장님이 설계 결함을 «먼저» 짚으셨다**)
+      🔴 204 의 잠금은 「`keepPaid > 0`」이고 «사람 단위»라, 킵을 «안 풀고» 오늘 상품을 더 담으면
+        **돈을 안 받은 오늘 추가분까지 다음 방송에 잠긴 채** 온다
+        (실서버 08-31 실측 — 「가실이」 킵 4건 중 2건이 오늘 추가분).
+      📌 **사장님 지적**: 「킵주문건 입금을 잘못 누른다거나 누른걸 풀어버리면 시점이 오염돼버리니까」
+        → 「킵 입금 «시각»」을 심자는 안을 사장님이 «스스로» 물리셨다. **그 지적이 맞다.**
+      ⭐ 그래서 «시각»이 아니라 **「그 돈 계산에 «실제로» 들어간 줄」**에 표식을 박는다.
+        `keepGot(c, sum, n)` 의 `sum` 은 `byNick[n]`(그 손님 화면 주문 전부)의 합계다 —
+        **그 합계에 들어간 줄이 곧 표식 대상**이다. 새 판정을 만들지 않는다 (money-rules §1).
+      ⭐⭐ **되돌리기를 금액과 «같은 자리»에 둔다** — 입금을 풀어 `keepPaid` 를 0으로 되돌리는
+        «바로 그 자리»에서 표식도 지운다. 그러면 오염이 «구조적으로» 불가능하다.
+      ⚠ 📌 **사장님 결정 — 표식이 «없는» 옛 킵은 «전부» 잠근다** (「그게 좋아」).
+        이미 받은 돈이 있는데 안 잠그면 «합산»된다. 안전한 쪽으로 둔다.
+        → `keepLockNeeded` 가 「받은 돈 > 0」이면 잠그되, **표식이 하나라도 있는 손님**만
+          「표식 있는 줄」로 좁힌다. 표식이 아예 없으면 옛 자료이므로 전부 잠근다. */
+  const markKeepPaidRef = list => {
+    const ids = new Set((list || []).map(o => o.id));
+    setOrders(prev => prev.map(o => ids.has(o.id) ? {
+      ...o,
+      keepPaidRef: true
+    } : o));
+  };
+  const clearKeepPaidRef = nick => {
+    setOrders(prev => prev.map(o => {
+      if (o.nick !== nick || !o.keepPaidRef) return o;
+      const {
+        keepPaidRef,
+        ...rest
+      } = o;
+      return rest;
+    }));
+  };
   const keepLockNeeded = (nick, srcCust) => {
     const c = srcCust || (keeps.customers || {})[nick] || {};
     return (Number(c.keepPaid) || 0) > 0;
   };
   /* ⚠⚠ 킵이 화면으로 들어오는 길은 «둘»이다 — 「킵 불러오기」 버튼 · 그 손님이 새로 주문할 때의
         자동 이월. 한쪽만 잠그면 다른 쪽이 «구멍»이 된다. 그래서 둘 다 이 함수를 지난다. */
-  const withKeepLock = list => list.map(o => keepLockNeeded(o.nick) ? {
-    ...o,
-    keepLock: true
-  } : o);
+  /* ⭐⭐ 안전장치 209 — 「받은 돈에 «실제로 들어간» 줄」만 잠근다.
+     ⚠ 📌 **사장님 결정 — 표식이 «없는» 옛 킵은 «전부» 잠근다.**
+        그 손님 줄에 표식이 «하나도» 없으면 26차 이전 자료다 → 지금까지처럼 전부 잠근다.
+        표식이 «하나라도» 있으면 그때부터 정확히 갈린다 — 표식 있는 줄만 잠근다.
+     ⚠ 「받은 돈 > 0」은 **그대로 함께 본다**(204 ㉮) — 미입금 킵은 표식이 있어도 안 잠긴다. */
+  const withKeepLock = list => {
+    const hasRef = new Set((list || []).filter(o => o.keepPaidRef).map(o => o.nick));
+    return (list || []).map(o => {
+      if (!keepLockNeeded(o.nick)) return o;
+      if (hasRef.has(o.nick) && !o.keepPaidRef) return o; // 그 뒤에 담은 줄 — 돈을 안 받았다
+      return {
+        ...o,
+        keepLock: true
+      };
+    });
+  };
 
   /* ⭐⭐ 「이 줄에 합칠 수 있는가」 판정은 여기 «한 벌»이다 (안전장치 204 · 197 교훈).
      🔴 전에는 같은 조건이 `find` 와 `findIndex` «두 줄»에 복사돼 있었다. 조건을 두 곳에 따로
@@ -10644,6 +10688,9 @@ function App() {
             keepPaidLast: got,
             shipPaid: true
           });
+          /* ⭐⭐ 안전장치 209 — 그 «금액 계산에 들어간 줄»에 표식을 박는다.
+                `got` 은 `sum`(= list 의 합계)으로 정해졌으므로 대상은 «그 list» 다. */
+          markKeepPaidRef(list);
           showToast(`✓ 「${n}」 킵 입금 ${won(got)}원 기록 — 다음 발송 때 배송비는 받지 않습니다`);
           /* ⭐⭐ 안전장치 208 (2026-08-31 26차 · 미결 44 · **사장님 실사용 보고**)
              🔴 전에는 `!on && c.keep` 이라 **킵이 켜져 있을 때만** 되돌렸다.
@@ -10666,6 +10713,11 @@ function App() {
             keepPaidLast: 0,
             shipPaid: left > 0
           });
+          /* ⭐⭐ 안전장치 209 — 📌 **사장님 지적의 핵심**:
+                「잘못 누른다거나 누른걸 풀어버리면 시점이 오염돼버리니까」.
+             ⭐ 그래서 되돌리기를 **금액과 «같은 자리»**에 둔다 — 남은 돈이 0이면 표식도 지운다.
+                그러면 「돈은 0인데 표식만 남은」 상태가 «생길 수 없다». */
+          if (left === 0) clearKeepPaidRef(n);
         } else {
           setCust(n, {
             paid: on
@@ -10735,6 +10787,8 @@ function App() {
           keepPaidLast: keepAsk.got,
           shipPaid: true
         });
+        /* ⭐⭐ 안전장치 209 — 입금 칩과 «같은 규칙». 판정을 두 곳에 두지 않는다. */
+        markKeepPaidRef(list);
         setKeepAsk(null);
         showToast(`✓ 「${n}」 킵 입금 ${won(keepAsk.got)}원 기록 — 다음 발송 때 배송비는 받지 않습니다`);
       }
