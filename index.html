@@ -3292,6 +3292,24 @@ function App() {
   const warnKeepLocked = t => {
     showToast(`🔒 「${t.nick}」 ${t.name} — 킵으로 입금까지 받은 주문입니다. 「잠금해제」를 먼저 눌러 주세요`);
   };
+
+  /* ⭐⭐ 안전장치 208 (2026-08-31 26차) — 「잠겼는데 받은 돈이 0원」을 «드러낸다».
+     🔴 잠금 판정은 `keeps.customers` 를, 정산서는 «오늘 화면» customers 를 본다.
+        두 곳이 어긋나면 «잠기기는 하는데 받은 돈이 사라진» 상태가 된다.
+        2026-08-31 실서버 「가실이」가 정확히 그랬다 — keepPaid 0 · keepLock 1건 ·
+        08-28 에는 14,000원이 그대로. 사장님은 정산서에서야 알아채셨다.
+     ⭐ 위의 세 수정으로 «그 상태가 생기지 않게» 했지만, 방어는 한 겹으로 두지 않는다.
+        혹시 다른 경로로 어긋나면 «조용히 지나가지 않고» 사장님께 알린다.
+     ⚠ 잠긴 사람이 있을 때만 본다. 미입금 킵은 원래 0원이고 잠기지도 않는다 — 헛경고가 안 뜬다. */
+  useEffect(() => {
+    if (!loaded) return;
+    const bad = [...new Set(orders.filter(o => o.keepLock).map(o => o.nick))].filter(nk => (Number(cust(nk).keepPaid) || 0) === 0);
+    if (!bad.length) return;
+    const t = setTimeout(() => {
+      showToast(`⚠ 「${bad.slice(0, 3).join(", ")}」${bad.length > 3 ? " 외" : ""} — ` + `킵 잠금은 걸렸는데 «받은 돈»이 0원입니다. ` + `지난 방송 정산서에서 받으신 금액을 확인해 주세요`);
+    }, 2500);
+    return () => clearTimeout(t);
+  }, [orders, customers, loaded]);
   const tapProduct = p => addResolvedOrder(p.id, p.name, p.price);
   // 주문 추가 코어 (이름·금액 확정본). 옵션 상품 드릴다운도 이걸 사용.
   const addResolvedOrder = (productId, name, price) => {
@@ -3410,6 +3428,20 @@ function App() {
       canceled: !o.canceled
     } : o));
   };
+  /* ⭐⭐ 안전장치 208 (2026-08-31 26차 · 미결 44 · **사장님 실사용 보고**)
+     🔴 「잠금해제 → 삭제」한 킵 주문을 «자동 이월»이 곧바로 다시 가져왔다. 그것도 «잠긴 채».
+        이월은 「orders 에 그 id 가 없으면 아직 안 가져온 것」으로 판단하는데,
+        지우면 id 가 빠지므로 «안 가져온 것»이 되어 되살아난다.
+        되살아난 줄이 «맨 아래»(방금 담은 자리)에 🔒 로 붙어서
+        사장님 눈에는 「새로 추가한 상품이 잠겼다」로 보였다.
+     ⭐ 「이 날짜에서 «일부러» 지운 킵」을 기억해 이월 대상에서 뺀다.
+        23차 191 이 「화면에 없는 킵은 «안 불러온 것»이지 «해제한 것»이 아니다」로 정한 것과
+        같은 축이다 — 그때 못 가른 것이 **「지운 것」**이었다.
+     ⚠ 날짜가 바뀌면 비운다 — 다른 날짜에서는 다시 불러올 수 있어야 한다. */
+  const keepDropped = useRef(new Set());
+  useEffect(() => {
+    keepDropped.current = new Set();
+  }, [bdate]);
   const delOrder = id => {
     const lk = keepLockedOrder(id);
     if (lk) {
@@ -3417,6 +3449,8 @@ function App() {
       return;
     }
     const target = orders.find(o => o.id === id);
+    /* ⚠ 킵에서 온 줄(잠금을 풀고 지우는 것 포함)만 기억한다 — 오늘 새로 담은 줄은 이월 대상이 아니다. */
+    if (target && (keeps.orders || []).some(k => k.id === id)) keepDropped.current.add(id);
     const rest = orders.filter(o => o.id !== id);
     setOrders(rest);
     if (target) clearPaidIfGone([target.nick], rest);
@@ -7325,7 +7359,10 @@ function App() {
       const mine = new Set(settleNickList);
       /* ⭐⭐ 안전장치 204 — 「불러오기」 버튼과 «같은 판정»을 쓴다.
             여기를 빼먹으면 「손님이 새로 주문해서 따라온 킵」만 안 잠기는 구멍이 된다. */
-      const add = withKeepLock((keeps.orders || []).filter(o => mine.has(o.nick) && !have.has(o.id)));
+      /* ⭐⭐ 안전장치 204 — 「불러오기」 버튼과 «같은 판정»을 쓴다.
+            여기를 빼먹으면 「손님이 새로 주문해서 따라온 킵」만 안 잠기는 구멍이 된다.
+         ⭐⭐ 안전장치 208 (26차) — 이 날짜에서 «일부러 지운» 킵은 다시 가져오지 않는다. */
+      const add = withKeepLock((keeps.orders || []).filter(o => mine.has(o.nick) && !have.has(o.id) && !keepDropped.current.has(o.id)));
       if (!add.length) return;
       const nicks = [...new Set(add.map(o => o.nick))];
       setOrders(prev => {
@@ -7518,6 +7555,11 @@ function App() {
     /* ⭐⭐ 안전장치 204 — 킵으로 «입금까지 받은» 분의 주문은 «잠근 채» 올린다.
           미입금 킵은 지금과 똑같이 그대로 올라온다 (사장님: 「미입금이라면 그냥 그대로」). */
     const add = withKeepLock(keepPending.filter(o => !exist.has(o.id)));
+    /* ⭐⭐ 안전장치 208 (26차) — 「불러오기」는 «사장님이 일부러» 누르는 것이라
+          지웠던 킵도 다시 가져온다. 그 기억을 여기서 지운다.
+       ⚠ 자동 이월(useEffect)은 «자동»이라 안 가져온다 — 그 둘을 가르는 것이 이 방어의 핵심이다.
+          「사람이 누른 것」과 「앱이 알아서 한 것」을 같게 다루면 지운 것이 조용히 돌아온다. */
+    add.forEach(o => keepDropped.current.delete(o.id));
     setOrders(prev => [...prev, ...add]);
     setCustomers(prev => {
       const next = {
@@ -7525,10 +7567,28 @@ function App() {
       };
       keepPendingNicks.forEach(nk => {
         const src = (keeps.customers || {})[nk];
-        if (src && !next[nk]) next[nk] = {
+        /* ⭐⭐ 안전장치 208 (2026-08-31 26차 · 미결 44 · **사장님 실사용 보고**)
+           🔴 전에는 `!next[nk]` 라, 오늘 그 손님 «칸이 이미 있으면» 킵 cust 를 «통째로 건너뛰었다».
+              그러면 킵으로 받아둔 돈(keepPaid)과 「배송비 이미 받음」(shipPaid)이 **안 따라온다.**
+              잠금(withKeepLock)은 `keeps.customers` 를 보므로 «잠기기는 하는데» 돈은 0이 된다.
+              → 실서버 2026-08-31 「가실이」가 정확히 그 상태였다 (keepPaid 0 · keepLock 1건).
+                08-28 에는 14,000원이 그대로 있는데 오늘 화면으로 «안 따라왔다».
+                그래서 지난 킵 금액이 오늘 청구액과 합산돼 보였다 (사장님 보고 그대로).
+           ⭐ 「자동 이월」이 쓰는 규칙과 **«같은 규칙»**이다 (money-rules §1 — 판정을 두 곳에 두지 않는다).
+              오늘 값이 우선이되, **돈이 걸린 칸은 지난 킵 값을 잃지 않는다.**
+           ⚠ 돈을 «지어내지 않는다» — 둘 다 0이면 0이다. 미입금 킵은 그대로 0으로 남는다. */
+        const cur = next[nk] || {};
+        /* ⚠ `src` 가 없으면 «아무것도 하지 않는다» — 원래 코드의 가드다.
+              킵 목록에 그 손님 cust 가 없을 수 있고, 그때 빈 값으로 덮으면 오늘 값이 날아간다. */
+        if (!src) return;
+        next[nk] = {
           ...EMPTY_CUST,
           ...src,
-          keep: true
+          ...cur,
+          keep: true,
+          keepPaid: Number(cur.keepPaid) || Number(src.keepPaid) || 0,
+          keepPaidLast: Number(cur.keepPaidLast) || Number(src.keepPaidLast) || 0,
+          shipPaid: !!(cur.shipPaid || src.shipPaid)
         };
       });
       return next;
@@ -10570,7 +10630,13 @@ function App() {
             shipPaid: true
           });
           showToast(`✓ 「${n}」 킵 입금 ${won(got)}원 기록 — 다음 발송 때 배송비는 받지 않습니다`);
-        } else if (!on && c.keep) {
+          /* ⭐⭐ 안전장치 208 (2026-08-31 26차 · 미결 44 · **사장님 실사용 보고**)
+             🔴 전에는 `!on && c.keep` 이라 **킵이 켜져 있을 때만** 되돌렸다.
+                사장님이 「킵」을 «먼저» 끄고 그다음 입금을 푸시면
+                기입금이 «그대로 남았다» — 「입금을 풀어도 완전히 기입금으로 돼버린다」.
+             ⭐ 되돌릴 «금액이 남아 있으면» 킵 여부와 무관하게 되돌린다.
+                (킵을 껐다고 이미 기록한 돈이 사라져야 할 이유가 없다) */
+        } else if (!on && (c.keep || (Number(c.keepPaid) || 0) > 0)) {
           /* 입금을 취소하면 이번에 기록한 금액도 되돌린다.
              ⚠ 「켤 때 더한 금액」을 기록해 두고 그것을 뺀다 (5-32).
                 sum + shipFee 로 추정하면 픽업·무료배송·배송비기입금 손님에게서
