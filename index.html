@@ -3697,10 +3697,25 @@ function App() {
     // ⚠ 킵으로 이미 받은 금액이 있으면 빼고 「추가로 입금하실 금액」만 안내한다.
     //    킵 입금에는 배송비가 포함돼 있어 배송비를 또 받으면 안 된다 (5-19).
     const already = Math.max(0, Number(c.keepPaid) || 0);
+    /* ⭐⭐ 안전장치 208 (2026-08-31 26차 · **사장님 실사용 보고** — 배포 «뒤» 정산서에서 잡으셨다)
+       🔴 `already`(킵으로 받은 돈)에는 **배송비가 들어 있다**(`keepGot` = 상품 + 배송비).
+          그런데 그때 `shipPaid` 도 함께 켜져 `feeOf` 가 **0**을 준다.
+          그대로 `sum + fee - already` 를 하면 **배송비를 «두 번» 뺀다.**
+          실서버 실측 — 상품 15,800 + 0 − 14,000 = 1,800원.
+          맞는 값은 **5,800원**이다(상품 15,800 중 상품분 10,000 을 이미 받았다).
+       ⭐ 표시와 계산을 «한 벌»로 맞춘다 — **배송비를 되살려 적고** 받은 돈 전액을 뺀다.
+            상품 15,800 + 배송비 4,000 − 받은 14,000 = 5,800   ← 손님 눈에도 산수가 맞는다
+       ⚠ `feeOf` 는 **안 건드린다** — 상단바·결산·요약본·엑셀은 그대로다 (money-rules §1).
+          바뀌는 것은 «정산서 안내문의 산수» 한 곳이고, 매출 집계는 한 줄도 안 바뀐다.
+       ⚠ **`shipPaid` 때문에 면제된 경우에만** 되살린다. 픽업·무료배송·전체환불로 면제된 분은
+          받은 돈에 배송비가 «없어서», 되살리면 배송비를 «더» 받게 된다(과잉 차단 · 6절 대조군).
+       ⚠ 보낼 것이 없으면(`hasNewShipment` 거짓) 배송비 자체가 없다 — 그때도 되살리지 않는다. */
+    const feeByKeep = !!(already > 0 && fee === 0 && c.shipPaid && !c.pickup && !c.freeShip && !c.refundAll && hasNewShipment(n));
+    const feeShown = feeByKeep ? shipFee : fee;
     let total;
     if (already > 0) {
-      const rest = Math.max(0, sum + fee - already);
-      total = `\n상품 합계        ${won(sum)}원` + (fee > 0 ? `\n합배송비         ${won(fee)}원` : `\n합배송비         0원 (${why})`) + `\n이미 입금하신 금액 -${won(already)}원${c.shipPaid ? " (배송비 포함)" : ""}` + `\n──────────────` + (rest > 0 ? `\n추가로 입금하실 금액 ${won(rest)}원` : `\n추가로 입금하실 금액은 없습니다. 바로 발송해 드리겠습니다.`);
+      const rest = Math.max(0, sum + feeShown - already);
+      total = `\n상품 합계        ${won(sum)}원` + (feeShown > 0 ? `\n합배송비         ${won(feeShown)}원` : `\n합배송비         0원 (${why})`) + `\n이미 입금하신 금액 -${won(already)}원${c.shipPaid ? " (배송비 포함)" : ""}` + `\n──────────────` + (rest > 0 ? `\n추가로 입금하실 금액 ${won(rest)}원` : `\n추가로 입금하실 금액은 없습니다. 바로 발송해 드리겠습니다.`);
     } else {
       total = fee > 0 ? `총 합계 금액은 ${won(sum)}원+합배송비 ${won(fee)}원 = ${won(sum + fee)}원 입니다.` : `총 합계 금액은 ${won(sum)}원 입니다. (${why} · 배송비 없음)`;
     }
