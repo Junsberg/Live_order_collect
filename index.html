@@ -792,7 +792,18 @@ const TRACK_HEADER = `안녕하세요! 사자창고입니다.
 function App() {
   const [tab, setTab] = useState("order");
   const [loaded, setLoaded] = useState(false);
-  const [intro, setIntro] = useState(true);
+  /* 🦁 안전장치 215 (2026-09-02 28차 · 미결 48 · 📌 사장님 지시)
+     📌 「인트로 우리 사자창고 나오는거 그거 일단 빼자. **완전히 삭제해버리진 말고**」.
+     ⭐ 그래서 «스위치 한 줄»이다 — `true` 한 글자로 되돌아온다. 코드·CSS·그림은 «그대로 남긴다».
+     🟢 사자 그림은 안 없어진다 — `__LION_INTRO` 는 «로그인 화면»에도 쓰인다.
+     ⭐ 실측 — 앱이 2,400ms 에 페이드, 3,100ms 에 제거했다. 사장님·매니저가 앱을 열 때마다
+        그 **3.1초**를 기다리셨다. 이득은 오직 «실사용»이다.
+     🔴🔴 검사 하네스(`srvharness.js` `bootWait` ①)를 «반드시 함께» 고쳐야 한다 —
+        인트로가 영영 안 뜨면 그 자리가 매번 3초를 헛기다린다.
+        실측 — `t_reg1`(newPage 9회) 50초 → **62초**(+12초). 그래서 `window.__INTRO_ON` 으로 알린다. */
+  const INTRO_ON = false;
+  if (typeof window !== "undefined") window.__INTRO_ON = INTRO_ON;
+  const [intro, setIntro] = useState(INTRO_ON);
 
   /* ---------- 로그인 (서버 3단계) ----------
      auth = null 확인 전 · false 로그아웃 상태 · { email, label, isOwner } 로그인됨 */
@@ -5593,6 +5604,19 @@ function App() {
     }
     if (rejectDupTrk.length) {
       showToast(`⚠ 이미 붙어 있는 운송장번호라 새 줄을 만들지 않았습니다 ${rejectDupTrk.length}명: ` + rejectDupTrk.slice(0, 3).join(", ") + (rejectDupTrk.length > 3 ? " 외" : ""));
+      /* ⭐⭐ 안전장치 216 (2026-09-02 28차 · 미결 43 · 📌 사장님 결정)
+         📦 **합포장** — 「사남매맘」과 「아라(사남매맘)」처럼 «대신 주문»한 분은 배송지가 같아
+            운송장이 «하나»다. 그런데 위 방어(07-31 운임 11,200원 과다 사고)가 새 줄을 막는다.
+         🔴 **방어는 «그대로 둔다»** — 자동으로는 여전히 안 만든다. 그 사고가 다시 나면 안 된다.
+         ⭐ 대신 **막힌 사람을 «화면에 남겨»** 사장님이 「합포장으로 묶기」를 누르실 수 있게 한다.
+            지금까지는 토스트로 알리고 끝이라 «누를 것이 없었다».
+         📌 사장님 결정 — 「업로드 때 뜨는 경고에서 «이 사람 묶기» 버튼」.
+         📌 **배송비는 앱이 «안» 건드린다** — 지금처럼 사장님이 손으로 무료배송을 지정하신다.
+            그래서 `CALC_VER` 도 «안» 올린다. 운임은 26차 210 이 이미 「같은 번호는 한 번만」이다. */
+      setTrkPack({
+        label,
+        items: data.filter(d => rejectDupTrk.includes(d.nick))
+      });
     }
     if (renotify.length) {
       showToast(`⚠ 안내 보낸 뒤 운송장이 바뀐 사람 ${renotify.length}명 — 다시 안내해주세요: ` + renotify.slice(0, 3).map(x => x.nick).join(", ") + (renotify.length > 3 ? " 외" : ""));
@@ -5630,6 +5654,7 @@ function App() {
      carrier 가 비면 롯데·CJ 어느 다운로드에도 안 담기기 때문. */
   const [trkEdit, setTrkEdit] = useState(null); // { nick, value, carrier }
   const [trkConflict, setTrkConflict] = useState(null); // 재업로드 충돌 확인 대기
+  const [trkPack, setTrkPack] = useState(null); // 📦 합포장 확인 대기 (안전장치 216)
 
   // ⚠ 박스가 여러 개면 «그 박스 줄»만 고쳐야 한다 (23차 · 미결 28)
   const openTrkEdit = d => setTrkEdit({
@@ -5702,6 +5727,44 @@ function App() {
     });
     setTrkEdit(null);
     showToast(val ? `✓ 「${nick}」 운송장 ${before ? `${fmtTrk(before)} → ` : ""}${fmtTrk(val)}${cur.carrier ? "" : ` (${carrier})`}` : `⚠ 「${nick}」 운송장번호를 지웠습니다 (${fmtTrk(before)})`);
+  };
+
+  /* 📦 안전장치 216 — 사장님이 «명시»한 합포장만 같은 번호로 줄을 만든다.
+     ⚠ 여기서 «금액은 한 푼도» 안 건드린다. 배송비는 사장님이 손으로 지정하신다. */
+  const resolveTrkPack = doPack => {
+    const pk = trkPack;
+    if (!pk) return;
+    if (doPack) {
+      setShipData(prev => {
+        const next = [...prev];
+        pk.items.forEach(d => {
+          if (next.some(x => x.nick === d.nick && normTrk(x.tracking) === normTrk(d.tracking))) return;
+          next.push({
+            ...d,
+            seq: 1,
+            box: 1,
+            manual: true
+          }); // manual — 다음 업로드에 안 덮인다
+        });
+        return next;
+      });
+      setCustomers(c => {
+        const next = {
+          ...c
+        };
+        pk.items.forEach(d => {
+          if (next[d.nick]) next[d.nick] = {
+            ...next[d.nick],
+            tracking: d.tracking
+          };
+        });
+        return next;
+      });
+      showToast(`📦 합포장으로 ${pk.items.length}명을 같은 운송장에 묶었습니다 ` + `— 배송비는 «직접» 정해주세요 (한 분만 받고 나머지는 무료배송)`);
+    } else {
+      showToast(`✓ 묶지 않았습니다 — 줄을 만들지 않았습니다`);
+    }
+    setTrkPack(null);
   };
   const resolveTrkConflict = overwrite => {
     const cf = trkConflict;
@@ -11291,7 +11354,40 @@ function App() {
     value: shipSearch,
     onChange: e => setShipSearch(e.target.value),
     onKeyDown: endEdit
-  })), trkConflict && /*#__PURE__*/React.createElement("div", {
+  })), trkPack && /*#__PURE__*/React.createElement("div", {
+    className: "card trkconflict"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle",
+    style: {
+      margin: 0
+    }
+  }, "📦 같은 운송장번호라 줄을 만들지 않았습니다 — ", trkPack.items.length, "명"), /*#__PURE__*/React.createElement("div", {
+    className: "sub"
+  }, /*#__PURE__*/React.createElement("b", null, "대신 주문하신 분"), "이면 배송지가 같아 운송장이 하나입니다 (합포장). 묶으시면 아래 분들에게 ", /*#__PURE__*/React.createElement("b", null, "같은 번호"), "로 줄이 생깁니다.", /*#__PURE__*/React.createElement("br", null), "⚠ ", /*#__PURE__*/React.createElement("b", null, "배송비는 직접 정해주세요"), " — 한 분만 받고 나머지는 「무료배송」으로 해주시면 됩니다. 앱이 금액을 바꾸지 않습니다."), /*#__PURE__*/React.createElement("div", {
+    className: "tblwrap",
+    style: {
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    className: "tbl"
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "닉네임"), /*#__PURE__*/React.createElement("th", null, "이름"), /*#__PURE__*/React.createElement("th", null, "운송장"))), /*#__PURE__*/React.createElement("tbody", null, trkPack.items.map(it => /*#__PURE__*/React.createElement("tr", {
+    key: it.nick
+  }, /*#__PURE__*/React.createElement("td", {
+    className: "whname"
+  }, it.nick), /*#__PURE__*/React.createElement("td", null, it.name || "-"), /*#__PURE__*/React.createElement("td", {
+    className: "trackcell"
+  }, fmtTrk(it.tracking))))))), /*#__PURE__*/React.createElement("div", {
+    className: "uprow",
+    style: {
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn primary packbtn",
+    onClick: () => resolveTrkPack(true)
+  }, "📦 합포장으로 묶기"), /*#__PURE__*/React.createElement("button", {
+    className: "btn",
+    onClick: () => resolveTrkPack(false)
+  }, "묶지 않기"))), trkConflict && /*#__PURE__*/React.createElement("div", {
     className: "card trkconflict"
   }, /*#__PURE__*/React.createElement("div", {
     className: "cardtitle",
