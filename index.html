@@ -2879,6 +2879,33 @@ function App() {
   // 킵 주문건 (화면·목록용)
   const keepOrders = useMemo(() => orders.filter(o => !o.canceled && !o.done && customers[o.nick] && customers[o.nick].keep), [orders, customers]);
   const keepNicks = useMemo(() => [...new Set(keepOrders.map(o => o.nick))], [keepOrders]);
+  /* ⭐⭐ 2026-09-03 29차 (안전장치 220 · 미결 51) — 「상품 가격을 바꿔도 «지난 킵» 줄은 안 바뀐다」
+     🔴 사장님 실사용 보고(2026-09-01) — 「블루」 곱창전골이 08-28·08-31 에 7,900 이었는데 09-01 에
+        판매가를 6,900 으로 내리시자 **넘어온 킵 줄까지 6,900** 이 됐다. 상품 합계가 1,000원 줄어
+        이미 받은 58,500 과 어긋났다(정산서 「-1,000원」).
+     📌 사장님 규칙 — 「**당일 방송**에 담은 주문은 새 가격을 따라가는 게 맞다.
+                      **지난 킵**은 **구매 시점 가격**을 지켜야 한다」
+     📌 사장님 결정 「가」안(2026-09-03) — 「지난 킵으로 보이는 줄은 «일단 그대로 두고»,
+        화면에 「이 N건도 바꾸기」 버튼을 남긴다」. (나)「전부 바꾸고 되돌리기」는 «안 골랐다» —
+        되돌리기 전에 자동저장이 서버로 나가 08-31 사고가 잠깐 재현된다.
+     ⚠⚠ **「지난 킵 줄」을 100% 정확히 가르는 방법은 «없다»** — 29차에 실서버 776건 전수로 갈랐다.
+        · `ts` 로만 가르면 **날짜 옮기기**에서 틀린다(「타이탄」 8건 — 이월이 아닌데 ts 는 과거)
+        · 「더 이른 날짜에 같은 id 가 있는가」로 가르면 **과거 날짜에 나중에 꽂힌 줄**에서 틀린다(「썬」)
+        → **넓게 잡아 «묻는다».** 판정이 정하지 않고 «사람»이 정한다 (216 합포장과 같은 축).
+     ⚠ 넓게 잡으므로 «오늘 담은 킵 손님» 줄도 후보에 들어간다. 그 줄은 안 바뀐 채 남고 버튼으로 함께 바꾼다.
+        **놓치는 것보다 한 번 더 묻는 편이 낫다** — 놓치면 돈이 조용히 틀어진다.
+     ⚠ 판정은 «여기 한 곳»이다. 다른 곳에서 다시 세지 마라 (money-rules §1).
+     검사: t_price.js · 역검증 rv29B1~B3 */
+  const holdsPrice = o => {
+    if (!o) return false;
+    if (o.keepLock) return true; // 킵으로 입금까지 받은 줄 (204)
+    if (o.done) return true; // 이미 보낸 줄 — 매출이 흔들린다
+    if (customers[o.nick] && customers[o.nick].keep) return true; // 킵 손님 줄
+    const dayStart = new Date(`${bdate}T00:00:00+09:00`).getTime(); // 보는 날짜 00:00 KST
+    return Number(o.ts) > 0 && Number(o.ts) < dayStart; // 이 방송날 «이전»에 담긴 줄
+  };
+  /* 「무엇을 안 바꿨는가」를 화면에 남긴다 — 토스트로 알리고 끝내면 누를 것이 없다(216 교훈). */
+  const [priceHold, setPriceHold] = useState(null); // { pid, name, from, to, ids, nicks }
   /* ⭐⭐ 2026-09-03 29차 (안전장치 219 · 미결 30) — 「이 킵은 어느 날짜로 넘어갔는가」를 서버에서 찾아 주문 줄에 붙인다.
      🔴 23차(191·191-b)는 «되살아나는 것»만 막았고, 원본 날짜에는 「넘어감」 흔적이 없었다.
      ⭐ 28차 실측 — 킵 주문은 다음 방송으로 넘어가도 `id`·`ts` 가 그대로다(08-27 「사남매맘」 5건 중 4건이
@@ -10101,7 +10128,29 @@ function App() {
   }, "불러오기"), /*#__PURE__*/React.createElement("button", {
     className: "btn sm ghost" + (shelfDelArm === it.id ? " danger" : ""),
     onClick: () => delFromShelf(it)
-  }, shelfDelArm === it.id ? "한 번 더" : "삭제")))), prodImport && /*#__PURE__*/React.createElement("div", {
+  }, shelfDelArm === it.id ? "한 번 더" : "삭제")))), priceHold && /*#__PURE__*/React.createElement("div", {
+    className: "pricehold"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "phmsg"
+  }, "🏷 ", /*#__PURE__*/React.createElement("b", null, "「", priceHold.name, "」"), " ", won(priceHold.from), " → ", /*#__PURE__*/React.createElement("b", null, won(priceHold.to), "원"), " ·", " ", /*#__PURE__*/React.createElement("b", null, "지난 킵 ", priceHold.ids.length, "건은 안 바꿨습니다"), " ", "(", priceHold.nicks.slice(0, 4).join(", "), priceHold.nicks.length > 4 ? " 외" : "", ")", /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "담을 때 가격을 지킵니다. 그때 받은 돈과 어긋나지 않게 하기 위해서입니다.")), /*#__PURE__*/React.createElement("button", {
+    className: "btn primary sm",
+    onClick: () => {
+      takeSnap(`가격 변경 — 지난 킵 ${priceHold.ids.length}건도 바꾸기 직전 (${priceHold.name})`);
+      const ids = new Set(priceHold.ids);
+      const np = priceHold.to;
+      setOrders(os => os.map(o => ids.has(o.id) ? {
+        ...o,
+        price: np
+      } : o));
+      showToast(`🏷 지난 킵 ${priceHold.ids.length}건도 ${won(np)}원으로 바꿨습니다`);
+      setPriceHold(null);
+    }
+  }, "이 ", priceHold.ids.length, "건도 바꾸기"), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm",
+    onClick: () => setPriceHold(null)
+  }, "닫기")), prodImport && /*#__PURE__*/React.createElement("div", {
     className: "prodimport"
   }, /*#__PURE__*/React.createElement("div", {
     className: "pimsg"
@@ -10321,15 +10370,42 @@ function App() {
       value: p.price,
       onChange: e => {
         const newPrice = parseInt(e.target.value, 10) || 0;
-        setOrders(os => os.map(o => o.productId === p.id || !o.productId && o.name === p.name && o.price === p.price ? {
-          ...o,
-          productId: p.id,
-          price: newPrice
-        } : o));
+        /* ⭐⭐ 안전장치 220 (미결 51) — 「지난 킵」으로 보이는 줄은 «안 바꾸고» 화면에 남긴다.
+           ⚠ 대상을 고르는 조건은 옛 코드 그대로다 — 바꾼 것은 「그중 무엇을 덮는가」뿐이다.
+           ⚠ 안 바꾸는 줄에도 `productId` 는 붙인다 — 안 붙이면 가격이 달라져 다음부터
+              `!o.productId && o.price === p.price` 로 «못 찾는다»(실서버에 productId 없는 줄이 있다). */
+        const isTarget = o => o.productId === p.id || !o.productId && o.name === p.name && o.price === p.price;
+        const held = orders.filter(o => isTarget(o) && holdsPrice(o));
+        setOrders(os => os.map(o => {
+          if (!isTarget(o)) return o;
+          return holdsPrice(o) ? {
+            ...o,
+            productId: p.id
+          } : {
+            ...o,
+            productId: p.id,
+            price: newPrice
+          };
+        }));
         setProducts(ps => ps.map(x => x.id === p.id ? {
           ...x,
           price: newPrice
         } : x));
+        if (held.length) {
+          /* ⚠ 타이핑 중 한 글자마다 불린다. 「원래 가격(from)」과 대상 목록은 «첫 번째»를 지키고
+                바뀐 값(to)만 갱신한다 — 안 그러면 from 이 방금 친 값으로 덮여 안내가 거짓말이 된다. */
+          setPriceHold(prev => prev && prev.pid === p.id ? {
+            ...prev,
+            to: newPrice
+          } : {
+            pid: p.id,
+            name: p.name,
+            from: p.price,
+            to: newPrice,
+            ids: held.map(o => o.id),
+            nicks: [...new Set(held.map(o => o.nick))]
+          });
+        }
       }
     }), /*#__PURE__*/React.createElement("input", {
       className: "in qty bare",
@@ -13124,6 +13200,9 @@ const CSS = `
       아직 «안 보낸» 건이고, 오히려 이번에 보내실 건이다. 취소선도 «긋지 않는다». */
 .orow.keeplock { background: #fff8ec; box-shadow: inset 3px 0 0 #e5a13a; }
 .keeplockbadge { background: #fff3e0; color: #a85c00; }
+.pricehold { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border: 1px solid #ffd28a; background: #fff8ec; border-radius: 10px; padding: 10px 12px; margin: 8px 0 12px; }
+.pricehold .phmsg { flex: 1; min-width: 220px; font-size: 13px; line-height: 1.5; }
 .movedbadge { background: #e8f0fe; color: #1a4fa0; }        /* 안전장치 219 — 넘어갔지만 미출고 */
 .movedbadge.moveddone { background: #e6f4ea; color: #1e6b3a; } /* 안전장치 219 — 넘어가서 출고됨 */
 .seqbadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
