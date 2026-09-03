@@ -2879,6 +2879,69 @@ function App() {
   // 킵 주문건 (화면·목록용)
   const keepOrders = useMemo(() => orders.filter(o => !o.canceled && !o.done && customers[o.nick] && customers[o.nick].keep), [orders, customers]);
   const keepNicks = useMemo(() => [...new Set(keepOrders.map(o => o.nick))], [keepOrders]);
+  /* ⭐⭐ 2026-09-03 29차 (안전장치 219 · 미결 30) — 「이 킵은 어느 날짜로 넘어갔는가」를 서버에서 찾아 주문 줄에 붙인다.
+     🔴 23차(191·191-b)는 «되살아나는 것»만 막았고, 원본 날짜에는 「넘어감」 흔적이 없었다.
+     ⭐ 28차 실측 — 킵 주문은 다음 방송으로 넘어가도 `id`·`ts` 가 그대로다(08-27 「사남매맘」 5건 중 4건이
+        08-28 에 «같은 id»로 출고완료). 그래서 컬럼도 표식도 «새로 만들 필요가 없다» —
+        다른 날짜의 orders 를 id 로 대조하면 된다. 서버 함수 `find_moved_orders(p_date, p_ids)`(안전장치 218)가 그것을 한다.
+     📌 사장님 결정 둘 — ① 표시 자리는 「주문 줄마다 «→ 08-28 출고됨»」 ② 서버에서 «다른 날짜를 찾아» 표시(지난 건도 잡힌다).
+     ⭐ 「넘어감」과 「출고됨」은 «다르다» — `9sg9bb9`(매력철철)는 넘어갔지만 출고 안 됨. 문구를 나눈다.
+     ⚠ «오늘» 날짜에서는 «부르지 않는다» — 방송 중 통신을 늘리지 않는다. 지난 날짜를 «열 때» 한 번이다.
+        (「지난 날짜」 판정은 킵 동기화 effect(안전장치 191)·상단바 daywarn 과 같은 `bdate !== todayISO()` 한 벌이다 — 새 판정을 만들지 않는다)
+     ⚠ 실패해도 앱은 안 멈춘다 — 표식이 없을 뿐이다. 토스트도 띄우지 않는다(지난 날짜를 «보기만» 하는 자리다).
+     ⚠ 서버 함수는 «가장 늦은 날짜» 하나만 준다. 그 날짜가 보는 날짜보다 «앞»이면 그것은 «출처»지 «행선지»가 아니다 →
+        여기서 거른다(08-28 → 08-31 → 09-01 로 세 방송을 건넌 「블루」 8건이 그 경우다).
+     ⚠ 저장 내용(orders)에는 «아무것도» 안 쓴다 — 화면 표시용 map 이다. 검사: t_moved.js */
+  const [movedMap, setMovedMap] = useState({});
+  const movedKeyRef = useRef("");
+  useEffect(() => {
+    if (!loaded || !serverOn()) return;
+    if (bdate === todayISO()) {
+      movedKeyRef.current = "";
+      setMovedMap(m => Object.keys(m).length ? {} : m);
+      return;
+    }
+    if (srvSyncedDate !== bdate) return; // 이 날짜의 서버 내용이 화면에 «적용된 뒤»에만
+    const ids = keepOrders.map(o => o.id).filter(Boolean).sort();
+    const key = bdate + "|" + ids.join(",");
+    if (movedKeyRef.current === key) return; // 같은 날짜·같은 킵이면 다시 안 부른다
+    movedKeyRef.current = key;
+    if (!ids.length) {
+      setMovedMap(m => Object.keys(m).length ? {} : m);
+      return;
+    }
+    (async () => {
+      const c = sb();
+      if (!c) return;
+      try {
+        const {
+          data,
+          error
+        } = await c.rpc("find_moved_orders", {
+          p_date: bdate,
+          p_ids: ids
+        });
+        if (movedKeyRef.current !== key) return; // 기다리는 사이 날짜·킵이 바뀌었다
+        if (error || !Array.isArray(data)) {
+          movedKeyRef.current = "";
+          return;
+        } // 조용히 — 다음에 다시 시도할 수 있게 열어 둔다
+        const m = {};
+        data.forEach(r => {
+          if (!r || !r.order_id || !r.moved_date) return;
+          if (String(r.moved_date) <= bdate) return; // 보는 날짜보다 앞 = 출처
+          m[r.order_id] = {
+            date: String(r.moved_date),
+            done: !!r.done,
+            nick: r.moved_nick || ""
+          };
+        });
+        setMovedMap(m);
+      } catch (e) {
+        if (movedKeyRef.current === key) movedKeyRef.current = "";
+      }
+    })();
+  }, [bdate, loaded, auth, srvSyncedDate, keepOrders]);
   /* ⚠ 「결산할 것이 있는가」 판정은 여기 한 곳만 쓴다 (money-rules §1 · 2026-08-04 7차).
         전에는 결산·마감 버튼이 `activeOrders.length === 0` 만 봤다. activeOrders 는
         취소·출고완료·킵을 «전부» 뺀 「지금 보낼 것」이라, 아래 두 날이 통째로 막혔다.
@@ -10371,6 +10434,7 @@ function App() {
   }, "아직 담은 상품이 없습니다 · 아래에서 상품을 고르세요") : orders.filter(o => o.nick === nick.trim()).map(o => /*#__PURE__*/React.createElement(OrderRow, {
     key: o.id,
     o: o,
+    moved: movedMap[o.id],
     chgQty: chgQty,
     toggleCancel: toggleCancel,
     delOrder: delOrder,
@@ -12200,6 +12264,7 @@ function App() {
       잘못 마감된 건은 「잠금해제」로 되돌릴 수 있다. */
 function OrderRow({
   o,
+  moved,
   chgQty,
   toggleCancel,
   delOrder,
@@ -12232,7 +12297,10 @@ function OrderRow({
   }, "📦 출고완료", o.doneSeq > 1 ? ` ${o.doneSeq}차` : ""), !done && klock && /*#__PURE__*/React.createElement("span", {
     className: "lockbadge keeplockbadge",
     title: "킵으로 이미 입금까지 받은 주문입니다 — 「잠금해제」 후에 고치거나 지울 수 있습니다"
-  }, "🔒 킵 입금완료")), /*#__PURE__*/React.createElement("span", {
+  }, "🔒 킵 입금완료"), !done && moved && moved.date && /*#__PURE__*/React.createElement("span", {
+    className: "lockbadge movedbadge" + (moved.done ? " moveddone" : ""),
+    title: moved.done ? `이 킵은 ${moved.date} 방송으로 넘어가 출고까지 끝났습니다` : `이 킵은 ${moved.date} 방송으로 넘어갔지만 아직 출고되지 않았습니다`
+  }, "→ ", moved.date, " ", moved.done ? "출고됨" : "넘어감 · 미출고")), /*#__PURE__*/React.createElement("span", {
     className: "qtybox"
   }, /*#__PURE__*/React.createElement("button", {
     className: "qbtn",
@@ -13056,6 +13124,8 @@ const CSS = `
       아직 «안 보낸» 건이고, 오히려 이번에 보내실 건이다. 취소선도 «긋지 않는다». */
 .orow.keeplock { background: #fff8ec; box-shadow: inset 3px 0 0 #e5a13a; }
 .keeplockbadge { background: #fff3e0; color: #a85c00; }
+.movedbadge { background: #e8f0fe; color: #1a4fa0; }        /* 안전장치 219 — 넘어갔지만 미출고 */
+.movedbadge.moveddone { background: #e6f4ea; color: #1e6b3a; } /* 안전장치 219 — 넘어가서 출고됨 */
 .seqbadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   background: #eef2ff; color: #3b4bc9; font-weight: 700; }
 /* 📦 박스 뱃지 — 차수(파랑)와 «눈에 띄게 다른 색»으로 둔다. 헷갈리면 배송비를 또 받는다 (23차) */
