@@ -7492,6 +7492,161 @@ function App() {
       ver: srvSum.row.calc_ver
     };
   };
+
+  /* ⭐⭐ 안전장치 225 (2026-09-04 30차 · 미결 59 · 📌 사장님 요구) — 「주문이 하나도 없는 손님 칸」
+      🔴 실서버 실측 — 주문 0건인 손님 칸이 **38개**(14개 날짜) 남아 있었다.
+        32개는 «완전히 빈 칸»(닉네임만 치다 만 것)이라 해가 없지만,
+        6개는 «뭔가 적혀» 있고 그중 **2개는 받은 돈이 남아 있다**(「가나」 23,800원 · 08-20·08-21).
+     🔴 **09-04 사고의 「가실이 19,800원」과 «같은 모양»이다** — 주문을 지워도 손님 칸은 남고,
+        화면에는 «안 보이는데» 그분이 다시 주문하시면 「이미 입금하셨습니다」로 되살아나 **돈을 못 받는다**.
+     🔴 그리고 **지금까지는 앱에서 «지울 수 없었다»** — 주문이 0건이라 화면에 아예 안 뜬다.
+      📌 사장님 결정(2026-09-04) — **「알리기만 하고, 고른 것만 지운다」.**
+        앱이 저장을 «스스로» 고치지 않는다(자동 정리 안 함).
+      ⚠⚠ **취소된 주문도 «주문»이다** — 취소만 있는 사람을 지우면 취소 이력이 사라진다.
+     ⚠⚠ 마감 점검은 «뭔가 적힌» 것만 센다 — 빈 칸까지 세면 매번 빨간불이 떠서
+        **사장님이 점검 자체를 안 믿게 된다**(바로 아래 5257줄이 이미 경고하는 위험이다). */
+  const orphanCusts = useMemo(() => {
+    const has = new Set(orders.map(o => o.nick)); // 취소·출고완료도 «주문 있음»이다
+    return Object.keys(customers || {}).filter(nk => !has.has(nk)).map(nk => {
+      const c = customers[nk] || {};
+      const why = [];
+      if (Number(c.keepPaid) > 0) why.push(`받은 돈 ${won(Number(c.keepPaid))}원`);
+      if (c.paid) why.push("입금 표시");
+      if (c.shipPaid) why.push("배송비 받음");
+      if (c.keep) why.push("킵");
+      if (String(c.phone || "").trim()) why.push("연락처 있음");
+      if (String(c.addr || "").trim()) why.push("주소 있음");
+      if (String(c.memo || "").trim()) why.push("메모 있음");
+      if (String(c.tracking || "").trim()) why.push("운송장 있음");
+      return {
+        nick: nk,
+        why,
+        hasInfo: why.length > 0
+      };
+    }).sort((a, b) => b.hasInfo - a.hasInfo || a.nick.localeCompare(b.nick, "ko"));
+  }, [orders, customers]);
+  const orphanRisky = orphanCusts.filter(x => x.hasInfo);
+
+  /* ⭐⭐ 안전장치 225 — 고른 손님 칸만 지운다. 「킵 목록에서 N명 지우기」와 «같은 모양»이다.
+     ⚠ 2단 확인(오눌림 방지) + `takeSnap`(되돌릴 수 있게 · 223 과 같은 원칙).
+     ⚠ **주문은 한 건도 안 건드린다** — 손님 칸만 지운다. */
+  const [orphPick, setOrphPick] = useState({});
+  const [orphArm, setOrphArm] = useState(false);
+  useEffect(() => {
+    setOrphPick({});
+    setOrphArm(false);
+  }, [bdate]);
+  const orphChosen = orphanCusts.filter(x => orphPick[x.nick]);
+  const tidyOrphans = () => {
+    if (!orphChosen.length) {
+      showToast("고른 분이 없습니다");
+      return;
+    }
+    if (!orphArm) {
+      setOrphArm(true);
+      setTimeout(() => setOrphArm(false), 3000);
+      return;
+    }
+    takeSnap(`손님 칸 정리 직전 (${orphChosen.length}명)`);
+    const drop = new Set(orphChosen.map(x => x.nick));
+    setCustomers(prev => {
+      const next = {};
+      for (const k of Object.keys(prev || {})) if (!drop.has(k)) next[k] = prev[k];
+      return next;
+    });
+    setOrphPick({});
+    setOrphArm(false);
+    showToast(`🧹 손님 칸 ${drop.size}명을 지웠습니다 — ↩ 되돌리기로 되살릴 수 있습니다`);
+  };
+
+  /* ⭐⭐ 안전장치 226 (2026-09-04 30차 · 미결 21) — 「서버 백업 파일」을 «열어볼 수 있게» 한다
+      🔴 무엇이 빠져 있었나 — 💾 백업 파일은 받는데 **그것을 «열어보거나 되돌리는» 길이 없었다.**
+        되돌리기(스냅샷)는 «이 PC 안»에만 있고, 엑셀 불러오기는 «한 날짜»짜리라 백업 파일을 못 읽는다.
+        → **받아 둔 백업이 «쓸 수 있는 것인지»조차 확인할 수 없었다.**
+        ⚠ 무료 플랜에는 시점 복구도 자동 백업도 «없다». 이 파일이 마지막 줄이다.
+      📌 사장님 결정(2026-09-04) — **「가」안: 열어보기 + 한 날짜씩 «화면으로» 불러오기.**
+        🔴 **서버에 되돌리는 것은 «이번에 안 만들었다»** — 서버를 덮어쓰는 기능이라 따로 다룬다.
+      ⭐⭐ **반쪽 파일을 «막는다»** — `_행수` 에 적힌 수와 `tables` 의 실제 길이를 «대조»한다.
+        어긋나면 불러오기 버튼을 «안 준다». 반쪽 백업을 믿고 복구하는 것이
+        백업이 «없는» 것보다 나쁘다(안전장치 12 와 같은 축).
+     ⚠ 사장님 전용이다 — 파일에 고객 연락처·주소가 전부 들어 있다(백업 받기와 같은 규칙). */
+  const bakFileRef = useRef(null);
+  const [bakView, setBakView] = useState(null); // { at, by, tableCount, bad:[], rows:[] }
+  const [bakArm, setBakArm] = useState(null); // 2단 확인 중인 날짜
+  const bakPayloads = useRef({});
+  const onBakPick = async e => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    let d = null;
+    try {
+      d = JSON.parse(await f.text());
+    } catch (x) {
+      d = null;
+    }
+    if (!d || !d._백업 || !d.tables || !Array.isArray(d.tables.broadcasts)) {
+      setBakView(null);
+      setBakArm(null);
+      showToast("⚠ 서버 백업 파일이 아닙니다 — ⚙️ 설정의 「서버 전체 백업 받기」로 만든 파일을 골라 주세요");
+      return;
+    }
+    // ⭐ 적힌 행수 ↔ 실제 길이 대조 (반쪽 파일 거르기)
+    const bad = [];
+    for (const t of Object.keys(d._행수 || {})) {
+      const real = Array.isArray(d.tables[t]) ? d.tables[t].length : null;
+      if (real === null || real !== Number(d._행수[t])) bad.push(`${t} (적힘 ${d._행수[t]} · 실제 ${real === null ? "없음" : real})`);
+    }
+    const rows = d.tables.broadcasts.filter(b => b && b.date && b.payload).sort((a, b) => String(b.date).localeCompare(String(a.date))).map(b => {
+      const pl = b.payload || {};
+      return {
+        date: b.date,
+        seq: b.seq,
+        rev: b.rev,
+        orders: (pl.orders || []).length,
+        custs: Object.keys(pl.customers || {}).length,
+        products: (pl.products || []).length
+      };
+    });
+    bakPayloads.current = {};
+    for (const b of d.tables.broadcasts) if (b && b.date) bakPayloads.current[b.date] = b.payload;
+    setBakArm(null);
+    setBakView({
+      at: d._만든시각 || "",
+      by: d._만든사람 || "",
+      tableCount: Object.keys(d.tables).length,
+      bad,
+      rows
+    });
+    showToast(bad.length ? `⚠ 백업을 열었지만 «어긋난 표»가 ${bad.length}개 있습니다` : `📂 백업을 열었습니다 — 방송 ${rows.length}개`);
+  };
+  const loadBakDate = date => {
+    const pl = bakPayloads.current[date];
+    if (!pl) {
+      showToast("⚠ 그 날짜 내용을 파일에서 못 찾았습니다");
+      return;
+    }
+    if (bakView && bakView.bad.length) {
+      showToast("⚠ 어긋난 표가 있는 파일이라 불러오지 않습니다");
+      return;
+    }
+    if (bakArm !== date) {
+      setBakArm(date);
+      setTimeout(() => setBakArm(v => v === date ? null : v), 4000);
+      return;
+    }
+    /* ⚠⚠ 스냅샷은 «찍는 시점의 날짜»에 남는다(`takeSnap` 은 bdate 로 묶는다).
+          불러오면 날짜가 바뀌므로 그 스냅샷은 «지금 보던 날짜»의 되돌리기 목록에 있다 —
+          그래서 «어느 날짜에 남았는지»를 반드시 알려준다. 안 알리면 사장님이 못 찾으신다.
+          (「옮기기」가 앞 날짜에 남는 것과 같은 성질이다.) */
+    const from = bdate;
+    takeSnap(`백업에서 불러오기 직전 (${date} 로 바꾸기 전 · 주문 ${orders.filter(o => !o.canceled).length}건)`);
+    applyImported({
+      ...pl,
+      bdate: date
+    });
+    setBakArm(null);
+    showToast(from === date ? `📂 ${date} 을(를) «화면»으로 불러왔습니다 — 서버에는 아직 안 올라갑니다` : `📂 ${date} 을(를) «화면»으로 불러왔습니다 — 서버에는 아직 안 올라갑니다 · 앞 화면은 «${from}» 의 ↩ 되돌리기에 남았습니다`);
+  };
   const closeChecks = useMemo(() => {
     const list = [];
     const push = o => list.push(o);
@@ -7601,6 +7756,15 @@ function App() {
     // ⚠ 출고완료된 주문도 「살아 있는 주문」이다. 빼면 보낸 손님마다 「주문 없음」 경고가 뜬다.
     const aliveNicks = new Set([...activeOrders, ...doneOrders].map(o => o.nick));
     const orphan = shipData.filter(d => normTrk(d.tracking) && !aliveNicks.has(d.nick)).map(d => d.nick);
+    /* ⭐ 안전장치 225 — 「주문 없는 손님 칸」. ⚠ «뭔가 적힌» 것만 센다(빈 칸은 헛경고다). */
+    push({
+      key: "orphcust",
+      ok: orphanRisky.length === 0,
+      label: "주문 없는 손님 칸",
+      detail: orphanRisky.length ? `${orphanRisky.length}명` : "없음",
+      names: orphanRisky.map(x => `${x.nick} (${x.why.join(" · ")})`),
+      tab: "settings"
+    });
     push({
       key: "orphan",
       ok: orphan.length === 0,
@@ -7662,7 +7826,8 @@ function App() {
           「운송장은 있는데 주문 없음」이 doneOrders 를 쓰는데 의존성에 없어서,
           출고완료된 사람이 **유령 송장으로 잘못 잡혔다.**
           보낸 손님마다 헛경고가 떠서 사장님이 경고 자체를 무시하게 된다 — 그게 진짜 위험이다. */
-  }, [nickList, customers, paidNicks, paidLines, shipData, cashList, lastExcelAt, products, activeOrders, doneOrders, srvSum, closing, keepOrders, keepNicks, shipFee]);
+  }, [nickList, customers, paidNicks, paidLines, shipData, cashList, lastExcelAt, products, activeOrders, doneOrders, srvSum, closing, keepOrders, keepNicks, shipFee, orphanRisky]); // 225
+
   const closeLeft = closeChecks.filter(c => !c.ok).length;
 
   /* ---------- 킵 (보류 주문) 5-19 ----------
@@ -12073,6 +12238,67 @@ function App() {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "cardtitle"
+  }, "📂 백업 파일 열기 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "받아 둔 백업이 «쓸 수 있는 것인지» 확인합니다")), /*#__PURE__*/React.createElement("button", {
+    className: "btn wide",
+    onClick: () => bakFileRef.current && bakFileRef.current.click()
+  }, "📂 백업 파일 열기"), /*#__PURE__*/React.createElement("input", {
+    ref: bakFileRef,
+    "data-bak": "1",
+    type: "file",
+    accept: ".json,application/json",
+    style: {
+      display: "none"
+    },
+    onChange: onBakPick
+  }), bakView && /*#__PURE__*/React.createElement("div", {
+    className: "bakview"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bvhead"
+  }, "받은 시각 ", /*#__PURE__*/React.createElement("b", null, String(bakView.at).replace("T", " ").slice(0, 19)), bakView.by ? /*#__PURE__*/React.createElement(React.Fragment, null, " · 받은 사람 ", /*#__PURE__*/React.createElement("b", null, bakView.by)) : null, " ", "· 표 ", bakView.tableCount, "개 · 방송 ", bakView.rows.length, "개"), bakView.bad.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "bvwarn"
+  }, "🔴 ", /*#__PURE__*/React.createElement("b", null, "적힌 행수와 실제가 «어긋납니다» — 반쪽 파일일 수 있습니다."), " 불러오지 않습니다.", /*#__PURE__*/React.createElement("br", null), bakView.bad.join(" · ")), bakView.rows.map(r => /*#__PURE__*/React.createElement("div", {
+    key: r.date + "|" + r.seq,
+    className: "bvrow"
+  }, /*#__PURE__*/React.createElement("b", {
+    className: "bvdate"
+  }, r.date), /*#__PURE__*/React.createElement("span", {
+    className: "bvinfo"
+  }, "주문 ", r.orders, "건 · 손님 ", r.custs, "명 · 상품 ", r.products, "개 · rev ", r.rev), bakView.bad.length === 0 && /*#__PURE__*/React.createElement("button", {
+    className: "btn sm " + (bakArm === r.date ? "danger" : ""),
+    onClick: () => loadBakDate(r.date)
+  }, bakArm === r.date ? "한 번 더 탭 (화면을 바꿉니다)" : "화면으로 불러오기"))), /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "화면으로만"), " 불러옵니다 — 서버에는 «아직» 안 올라갑니다. 지금 화면 내용은 사라지니 ↩ 되돌리기로 되살릴 수 있게 ", /*#__PURE__*/React.createElement("b", null, "스냅샷을 먼저 찍습니다"), ".", /*#__PURE__*/React.createElement("br", null), "⚠ 서버에 ", /*#__PURE__*/React.createElement("b", null, "되돌리는"), " 기능은 아직 없습니다."))), orphanCusts.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "card orphcust"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
+  }, "🧹 주문 없는 손님 칸 ", orphanCusts.length, "명 ", /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "주문이 하나도 없는데 남아 있는 칸입니다")), /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "화면에는 «안 보이는» 칸입니다. ", /*#__PURE__*/React.createElement("b", null, "받은 돈·배송비 표시가 남아 있으면"), " 그분이 다시 주문하실 때 「이미 입금하셨습니다」로 잡혀 ", /*#__PURE__*/React.createElement("b", null, "돈을 못 받으실 수 있습니다"), ". 지울 것만 골라 주세요.", /*#__PURE__*/React.createElement("br", null), "⚠ ", /*#__PURE__*/React.createElement("b", null, "주문은 한 건도 안 지웁니다"), " — 손님 칸만 지웁니다. ↩ 되돌리기로 되살릴 수 있습니다."), orphanCusts.map(x => /*#__PURE__*/React.createElement("label", {
+    key: x.nick,
+    className: "ocrow" + (x.hasInfo ? " ocrisk" : "")
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: !!orphPick[x.nick],
+    onChange: e => setOrphPick(v => ({
+      ...v,
+      [x.nick]: e.target.checked
+    }))
+  }), /*#__PURE__*/React.createElement("b", {
+    className: "ocnick"
+  }, x.nick), /*#__PURE__*/React.createElement("span", {
+    className: "ocwhy"
+  }, x.hasInfo ? x.why.join(" · ") : "비어 있음"))), /*#__PURE__*/React.createElement("button", {
+    className: "btn wide " + (orphArm ? "danger" : ""),
+    onClick: tidyOrphans
+  }, orphArm ? `한 번 더 탭 (${orphChosen.length}명 지우기)` : `고른 ${orphChosen.length}명 지우기`)), auth && auth.isOwner && /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cardtitle"
   }, "서버 백업 ", /*#__PURE__*/React.createElement("span", {
     className: "sub"
   }, "사고에 대비해 서버 내용을 파일로 받아 둡니다")), /*#__PURE__*/React.createElement("button", {
@@ -13405,6 +13631,20 @@ const CSS = `
       아직 «안 보낸» 건이고, 오히려 이번에 보내실 건이다. 취소선도 «긋지 않는다». */
 .orow.keeplock { background: #fff8ec; box-shadow: inset 3px 0 0 #e5a13a; }
 .keeplockbadge { background: #fff3e0; color: #a85c00; }
+/* ⭐ 안전장치 225 — 주문 없는 손님 칸 정리 */
+.orphcust .ocrow { display: flex; align-items: center; gap: 8px; padding: 7px 4px; border-bottom: 1px solid #eef1f5; }
+.orphcust .ocrow:last-of-type { border-bottom: 0; }
+.orphcust .ocnick { min-width: 96px; }
+.orphcust .ocwhy { color: #6b7280; font-size: 13px; }
+.orphcust .ocrisk .ocwhy { color: #b02a37; font-weight: 600; }
+/* ⭐ 안전장치 226 — 백업 파일 열기 */
+.bakview { margin-top: 10px; }
+.bakview .bvhead { font-size: 13px; color: #4a5568; padding: 6px 2px; }
+.bakview .bvwarn { background: #fdecee; color: #b02a37; border-radius: 8px; padding: 8px; font-size: 13px; margin: 6px 0; }
+.bakview .bvrow { display: flex; align-items: center; gap: 8px; padding: 7px 4px; border-bottom: 1px solid #eef1f5; }
+.bakview .bvrow:last-of-type { border-bottom: 0; }
+.bakview .bvdate { min-width: 92px; }
+.bakview .bvinfo { flex: 1; color: #6b7280; font-size: 13px; }
 /* ⭐ 안전장치 224 — 「출고 끝난 킵」 잠금. 204(주황)와 «다른 색»으로 둔다 — 이유가 다르다 */
 .orow.pastlock { background: #f2f4f8; box-shadow: inset 3px 0 0 #7a8699; }
 .pastlockbadge { background: #e9edf3; color: #4a5568; }
