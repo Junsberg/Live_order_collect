@@ -2977,11 +2977,16 @@ function App() {
         여기서 거른다(08-28 → 08-31 → 09-01 로 세 방송을 건넌 「블루」 8건이 그 경우다).
      ⚠ 저장 내용(orders)에는 «아무것도» 안 쓴다 — 화면 표시용 map 이다. 검사: t_moved.js */
   const [movedMap, setMovedMap] = useState({});
+  /* ⭐⭐ 안전장치 224 (2026-09-04 30차 · 미결 58) — 「못 읽음」을 «상태»로 남긴다.
+        `movedMap` 이 비었다는 것만으로는 「넘어간 것이 없다」와 「못 읽었다」를 «못 가른다».
+        222 에서 배운 것과 «같은 축»이다(project-map 4-2 · 「읽기 실패 ≠ 데이터 없음」). */
+  const [movedState, setMovedState] = useState("idle"); // idle | ok | fail
   const movedKeyRef = useRef("");
   useEffect(() => {
     if (!loaded || !serverOn()) return;
     if (bdate === todayISO()) {
       movedKeyRef.current = "";
+      setMovedState("idle");
       setMovedMap(m => Object.keys(m).length ? {} : m);
       return;
     }
@@ -2991,9 +2996,14 @@ function App() {
     if (movedKeyRef.current === key) return; // 같은 날짜·같은 킵이면 다시 안 부른다
     movedKeyRef.current = key;
     if (!ids.length) {
+      setMovedState("ok");
       setMovedMap(m => Object.keys(m).length ? {} : m);
       return;
     }
+    /* ⭐⭐ 안전장치 224 — 다시 부르러 가는 «동안»은 «ok 가 아니다».
+          🔴 30차에 검사가 잡았다 — 킵 칩을 껐다 켜면 ids 가 비었다 다시 차서 여기로 다시 오는데,
+             그때 `ok` 를 그대로 두면 그 800ms 사이에 킵 동기화가 먼저 돌아 «출고 끝난 줄이 올라갔다». */
+    setMovedState("loading");
     (async () => {
       const c = sb();
       if (!c) return;
@@ -3008,6 +3018,7 @@ function App() {
         if (movedKeyRef.current !== key) return; // 기다리는 사이 날짜·킵이 바뀌었다
         if (error || !Array.isArray(data)) {
           movedKeyRef.current = "";
+          setMovedState("fail");
           return;
         } // 조용히 — 다음에 다시 시도할 수 있게 열어 둔다
         const m = {};
@@ -3021,11 +3032,73 @@ function App() {
           };
         });
         setMovedMap(m);
+        setMovedState("ok");
       } catch (e) {
-        if (movedKeyRef.current === key) movedKeyRef.current = "";
+        if (movedKeyRef.current === key) {
+          movedKeyRef.current = "";
+          setMovedState("fail");
+        }
       }
     })();
   }, [bdate, loaded, auth, srvSyncedDate, keepOrders]);
+
+  /* ⭐⭐ 안전장치 224 (2026-09-04 30차 · 미결 58) — 「출고까지 끝난 킵」은 «지난 날짜»에서 잠근다
+      📌 사장님 요구 — 「킵 주문건을 계속 끌고 가더라도 «최종적으로 출고완료» 하면 이전 날짜들의
+        킵 주문건은 잠겨서, 내가 «직접 잠금해제»하기 전까지 최근 날짜와 연동되지 않아야 한다」
+      🔴 무엇을 막는가 (30차에 `m_keep30.js` 로 재현 — 경로가 «둘») —
+        ① ③ 정산 탭 191-b 카드 「킵 목록에 없는 분이 있습니다」 → 「킵 목록에 넣기」
+        ② 킵 칩을 직접 만지기 (`keepTouch`)
+        둘 다 **이미 출고된 줄까지 킵 목록에 되살린다**(받은 돈까지). 다음 방송에 다시 딸려와 «이중 출고»다.
+      ⭐ 판정을 «새로 만들지 않는다» — 219 가 이미 받아 온 `movedMap` 을 그대로 쓴다.
+     ⚠⚠ **저장에는 한 글자도 안 쓴다** — 219 와 같이 «화면에서만» 판정한다.
+        잠금해제도 `pastUnlock`(ref)에 담는 «그 세션 한정»이다. 날짜를 옮기면 비운다.
+     📌 **사장님 결정(2026-09-04) — 못 읽으면 «잠근다»**(204 「표식 없는 옛 킵은 전부 잠근다」와 같은 방향).
+        「내가 직접 풀면 되니까」. 그래서 `movedState === "fail"` 이면 그 날짜 킵 줄을 전부 잠근다. */
+  const pastUnlock = useRef(new Set());
+  useEffect(() => {
+    pastUnlock.current = new Set();
+  }, [bdate]);
+  /* ⭐⭐ 안전장치 224 — 판정이 «지금 값»을 보게 한다.
+     🔴 30차에 겪었다 — 킵 동기화 effect 는 800ms 뒤에 도는데, 그 클로저가 «옛 movedMap»을 들고 있어
+        출고 끝난 줄이 그대로 올라갔다.
+     🔴🔴 그렇다고 `movedMap`·`movedState` 를 그 effect 의 «의존성»에 넣으면 안 된다 —
+        30차에 넣었더니 `t_tabs` 3항목이 깨졌다(탭 사이 반영이 끊겼다). **회귀가 잡았다.**
+     ⭐ 그래서 «의존성은 그대로 두고» ref 로 읽는다. 렌더는 state 가 맡고, 판정은 ref 가 맡는다. */
+  const movedRef = useRef({
+    map: {},
+    state: "idle"
+  });
+  movedRef.current = {
+    map: movedMap,
+    state: movedState
+  };
+  const pastKeepLocked = o => {
+    if (!o || bdate === todayISO()) return false; // «오늘»은 안 잠근다 (219 와 같은 한 벌)
+    if (o.done || o.canceled) return false; // 이미 보낸/취소된 줄은 다른 잠금이 맡는다
+    if (!isKeep(o.nick)) return false; // 킵 줄만
+    if (pastUnlock.current.has(o.id)) return false; // 사장님이 «직접» 푸셨다
+    const mv = movedRef.current.map[o.id];
+    if (mv && mv.done) return true; // 뒤 날짜에서 «출고완료»됐다
+    /* 📌 사장님 결정 — «모르면 잠근다». `fail` 만 보면 «읽는 중»(idle)에 틈이 생긴다 —
+       킵 칩을 껐다 켜면 219 가 다시 부르러 가는데, 그 800ms 사이에 킵 동기화가 먼저 돌아
+       출고 끝난 줄이 올라갔다(30차에 검사가 잡았다). 그래서 「ok 가 «아니면» 잠근다」로 둔다.
+       ⚠ 「오늘」은 위에서 이미 걸렀고, `ok` 는 실제로 읽어 온 뒤에만 켜진다. */
+    return movedRef.current.state !== "ok";
+  };
+  const unlockPastKeep = orderId => {
+    const o = orders.find(x => x.id === orderId);
+    if (!o) return;
+    pastUnlock.current = new Set([...pastUnlock.current, orderId]);
+    setMovedMap(m => ({
+      ...m
+    })); // 다시 그리게 한다 (저장은 안 건드린다)
+    showToast(`🔓 「${o.nick}」 ${o.name} — 이 줄의 잠금을 풀었습니다 (이 화면에서만 · 저장은 안 바뀝니다)`);
+  };
+  // 그 손님의 킵 줄이 «전부» 잠겼는가 — 191-b 카드와 킵 업로드가 «같은 판정»을 쓴다
+  const allPastLocked = nick => {
+    const mine = orders.filter(o => o.nick === nick && !o.done && !o.canceled && isKeep(o.nick));
+    return mine.length > 0 && mine.every(o => pastKeepLocked(o));
+  };
   /* ⚠ 「결산할 것이 있는가」 판정은 여기 한 곳만 쓴다 (money-rules §1 · 2026-08-04 7차).
         전에는 결산·마감 버튼이 `activeOrders.length === 0` 만 봤다. activeOrders 는
         취소·출고완료·킵을 «전부» 뺀 「지금 보낼 것」이라, 아래 두 날이 통째로 막혔다.
@@ -3383,6 +3456,16 @@ function App() {
     setSettleSearch("");
     setRecentId(null);
   };
+  /* ⭐⭐ 안전장치 223 (2026-09-04 30차 · 미결 56) — 「새 방송 시작」도 «되돌릴 수 있어야» 한다
+     🔴 무엇을 막는가 — 이 두 함수는 «주문 · 손님 칸 · 운송장»을 통째로 비우는데 스냅샷이 «없었다».
+        「화면에서 사라지는 작업은 스냅샷을 찍는다」(project-map 4-3)를 어기고 있었다.
+        다른 「사라지는 작업」 20여 곳은 전부 찍는데 여기만 빠져 있었다.
+     🔴 **30차에 사장님이 «실제로» 이 버튼을 쓰셔야 했다** — 09-04 에 09-01 내용이 통째로 들어와
+        손님 칸(`keepPaid`·`shipPaid`)까지 지우려면 이 버튼뿐이었다. 그때 「엑셀 저장을 먼저 하세요」를
+        **사람이 입으로** 안내해서 메웠다.
+     ⚠ 「한 번 더 탭」 2단 확인은 «오눌림»만 막는다 — 제대로 누른 뒤 후회하는 것은 못 막는다.
+     ⚠ 상품은 `saja:lastProducts` 로 따로 남지만 **주문·손님·운송장은 되살릴 길이 «없었다».**
+     ⚠ 찍는 자리는 «2단 확인을 지난 뒤 · 비우기 전»이다. 1단만 눌렀을 때 찍으면 헛스냅이 쌓인다. */
   const newSession = async () => {
     if (!resetArm) {
       setResetArm(true);
@@ -3390,6 +3473,7 @@ function App() {
       setTimeout(() => setResetArm(false), 3000);
       return;
     }
+    takeSnap(`새 방송 시작 직전 (주문 ${orders.filter(o => !o.canceled).length}건)`);
     try {
       if (products.length) await window.storage.set("saja:lastProducts", JSON.stringify(products));
     } catch (e) {}
@@ -3410,6 +3494,8 @@ function App() {
       setTimeout(() => setResetAllArm(false), 3000);
       return;
     }
+    // 안전장치 223 — 「상품까지」인 것을 사유에 적는다. 두 버튼을 되돌리기 목록에서 가릴 수 있어야 한다
+    takeSnap(`새 방송 시작 직전 (상품까지 · 주문 ${orders.filter(o => !o.canceled).length}건)`);
     try {
       if (products.length) await window.storage.set("saja:lastProducts", JSON.stringify(products));
     } catch (e) {}
@@ -3504,11 +3590,22 @@ function App() {
 
   /* ⚠ 잠긴 줄은 «어느 경로로 와도» 못 고친다 — 화면에서 버튼을 숨기는 것만으로는 한 겹뿐이다.
         조용히 무시하면 사장님이 「왜 안 되지」 하신다. 무엇을 하셔야 하는지 함께 알린다. */
+  /* ⭐ 안전장치 224 — 224 의 잠금도 «여기»로 합류시킨다. 그러면 `chgQty`·`toggleCancel`·`delOrder`·
+        주문서 삭제·환불이 «저절로» 막힌다. 강제 자리를 새로 만들면 한쪽만 고쳐진 채 지나간다(197 교훈). */
   const keepLockedOrder = id => {
     const t = orders.find(o => o.id === id);
-    return t && t.keepLock ? t : null;
+    if (!t) return null;
+    if (t.keepLock) return t; // 204 — 킵으로 입금까지 받은 줄
+    if (pastKeepLocked(t)) return t; // 224 — 지난 날짜의 «출고 끝난» 킵 줄
+    return null;
   };
   const warnKeepLocked = t => {
+    /* ⚠ 224 와 204 는 «다른 이유»로 잠긴다 — 문구를 같게 두면 사장님이 무엇 때문인지 못 가리신다. */
+    if (!t.keepLock && pastKeepLocked(t)) {
+      const mv = movedMap[t.id];
+      showToast(mv && mv.date ? `🔒 「${t.nick}」 ${t.name} — ${mv.date} 방송에서 «이미 출고»된 킵입니다. 「잠금해제」를 먼저 눌러 주세요` : `🔒 「${t.nick}」 ${t.name} — 어느 날짜로 갔는지 «못 읽었습니다». 안전하게 잠갔습니다 — 「잠금해제」를 먼저 눌러 주세요`);
+      return;
+    }
     showToast(`🔒 「${t.nick}」 ${t.name} — 킵으로 입금까지 받은 주문입니다. 「잠금해제」를 먼저 눌러 주세요`);
   };
 
@@ -7649,8 +7746,11 @@ function App() {
            ⚠ 해제 쪽(위 keptOrders)은 «건드리지 않는다» — 과거 날짜에서 킵을 푸는 것은 정상이다.
               올리는 쪽만 좁힌다. */
         const past = bdate !== todayISO();
-        const upOrders = past ? keepOrders.filter(o => keepTouch.current.has(o.nick)) : keepOrders;
-        const upNicks = past ? keepNicks.filter(nk => keepTouch.current.has(nk)) : keepNicks;
+        /* ⭐⭐ 안전장치 224 — «출고까지 끝난» 줄은 올리지 않는다. 이것이 「되살아남」을 막는 자리다.
+              ⚠ 그 손님 줄이 «전부» 잠긴 경우에만 사람(customers)도 뺀다 — 안 넘어간 킵이 남아 있으면
+                 그 사람은 여전히 킵 목록에 있어야 한다(과잉 차단 방지 · `t_pastkeep` 4절 대조군). */
+        const upOrders = past ? keepOrders.filter(o => keepTouch.current.has(o.nick) && !pastKeepLocked(o)) : keepOrders;
+        const upNicks = past ? keepNicks.filter(nk => keepTouch.current.has(nk) && !allPastLocked(nk)) : keepNicks;
         const byId = {};
         keptOrders.forEach(o => {
           byId[o.id] = o;
@@ -7677,6 +7777,8 @@ function App() {
       });
     }, 800);
     return () => clearTimeout(t);
+    /* ⚠⚠ 안전장치 224 — 여기 의존성에 `movedMap`·`movedState` 를 «넣지 마라».
+          30차에 넣었더니 `t_tabs` 3항목이 깨졌다(탭 사이 반영이 끊겼다). 판정은 `movedRef` 가 «지금 값»을 준다. */
   }, [keepOrders, keepNicks, customers, orders, loaded, bdate, keepTouchTick]);
 
   /* 🔖 «과거 날짜»에서 「화면은 킵인데 킵 목록에 없는 사람」을 찾아 사장님께 묻는다 (191-b) */
@@ -7687,7 +7789,11 @@ function App() {
       return;
     }
     const have = new Set(Object.keys(keeps.customers || {}));
-    const miss = keepNicks.filter(nk => !have.has(nk) && !keepTouch.current.has(nk) && !keepAskDone.current.has(bdate + "|" + nk));
+    /* ⭐⭐ 안전장치 224 — 「이미 «전부» 출고된 사람」은 «권하지 않는다».
+          🔴 30차 재현 — 219 가 「→ 09-01 출고됨」이라고 이미 말하는 화면에서 이 카드가
+             「넣으세요」라고 권했고, 누르면 출고 끝난 줄이 킵 목록에 되살아났다.
+          ⚠ 판정은 224 «한 벌»(`allPastLocked`)을 쓴다 — 새로 만들지 않는다. */
+    const miss = keepNicks.filter(nk => !have.has(nk) && !keepTouch.current.has(nk) && !keepAskDone.current.has(bdate + "|" + nk) && !allPastLocked(nk));
     setKeepMissing(v => {
       const same = v && v.date === bdate && v.nicks.join("\u241f") === miss.join("\u241f");
       if (same) return v;
@@ -7696,7 +7802,7 @@ function App() {
         nicks: miss
       } : null;
     });
-  }, [keepNicks, keeps, bdate, loaded, keepTouchTick]);
+  }, [keepNicks, keeps, bdate, loaded, keepTouchTick, movedMap, movedState]); // 224 — 위와 같은 이유
 
   /* 「킵 목록에 넣기」 — 넣는 것은 «직접 켠 것»과 같은 길을 쓴다 (판정을 두 곳에 두지 않는다) */
   const adoptMissingKeeps = () => {
@@ -9258,7 +9364,7 @@ function App() {
     className: "moveline"
   }, /*#__PURE__*/React.createElement("b", null, srvPick.from || "지금 화면"), " 의 주문 ", /*#__PURE__*/React.createElement("b", null, srvPick.localCount, "건"), "(₩", won(moveAmount()), ")을 ", /*#__PURE__*/React.createElement("b", null, bdate), " 로 ", /*#__PURE__*/React.createElement("b", null, "복사"), "합니다"), srvPick.from && /*#__PURE__*/React.createElement("div", {
     className: "movewarn"
-  }, "⚠ 옮기기가 아니라 ", /*#__PURE__*/React.createElement("b", null, "복사"), "입니다 — ", srvPick.from, " 에도 ", /*#__PURE__*/React.createElement("b", null, "그대로 남습니다"), ".", /*#__PURE__*/React.createElement("br", null), "그대로 두면 두 날짜에 같은 매출이 잡힙니다. 복사한 뒤 ", srvPick.from, " 로 가서", /*#__PURE__*/React.createElement("b", null, " 설정 → 새 방송 시작"), " 으로 비워주세요."), /*#__PURE__*/React.createElement("div", {
+  }, "⚠ 옮기기가 아니라 ", /*#__PURE__*/React.createElement("b", null, "복사"), "입니다 — ", srvPick.from, " 에도 ", /*#__PURE__*/React.createElement("b", null, "그대로 남습니다"), ".", /*#__PURE__*/React.createElement("br", null), "그대로 두면 두 날짜에 같은 매출이 잡힙니다. 복사한 뒤 ", srvPick.from, " 로 가서", /*#__PURE__*/React.createElement("b", null, " ① 상품 탭 → 새 방송 시작"), " 으로 비워주세요."), /*#__PURE__*/React.createElement("div", {
     className: "rpfoot",
     style: {
       marginTop: 12
@@ -10596,6 +10702,8 @@ function App() {
     key: o.id,
     o: o,
     moved: movedMap[o.id],
+    pastLocked: pastKeepLocked(o),
+    unlockPast: unlockPastKeep,
     chgQty: chgQty,
     toggleCancel: toggleCancel,
     delOrder: delOrder,
@@ -12426,6 +12534,8 @@ function App() {
 function OrderRow({
   o,
   moved,
+  pastLocked,
+  unlockPast,
   chgQty,
   toggleCancel,
   delOrder,
@@ -12443,10 +12553,13 @@ function OrderRow({
         같은 글자로 두면 사장님이 「이미 보낸 건」으로 오해하신다 — 아직 안 보낸 건이다.
      ⚠ 숨기지 않는다 — 안 보이면 「주문이 사라졌다」고 놀라신다 (출고완료와 같은 이유). */
   const klock = !!o.keepLock;
-  const lock = done || klock;
+  /* ⭐⭐ 안전장치 224 (2026-09-04 30차 · 미결 58) — 지난 날짜의 «출고 끝난» 킵 줄.
+     ⚠ 숨기지 않는다 — 204·출고완료와 같은 이유다. 뱃지 글자를 «달리»해 무엇 때문인지 보이게 한다. */
+  const plock = !!pastLocked;
+  const lock = done || klock || plock;
   return /*#__PURE__*/React.createElement("div", {
     "data-oid": o.id,
-    className: "orow" + (o.canceled ? " canceled" : "") + (done ? " donelock" : "") + (klock ? " keeplock" : "") + (recent ? " recent" : "")
+    className: "orow" + (o.canceled ? " canceled" : "") + (done ? " donelock" : "") + (klock ? " keeplock" : "") + (plock ? " pastlock" : "") + (recent ? " recent" : "")
   }, !hideNick && /*#__PURE__*/React.createElement("span", {
     className: "onick" + (onNickClick && !lock ? " clickable" : ""),
     onClick: onNickClick && !lock ? () => onNickClick(o.nick) : undefined
@@ -12458,7 +12571,10 @@ function OrderRow({
   }, "📦 출고완료", o.doneSeq > 1 ? ` ${o.doneSeq}차` : ""), !done && klock && /*#__PURE__*/React.createElement("span", {
     className: "lockbadge keeplockbadge",
     title: "킵으로 이미 입금까지 받은 주문입니다 — 「잠금해제」 후에 고치거나 지울 수 있습니다"
-  }, "🔒 킵 입금완료"), !done && moved && moved.date && /*#__PURE__*/React.createElement("span", {
+  }, "🔒 킵 입금완료"), !done && plock && /*#__PURE__*/React.createElement("span", {
+    className: "lockbadge pastlockbadge",
+    title: moved && moved.date ? `이 킵은 ${moved.date} 방송에서 이미 출고됐습니다 — 「잠금해제」 후에 고치거나 킵 목록에 다시 넣을 수 있습니다` : "어느 날짜로 갔는지 못 읽어 안전하게 잠갔습니다 — 「잠금해제」로 푸실 수 있습니다"
+  }, "🔒 ", moved && moved.date ? "출고 끝난 킵" : "확인 못 함"), !done && moved && moved.date && /*#__PURE__*/React.createElement("span", {
     className: "lockbadge movedbadge" + (moved.done ? " moveddone" : ""),
     title: moved.done ? `이 킵은 ${moved.date} 방송으로 넘어가 출고까지 끝났습니다` : `이 킵은 ${moved.date} 방송으로 넘어갔지만 아직 출고되지 않았습니다`
   }, "→ ", moved.date, " ", moved.done ? "출고됨" : "넘어감 · 미출고")), /*#__PURE__*/React.createElement("span", {
@@ -12479,6 +12595,10 @@ function OrderRow({
     className: "btn ghost sm",
     title: "잘못 출고완료로 잡힌 경우 되돌립니다",
     onClick: () => unlockDone(o.id)
+  }, "잠금해제") : null : plock ? unlockPast ? /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost sm",
+    title: "이 화면에서만 풉니다 — 저장 내용은 안 바뀝니다",
+    onClick: () => unlockPast(o.id)
   }, "잠금해제") : null : klock ? unlockKeepLock ? /*#__PURE__*/React.createElement("button", {
     className: "btn ghost sm",
     title: "킵으로 이미 받은 주문입니다 — 고치거나 지우시려면 먼저 푸세요",
@@ -13285,6 +13405,9 @@ const CSS = `
       아직 «안 보낸» 건이고, 오히려 이번에 보내실 건이다. 취소선도 «긋지 않는다». */
 .orow.keeplock { background: #fff8ec; box-shadow: inset 3px 0 0 #e5a13a; }
 .keeplockbadge { background: #fff3e0; color: #a85c00; }
+/* ⭐ 안전장치 224 — 「출고 끝난 킵」 잠금. 204(주황)와 «다른 색»으로 둔다 — 이유가 다르다 */
+.orow.pastlock { background: #f2f4f8; box-shadow: inset 3px 0 0 #7a8699; }
+.pastlockbadge { background: #e9edf3; color: #4a5568; }
 .klrow.klold { background: #fff4e5; border-color: #ffcc80; }
 .klrow .kloldtag { margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   background: #ffe0b2; color: #9a5b00; font-weight: 700; white-space: nowrap; }
