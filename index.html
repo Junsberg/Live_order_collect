@@ -2025,7 +2025,7 @@ function App() {
       // 그 탭이 서버 저장까지 마쳤다면 이 탭도 서버와 같은 상태다 → 다시 올릴 필요가 없다
       srvSyncedRef.current = str;
       srvPlaceRef.current = placeMsg === undefined || placeMsg === null ? place : String(placeMsg);
-      setSrvSyncedDate(d.bdate);
+      openSaveGate(d.bdate); // 안전장치 222 — 게이트를 여는 자리는 한 곳으로
       setSrvState("ok");
       setSrvConflict(null);
     }
@@ -2123,6 +2123,39 @@ function App() {
     fromDateRef.current = bdate; // ⭐ 옮기기 확인 카드에 「어디서 왔는지」를 찍기 위해
     setBdate(next);
   };
+
+  /* ⭐⭐ 안전장치 222 (2026-09-04 30차 · 미결 55) — 「아직 고르지 않은 빈 날짜」를 «기억»한다
+      🔴 무엇을 막는가 — 기록이 없는 날짜로 옮겨 선택 카드가 뜬 «채로» 새로고침·재로그인하면
+        srvFirstSync 가 다시 참이 되어 아래 `first` 가지로 빠지고, 화면에 남아 있던
+        «앞 날짜» 내용이 «묻지도 않고» 그 날짜로 서버에 올라간다.
+        실서버 2026-09-04 10:35:20 (매니저-1 · rev 1) — 09-01 내용이 09-04 로 통째로 올라갔다.
+        payload 키 10개 중 8개가 09-01 과 md5 동일 · 주문 47건 byte 동일(출고완료 23건 포함).
+        → 기간 회계에서 하루 매출이 «두 날짜»에 잡히고, 이미 보낸 주문이 잠긴 킵으로 되살아난다.
+      ⚠ 뿌리 — 자동저장은 선택 카드가 떠 있어도 «로컬»에는 쓴다(그래야 새로고침해도 안 날아간다).
+        그래서 로컬 세션이 「날짜는 새 날짜 · 내용은 앞 날짜」인 채로 남고,
+        「앱을 막 열었을 때 = 이 PC 내용이 곧 그 날짜의 내용이다」라는 전제가 깨진다.
+      ⚠⚠ 판정을 두 곳에 두지 않는다 — 「이 날짜를 쓰기로 정했다」는 곧 «저장 게이트를 여는 것»이다.
+        그래서 게이트를 여는 «모든» 자리를 openSaveGate() 한 곳으로 모으고, 거기서만 표식을 지운다.
+        새로 게이트를 여는 자리를 만들면 «반드시» 이 함수를 써라. */
+  const PENDING_KEY = "saja:pendingdate";
+  // 표시용 열쇠라 지우기에 실패해도 장사 기록에는 영향이 없다 (saja:movewarn 과 같은 취급)
+  const clearPendingDate = () => {
+    try {
+      window.storage.delete(PENDING_KEY).catch(() => {});
+    } catch (e) {}
+  };
+  const openSaveGate = d => {
+    clearPendingDate();
+    setSrvSyncedDate(d);
+  };
+  const markPendingDate = (d, from) => {
+    try {
+      window.storage.set(PENDING_KEY, JSON.stringify({
+        date: d,
+        from: from || null
+      })).catch(() => {});
+    } catch (e) {}
+  };
   useEffect(() => {
     if (!loaded || !serverOn()) return;
     if (syncedDate.current === bdate) return;
@@ -2165,17 +2198,41 @@ function App() {
         setSrvRev(null);
         srvSyncedRef.current = null;
         srvPlaceRef.current = null;
-        if (first || localEmpty) {
+        /* ⭐⭐ 안전장치 222 — 「이 날짜를 아직 안 골랐다」 표식이 남아 있으면 first 여도 «묻는다».
+              표식은 아래 else 가지에서만 붙고, openSaveGate() 에서만 지워진다.
+           ⚠⚠ **「없음」과 「못 읽음」을 구분한다** (project-map 4-2 · 설계안 1-3).
+              `loadJson` 은 둘을 뭉갠다 — 저장소를 «못 읽었을» 뿐인데 「표식이 없다」로 읽으면
+              그대로 게이트가 열려 이 사고가 «그대로» 재현된다.
+              → 못 읽었으면(또는 내용이 깨졌으면) «묻는» 쪽으로 간다. 묻는 것은 아무것도 잃지 않는다.
+           ⚠ 저장소가 통째로 안 읽히는 상황이면 `saja:session` 도 못 읽어 화면이 비므로,
+              위 `localEmpty` 가 먼저 걸린다 — 그래서 «헛물음»이 늘지 않는다. */
+        const pr = await loadKey(PENDING_KEY);
+        if (!alive) return;
+        let pend = null;
+        let undecided = !pr.ok; // 🔴 못 읽었다 → 안전한 쪽(묻는다)
+        if (pr.ok && pr.value != null) {
+          try {
+            pend = JSON.parse(pr.value);
+          } catch (e) {
+            undecided = true;
+          } // 깨졌다 → 묻는다
+          if (pend && pend.date === bdate) undecided = true;
+        }
+        if (localEmpty || first && !undecided) {
           // 앱을 막 열었을 때 = 이 PC 내용이 곧 그 날짜의 내용이다 → 그대로 올린다
-          setSrvSyncedDate(bdate);
+          // (인터넷이 끊긴 채 주문을 받고 앱을 다시 연 경우 — 그 길을 막으면 안 된다)
+          openSaveGate(bdate);
           setSrvState("idle");
         } else {
           // ⚠ 날짜를 바꾼 경우 — 화면에 남은 건 「앞 날짜」의 주문이다.
           //    묻지 않고 올리면 그 주문이 이 날짜 것으로 둔갑한다.
+          // ⚠ 새로고침하면 fromDateRef 가 비므로 표식에 적어 둔 「어디서 왔는지」를 되쓴다.
+          const from = fromDateRef.current || pend && pend.from || null;
+          markPendingDate(bdate, from);
           setSrvPick({
             srv: null,
             empty: true,
-            from: fromDateRef.current,
+            from,
             localCount: orders.length,
             srvCount: 0
           });
@@ -2540,8 +2597,8 @@ function App() {
     srvSyncedRef.current = null;
     setSrvPick(null);
     setSrvConflict(null);
-    setSrvSyncedDate(bdate);
-    setSrvState("idle");
+    openSaveGate(bdate);
+    setSrvState("idle"); // 안전장치 222 — 「골랐다」 = 게이트를 연다
     showToast(`✓ ${bdate} 을(를) 새 방송으로 시작합니다`);
   };
   /* ⚠⚠ 「지금 화면 내용을 이 날짜로 올리기」 — 3단 잠금 (2026-07-29 3차)
@@ -2592,7 +2649,7 @@ function App() {
     setSrvConflict(null);
     setMoveOpen(false);
     setMoveArm(false);
-    setSrvSyncedDate(bdate);
+    openSaveGate(bdate); // 안전장치 222
     // ⭐ 앞 날짜를 아는 경우에만 뒷정리 배너를 띄운다.
     //    엑셀 불러오기로 온 경우(from 없음)는 앞 날짜 서버 행이 없어 이중계상이 안 생긴다.
     if (from) setMoveLeft({
@@ -2640,7 +2697,7 @@ function App() {
     setPlace(pl);
     srvPlaceRef.current = pl;
     if (pl) rememberPlace(pl);
-    setSrvSyncedDate(bdate);
+    openSaveGate(bdate); // 안전장치 222
     setSrvState("ok");
     setSrvPick(null);
     setSrvConflict(null);
@@ -2715,7 +2772,7 @@ function App() {
       setSrvRev(r.rev);
       srvSyncedRef.current = JSON.stringify(payload); // 방금 올린 것이 곧 서버 내용
       srvPlaceRef.current = place;
-      setSrvSyncedDate(bdate);
+      openSaveGate(bdate); // 안전장치 222
       setSrvState("ok");
       setSrvPick(null);
       setSrvConflict(null);
