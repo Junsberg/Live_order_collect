@@ -4403,6 +4403,19 @@ function App() {
      ⚠ 화면은 cust(nick) 을, 기간은 payload 의 customers[nick] 을 넘긴다. **판정은 여기 «한 곳»이다.**
      ⚠⚠ 기간 쪽에 입금 판정·상품 집계를 «새로 만들지 마라». t_perprod ⑪ 이 소스로 못 박는다. */
   const paidOrderOf = (o, ct) => o.done ? o.donePaid !== false : !!(ct && ct.paid);
+  /* ⭐⭐ 안전장치 228 — 「순수 상품 매출」에 넣을 주문인가 (2026-09-05 31차 «2부» · 📌 **사장님 실사용 보고**)
+     📌 사장님 (2026-09-05, 기간 엑셀을 실제로 뽑아 보시고):
+       > 「킵 주문건인데 «출고완료된 게 아니면» 매출로 잡히면 안 되지.
+       >   순수 상품에 대한 마진이 나와야 하니까.」
+     🔴 무엇을 막는가 — 킵은 돈을 먼저 받아도 «물건이 안 나갔다». 그것을 매출로 세면
+        아직 팔지 않은 것으로 마진을 계산하게 된다. 출고되는 «그날» 잡혀야 한다.
+     🔵 **실서버 8월 실측으로 갈랐다** — 이 판정은 요약본 `paid_goods` 와 «날짜별로 전부 일치»한다
+        (13일 · 차이 0원). 킵 14건 80,300원은 «전부 미출고»였다.
+        → 상품 시트 매출 == 요약본 `paid_goods` 가 되어 **금액으로 자기검증할 수 있다.**
+     ⚠⚠ **하루치 「상품 마진」 시트와 기간 시트가 «이 함수 하나»를 쓴다** (money-rules §1).
+        기간 쪽에 따로 만들지 마라 — `t_perprod` ⑪ 이 소스로 못 박는다.
+     ⚠ 「총 손익」의 「상품 매출 (입금)」(`goods`)은 «안 건드린다** — 안전장치 171 로 정한 별개 항목이다. */
+  const goodsOrderOf = (o, ct) => !!o && !o.canceled && paidOrderOf(o, ct) && !(ct && ct.keep && !o.done);
   /* ⚠ 집계 키는 「상품명 + 가격」이다. 상품명만으로 묶으면 막판 할인처럼 같은 상품을
         다른 가격에 판 경우 단가·수량이 틀리게 나온다 (매출 합계는 맞아서 알아채기 어렵다).
      ⚠ buyers 는 하루치 시트만 쓴다 — 기간 시트에는 📌 사장님 결정으로 «닉네임을 안 넣는다». */
@@ -4441,7 +4454,17 @@ function App() {
           앱이 통째로 죽는다 — 빌드는 «성공»한다 (13차에 같은 함정을 겪었다). */
     // ⭐ 227 — 판정은 위 paidOrderOf «한 곳»이다. 여기서 다시 쓰지 않는다.
     const paidOrder = o => paidOrderOf(o, cust(o.nick));
-    const acctOrders = orders.filter(o => !o.canceled && paidOrder(o));
+    /* ⭐⭐ 안전장치 228 (2026-09-05 31차 «2부» · 📌 **사장님 실사용 보고**)
+       📌 「킵 주문건인데 «출고완료된 게 아니면» 매출로 잡히면 안 되지.」
+       🔴 무엇이 달라지나 — 이 목록에서 `goods`·`totalQty`·`prodList` 가 «전부» 나온다.
+          한쪽만 바꾸면 같은 시트에서 **매출과 마진의 기준이 어긋난다**(안전장치 50 의 취지).
+          31차 «2부»에 `prodList` 만 먼저 바꿨다가 `t_acct` 가 그것을 잡았다.
+       ⚠⚠ **옛 동작과 다르다** — 안전장치 171 은 「킵·픽업이어도 입금됐으면 포함」이었다.
+          이제 **킵은 «출고완료»된 것만** 센다. 픽업은 그대로 들어온다(물건이 나갔다).
+       🔵 실서버 8월 실측 — 이 기준은 요약본 `paid_goods` 와 «날짜별로 전부 일치»한다(13일 · 차이 0원).
+       ⚠ `unpaidOrders` 는 «그대로»다 — 킵 입금분은 돈을 «받았으므로» 미입금이 아니다.
+          그 몫은 `keepGoods`·`keepPaid` 로 따로 잡힌다. */
+    const acctOrders = orders.filter(o => goodsOrderOf(o, cust(o.nick)));
     const unpaidOrders = orders.filter(o => !o.canceled && !paidOrder(o));
     const unpaidQtySum = unpaidOrders.reduce((s, o) => s + o.qty, 0);
     const unpaidAmtSum = unpaidOrders.reduce((s, o) => s + o.price * o.qty, 0);
@@ -4605,7 +4628,9 @@ function App() {
        ⚠ 집계 키는 「상품명 + 가격」. 상품명만으로 묶으면 막판 할인처럼 같은 상품을
           다른 가격에 판 경우 단가·수량이 틀리게 나온다 (매출 합계는 맞아서 알아채기 어렵다).
        ⚠ 두 곳에서 따로 세면 회계가 조용히 어긋난다 (money-rules §1). */
-    /* ⭐ 227 — 집계는 위 prodAgg «한 곳»이다. 기간 상품 시트도 «같은 함수»를 쓴다. */
+    /* ⭐ 227 — 집계는 위 prodAgg «한 곳»이다. 기간 상품 시트도 «같은 함수»를 쓴다.
+       ⭐⭐ 228 — acctOrders 가 이미 goodsOrderOf 로 걸러져 있다. 여기서 «또» 거르지 마라 —
+          두 곳에서 거르면 한쪽만 고쳤을 때 조용히 갈라진다 (money-rules §1). */
     const prodList = prodAgg(acctOrders);
     const lotteCost = lotteBilled * (Number(shipCost.lotte) || 0);
     const cjCost = cjBilled * (Number(shipCost.cj) || 0);
@@ -6623,18 +6648,20 @@ function App() {
         if (!row || !row.found) continue; // 행이 없는 날짜는 정상 (건너뛴다)
         const os = row.payload && row.payload.orders || [];
         const cs = row.payload && row.payload.customers || {};
-        /* 227 — 그날의 「입금된 주문」을 담는다. 판정은 paidOrderOf «한 곳»이다. */
-        byDate[d] = os.filter(o => o && !o.canceled && paidOrderOf(o, cs[o.nick]));
-        /* 227 — 본문 ↔ 요약본 어긋남은 «주문 건수»로 잰다 (요약본 total_orders ↔ 취소 제외 건수).
-           ⚠ 금액으로 재려면 paidGoods 판정을 본문에서 «다시» 만들어야 한다 — money-rules §1 위반이다.
-           ⚠ 계산 규칙이 다른 날짜(calc_ver ≠ CALC_VER)는 기준 자체가 달라 재지 않는다. */
+        /* 227·228 — 그날의 「매출로 잡을 주문」을 담는다. 판정은 goodsOrderOf «한 곳»이다. */
+        byDate[d] = os.filter(o => goodsOrderOf(o, cs[o.nick]));
+        /* ⭐⭐ 228 — 본문 ↔ 요약본 어긋남을 «금액»으로 잰다.
+           🔵 goodsOrderOf 가 요약본 paid_goods 와 «같은 뜻»이 되어(8월 실서버 13일 전부 일치)
+              이제 금액으로 맞댈 수 있다. 31차 «1부»에는 판정이 달라 «건수»로만 잴 수 있었다.
+           ⚠ 계산 규칙이 다른 날짜(calc_ver ≠ CALC_VER)는 기준 자체가 달라 재지 않는다.
+           ⚠ 어긋나도 숫자를 «안 바꾼다» — 그 날짜를 알리기만 한다 (안전장치 205 와 같은 방식). */
         const sm = (sumRows || []).find(x => String(x.date) === d);
-        const bodyCnt = os.filter(o => o && !o.canceled).length;
-        if (sm && Number(sm.calc_ver) === CALC_VER && Number(sm.total_orders || 0) !== bodyCnt) {
+        const bodyAmt = byDate[d].reduce((a, o) => a + (Number(o.price) || 0) * (Number(o.qty) || 0), 0);
+        if (sm && Number(sm.calc_ver) === CALC_VER && Number(sm.paid_goods || 0) !== bodyAmt) {
           mismatch.push({
             date: d,
-            body: bodyCnt,
-            sum: Number(sm.total_orders || 0)
+            body: bodyAmt,
+            sum: Number(sm.paid_goods || 0)
           });
         }
         os.forEach(o => {
@@ -6739,6 +6766,7 @@ function App() {
       orders: 0,
       custs: 0,
       sales: 0,
+      shipFee: 0,
       shipProfit: 0,
       refund: 0,
       keepGoods: 0,
@@ -6758,6 +6786,7 @@ function App() {
                그래서 unpaid 쪽은 아예 보지 않는다 — 어느 날짜든 같은 뜻이 된다.
             ⚠ 그 대신 지난 날짜는 매출이 낮아 보인다. calc_ver 안내가 그것을 알려준다. */
       t.sales += n(r.paid_goods) + n(r.paid_ship_fee);
+      t.shipFee += n(r.paid_ship_fee); // ⭐ 228 — 상품 시트 「대조 줄」에 쓴다 (매출에서 빼는 몫)
       t.shipProfit += n(sc.shipProfit);
       t.refund += n(r.refund_goods) + n(r.refund_ship_fee);
       t.keepGoods += n(r.keep_goods);
@@ -6878,10 +6907,19 @@ function App() {
       const costSum = prods.reduce((a, r) => a + (r.price * r.qty - marginOf(r.name, r.price, r.qty)), 0);
       const amtSum = prods.reduce((a, r) => a + r.amt, 0);
       const qtySum = prods.reduce((a, r) => a + r.qty, 0);
-      const sx = [["상품 마진", `${perFrom} ~ ${perTo}`, place], ["기준", "입금된 주문만 — 킵·픽업이어도 입금됐으면 포함 · 미입금은 제외"], ["⚠ 위 「기간합산」의 매출과 «기준이 다를 수 있습니다»", "기간합산 매출은 «요약본»에서 나오고 킵을 뺍니다. 이 시트는 «방송 본문»에서 세고 「입금된 킵」을 넣습니다."]];
+      /* ⭐⭐ 안전장치 228 — 「대조 줄」 (2026-09-05 31차 «2부» · 📌 사장님 실사용 보고)
+         🔴 무엇을 막는가 — 사장님이 8.1~8.31 을 뽑아 보시고 「금액이 다른데?」라고 물으셨다.
+            31차 «1부»는 「킵 처리가 달라서」라고만 적었는데, 실제 차이 99,700원 중
+            **배송비가 180,000원**이었다. **가장 큰 이유를 안 적었던 것이다.**
+         ⭐ 228 뒤로 상품 시트 매출 == 요약본 paid_goods 라서 차이는 «배송비 하나»다.
+            → 「기간합산 매출 − 배송비 = 이 시트 매출」을 적어 **눈으로 검산되게** 한다.
+         ⚠ 이 세 줄이 «안 맞으면» 무언가 어긋난 것이다 — 지우지 마라. */
+      const shipFee = Number((periodCalc.t || {}).shipFee) || 0;
+      const perSales = Number((periodCalc.t || {}).sales) || 0;
+      const sx = [["상품 마진", `${perFrom} ~ ${perTo}`, place], ["기준", "입금된 주문만 · 킵은 «출고완료»된 것만 — 아직 안 나간 킵은 매출이 아닙니다"], ["", "이 시트는 «상품 금액만» 셉니다 — 배송비는 들어 있지 않습니다."], [], ["대조", "기간합산 매출", perSales], ["", "− 배송비 (이 시트에 없음)", shipFee], ["", "= 이 시트 매출", perSales - shipFee]];
       /* 227 — 본문과 요약본이 어긋난 날짜를 «알린다». 숫자를 조용히 바꾸지 않는다 (205 와 같은 방식). */
       if ((periodCalc.mism || []).length) {
-        sx.push(["⚠ 본문과 요약본이 어긋난 날짜가 있습니다", periodCalc.mism.map(m => `${m.date} (본문 ${m.body}건 ≠ 요약본 ${m.sum}건)`).join(" · ") + " — 그 날짜를 한 번 열었다 저장하시면 맞춰집니다"]);
+        sx.push(["⚠ 본문과 요약본이 어긋난 날짜가 있습니다", periodCalc.mism.map(m => `${m.date} (본문 ${won(m.body)} ≠ 요약본 ${won(m.sum)})`).join(" · ") + " — 그 날짜를 한 번 열었다 저장하시면 맞춰집니다"]);
       }
       if (!prods.length) sx.push(["", "이 기간에 «입금된» 주문이 없습니다."]);
       sx.push([]);
