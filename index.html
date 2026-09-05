@@ -4396,6 +4396,38 @@ function App() {
     XLSX.writeFile(wb, `창고_픽업_${dateCode}.xlsx`);
   };
 
+  /* ⭐⭐ 안전장치 227 — 입금 판정·상품 집계를 «한 벌»로 모은다 (2026-09-05 31차 · 미결 61)
+     🔴 무엇을 막는가 — 기간 엑셀에 「상품 마진」 시트를 붙이려면 «다른 날짜»의 주문을 세야 하는데
+        그 날짜는 화면에 없다. 판정을 기간 쪽에 «또» 쓰면 하루치와 조용히 갈라진다 (money-rules §1).
+        미결 19(요약본 갱신 버튼)를 안 만들기로 한 것과 «같은 벽»이었다 — 이번엔 함수를 뽑아서 넘었다.
+     ⚠ 화면은 cust(nick) 을, 기간은 payload 의 customers[nick] 을 넘긴다. **판정은 여기 «한 곳»이다.**
+     ⚠⚠ 기간 쪽에 입금 판정·상품 집계를 «새로 만들지 마라». t_perprod ⑪ 이 소스로 못 박는다. */
+  const paidOrderOf = (o, ct) => o.done ? o.donePaid !== false : !!(ct && ct.paid);
+  /* ⚠ 집계 키는 「상품명 + 가격」이다. 상품명만으로 묶으면 막판 할인처럼 같은 상품을
+        다른 가격에 판 경우 단가·수량이 틀리게 나온다 (매출 합계는 맞아서 알아채기 어렵다).
+     ⚠ buyers 는 하루치 시트만 쓴다 — 기간 시트에는 📌 사장님 결정으로 «닉네임을 안 넣는다». */
+  const prodAgg = list => {
+    const pmap = {};
+    (list || []).forEach(o => {
+      const k = `${o.name}\u241f${o.price}`;
+      pmap[k] = pmap[k] || {
+        key: k,
+        name: o.name,
+        price: o.price,
+        qty: 0,
+        amt: 0,
+        paidQty: 0,
+        unpaidQty: 0,
+        buyers: new Set()
+      };
+      pmap[k].qty += o.qty;
+      pmap[k].amt += o.price * o.qty;
+      pmap[k].paidQty += o.qty;
+      pmap[k].buyers.add(o.nick);
+    });
+    return Object.values(pmap).sort((a, b) => b.amt - a.amt || a.name.localeCompare(b.name, "ko") || b.price - a.price);
+  };
+
   /* ===== 하루 집계 — 결산 엑셀과 요약본이 「같은 한 벌」을 쓰게 한다 ⭐ 0-5
      ⚠ 이 값을 결산 엑셀도 쓰고 서버 요약본도 쓴다. 절대로 따로 계산하지 말 것.
         금액 판정이 두 벌이 되면 어긋나고, 어긋나면 회계가 조용히 틀린다.
@@ -4407,7 +4439,8 @@ function App() {
     /* ⭐⭐ 회계·상품별 집계 대상 — 「입금된 주문」 (2026-08-12 14차 · 안전장치 171)
        ⚠ 이 선언은 goods·totalQty·pmap «앞»에 있어야 한다. 뒤에 두면 선언 전 사용으로
           앱이 통째로 죽는다 — 빌드는 «성공»한다 (13차에 같은 함정을 겪었다). */
-    const paidOrder = o => o.done ? o.donePaid !== false : cust(o.nick).paid;
+    // ⭐ 227 — 판정은 위 paidOrderOf «한 곳»이다. 여기서 다시 쓰지 않는다.
+    const paidOrder = o => paidOrderOf(o, cust(o.nick));
     const acctOrders = orders.filter(o => !o.canceled && paidOrder(o));
     const unpaidOrders = orders.filter(o => !o.canceled && !paidOrder(o));
     const unpaidQtySum = unpaidOrders.reduce((s, o) => s + o.qty, 0);
@@ -4572,25 +4605,8 @@ function App() {
        ⚠ 집계 키는 「상품명 + 가격」. 상품명만으로 묶으면 막판 할인처럼 같은 상품을
           다른 가격에 판 경우 단가·수량이 틀리게 나온다 (매출 합계는 맞아서 알아채기 어렵다).
        ⚠ 두 곳에서 따로 세면 회계가 조용히 어긋난다 (money-rules §1). */
-    const pmap = {};
-    acctOrders.forEach(o => {
-      const k = `${o.name}\u241f${o.price}`;
-      pmap[k] = pmap[k] || {
-        key: k,
-        name: o.name,
-        price: o.price,
-        qty: 0,
-        amt: 0,
-        paidQty: 0,
-        unpaidQty: 0,
-        buyers: new Set()
-      };
-      pmap[k].qty += o.qty;
-      pmap[k].amt += o.price * o.qty;
-      pmap[k].paidQty += o.qty;
-      pmap[k].buyers.add(o.nick);
-    });
-    const prodList = Object.values(pmap).sort((a, b) => b.amt - a.amt || a.name.localeCompare(b.name, "ko") || b.price - a.price);
+    /* ⭐ 227 — 집계는 위 prodAgg «한 곳»이다. 기간 상품 시트도 «같은 함수»를 쓴다. */
+    const prodList = prodAgg(acctOrders);
     const lotteCost = lotteBilled * (Number(shipCost.lotte) || 0);
     const cjCost = cjBilled * (Number(shipCost.cj) || 0);
     const consignCost = consignCount * (Number(shipCost.consign) || 0);
@@ -6536,7 +6552,9 @@ function App() {
   // { state: "checking" | "ok" | "fail", dups: [] }  ⚠ fail 은 「중복 없음」이 아니다
   const [perDup, setPerDup] = useState({
     state: "checking",
-    dups: []
+    dups: [],
+    byDate: {},
+    mismatch: []
   });
   const [perTick, setPerTick] = useState(0);
   const loadPeriod = async (from, to) => {
@@ -6568,13 +6586,24 @@ function App() {
 
   /* 주문 id 중복 대조 — 본문을 날짜별로 읽어 id 를 맞대 본다.
      ⚠ 한 날짜라도 못 읽으면 «검사 실패»다. 읽은 것만으로 「중복 없음」이라 하면 거짓말이 된다. */
-  const checkPeriodDup = async dates => {
+  const checkPeriodDup = async (dates, sumRows) => {
     const c = sb();
     if (!c) return {
       state: "fail",
-      dups: []
+      dups: [],
+      byDate: {},
+      mismatch: []
     };
     const seen = {}; // 주문 id -> [날짜…]
+    /* ⭐⭐ 안전장치 227 (2026-09-05 31차 · 미결 61 · 📌 사장님 요청)
+       이 루프는 이미 그 기간 «본문»을 날짜별로 읽는다. 상품 집계를 여기 얹으면
+       **서버 호출이 한 건도 늘지 않는다.**
+       ⚠ 중복 대조는 「킵·취소 제외」(activeOrders 성격 · 안전장치 200)를 쓰고,
+          상품 집계는 「입금된 주문」(acctOrders · 안전장치 171)을 쓴다 — **판정이 다르다.**
+          한 루프에 두 판정이 나란히 있는 것이지, 한 판정을 두 곳에 둔 것이 아니다.
+       ⚠ 날짜별로 «따로» 담는다 — 장소 필터가 바뀌어도 서버를 다시 읽지 않기 위해서다. */
+    const byDate = {}; // 날짜 -> [입금된 주문…]
+    const mismatch = []; // 본문 ↔ 요약본이 어긋난 날짜
     for (const d of dates) {
       try {
         const {
@@ -6586,12 +6615,28 @@ function App() {
         });
         if (error) return {
           state: "fail",
-          dups: []
+          dups: [],
+          byDate: {},
+          mismatch: []
         };
         const row = Array.isArray(data) ? data[0] : data;
         if (!row || !row.found) continue; // 행이 없는 날짜는 정상 (건너뛴다)
         const os = row.payload && row.payload.orders || [];
         const cs = row.payload && row.payload.customers || {};
+        /* 227 — 그날의 「입금된 주문」을 담는다. 판정은 paidOrderOf «한 곳»이다. */
+        byDate[d] = os.filter(o => o && !o.canceled && paidOrderOf(o, cs[o.nick]));
+        /* 227 — 본문 ↔ 요약본 어긋남은 «주문 건수»로 잰다 (요약본 total_orders ↔ 취소 제외 건수).
+           ⚠ 금액으로 재려면 paidGoods 판정을 본문에서 «다시» 만들어야 한다 — money-rules §1 위반이다.
+           ⚠ 계산 규칙이 다른 날짜(calc_ver ≠ CALC_VER)는 기준 자체가 달라 재지 않는다. */
+        const sm = (sumRows || []).find(x => String(x.date) === d);
+        const bodyCnt = os.filter(o => o && !o.canceled).length;
+        if (sm && Number(sm.calc_ver) === CALC_VER && Number(sm.total_orders || 0) !== bodyCnt) {
+          mismatch.push({
+            date: d,
+            body: bodyCnt,
+            sum: Number(sm.total_orders || 0)
+          });
+        }
         os.forEach(o => {
           if (!o || !o.id) return;
           /* ⭐⭐ 안전장치 200 (2026-08-27 24차 · 미결 36 · **사장님 실사용 보고**)
@@ -6614,7 +6659,9 @@ function App() {
       } catch (e) {
         return {
           state: "fail",
-          dups: []
+          dups: [],
+          byDate: {},
+          mismatch: []
         };
       }
     }
@@ -6624,7 +6671,9 @@ function App() {
     }));
     return {
       state: "ok",
-      dups
+      dups,
+      byDate,
+      mismatch
     };
   };
   useEffect(() => {
@@ -6636,7 +6685,9 @@ function App() {
       });
       setPerDup({
         state: "fail",
-        dups: []
+        dups: [],
+        byDate: {},
+        mismatch: []
       });
       return;
     }
@@ -6647,7 +6698,9 @@ function App() {
     });
     setPerDup({
       state: "checking",
-      dups: []
+      dups: [],
+      byDate: {},
+      mismatch: []
     });
     (async () => {
       const r = await loadPeriod(perFrom, perTo);
@@ -6656,12 +6709,15 @@ function App() {
       if (r.state !== "ok") {
         setPerDup({
           state: "fail",
-          dups: []
+          dups: [],
+          byDate: {},
+          mismatch: []
         });
         return;
       }
       const ds = r.rows.map(x => String(x.date)).sort();
-      const dp = await checkPeriodDup(ds);
+      // ⭐ 227 — 요약본 행을 같이 넘긴다 (본문 ↔ 요약본 어긋남을 그 루프에서 잰다)
+      const dp = await checkPeriodDup(ds, r.rows);
       if (!dead) setPerDup(dp);
     })();
     return () => {
@@ -6727,11 +6783,20 @@ function App() {
     });
     const places = [...new Set(all.map(r => r.place).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ko"));
     const hasNone = all.some(r => !r.place);
+    /* ⭐⭐ 안전장치 227 — 상품별 집계 (미결 61 · 📌 사장님 요청)
+       ⚠ 장소 필터가 걸린 «그 날짜»만 합친다 — 위 rows 가 이미 걸러진 것이다.
+       ⚠ 서버를 다시 읽지 않는다. 중복 대조가 날짜별로 담아 둔 것(byDate)을 쓴다.
+       ⚠ 집계는 prodAgg «한 곳»이다 — 하루치 「상품 마진」 시트와 같은 함수다 (money-rules §1). */
+    const acctAll = rows.reduce((a, r) => a.concat((perDup.byDate || {})[String(r.date)] || []), []);
+    const prods = prodAgg(acctAll);
+    const mism = (perDup.mismatch || []).filter(m => rows.some(r => String(r.date) === m.date));
     return {
       rows,
       t,
       places,
-      hasNone
+      hasNone,
+      prods,
+      mism
     };
   })();
 
@@ -6787,6 +6852,71 @@ function App() {
     }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "기간합산");
+
+    /* ⭐⭐ 안전장치 227 — 「상품 마진」 시트 (2026-09-05 31차 · 미결 61 · 📌 사장님 요청)
+       📌 「8.1~8.31 처럼 기간을 지정해 그 안의 주문 상품·수량을 «합산»해 «한 시트»에
+           상품명 · 판매수량 · 공급가 또는 수수료 · 마진 · 합계 로 나오게 해 달라」
+       📌 「닉네임별로 보여줄 필요는 없다」 → 「산 사람」 열을 «넣지 않는다» (하루치와 다른 점은 이것뿐).
+       ⚠⚠ 숫자를 여기서 «새로 세지 않는다» — periodCalc.prods 는 prodAgg 한 곳에서 나온다.
+       ⚠⚠ 「없음」과 「못 읽음」을 구분한다 (project-map 4-2) — 본문을 못 읽었으면
+          «빈 시트»가 아니라 「못 만들었습니다」를 적는다. 0원짜리 합계는 거짓말이 된다. */
+    if (perDup.state !== "ok") {
+      const sx = [["상품 마진", `${perFrom} ~ ${perTo}`, place], ["⚠ 상품 시트를 못 만들었습니다", "방송 «본문»을 못 읽어 상품별 수량·마진을 셀 수 없었습니다."], ["", "「상품이 없다」가 «아니라» 「못 읽었다」입니다 — 잠시 뒤 다시 뽑아 주세요."]];
+      const wx = XLSX.utils.aoa_to_sheet(sx);
+      wx["!cols"] = [{
+        wch: 30
+      }, {
+        wch: 62
+      }, {
+        wch: 14
+      }];
+      XLSX.utils.book_append_sheet(wb, wx, "상품 마진");
+    } else {
+      const prods = periodCalc.prods || [];
+      const missing = prods.filter(r => !hasCost(r.name, r.price));
+      const marginSum = prods.reduce((a, r) => a + marginOf(r.name, r.price, r.qty), 0);
+      const costSum = prods.reduce((a, r) => a + (r.price * r.qty - marginOf(r.name, r.price, r.qty)), 0);
+      const amtSum = prods.reduce((a, r) => a + r.amt, 0);
+      const qtySum = prods.reduce((a, r) => a + r.qty, 0);
+      const sx = [["상품 마진", `${perFrom} ~ ${perTo}`, place], ["기준", "입금된 주문만 — 킵·픽업이어도 입금됐으면 포함 · 미입금은 제외"], ["⚠ 위 「기간합산」의 매출과 «기준이 다를 수 있습니다»", "기간합산 매출은 «요약본»에서 나오고 킵을 뺍니다. 이 시트는 «방송 본문»에서 세고 「입금된 킵」을 넣습니다."]];
+      /* 227 — 본문과 요약본이 어긋난 날짜를 «알린다». 숫자를 조용히 바꾸지 않는다 (205 와 같은 방식). */
+      if ((periodCalc.mism || []).length) {
+        sx.push(["⚠ 본문과 요약본이 어긋난 날짜가 있습니다", periodCalc.mism.map(m => `${m.date} (본문 ${m.body}건 ≠ 요약본 ${m.sum}건)`).join(" · ") + " — 그 날짜를 한 번 열었다 저장하시면 맞춰집니다"]);
+      }
+      if (!prods.length) sx.push(["", "이 기간에 «입금된» 주문이 없습니다."]);
+      sx.push([]);
+      sx.push(["상품명", "판매가", "판매수량", "매출", "공급가", "수수료%", "원가합계", "마진", "마진율", "원가입력"]);
+      prods.forEach(r => {
+        const cc = costOf(r.name, r.price) || {};
+        const m = marginOf(r.name, r.price, r.qty);
+        sx.push([r.name, r.price, r.qty, r.amt, Number(cc.cost) > 0 ? Number(cc.cost) : "", Number(cc.feeRate) > 0 ? Number(cc.feeRate) : "", r.price * r.qty - m, m, r.amt ? Math.round(m / r.amt * 100) + "%" : "", hasCost(r.name, r.price) ? "입력됨" : "미입력"]);
+      });
+      sx.push([]);
+      sx.push(["합계", "", qtySum, amtSum, "", "", costSum, marginSum, "", missing.length ? `⚠ 원가 미입력 ${missing.length}종 포함 — 마진이 실제보다 높습니다` : ""]);
+      const wx = XLSX.utils.aoa_to_sheet(sx);
+      wx["!cols"] = [{
+        wch: 30
+      }, {
+        wch: 10
+      }, {
+        wch: 10
+      }, {
+        wch: 13
+      }, {
+        wch: 10
+      }, {
+        wch: 9
+      }, {
+        wch: 13
+      }, {
+        wch: 13
+      }, {
+        wch: 9
+      }, {
+        wch: 40
+      }];
+      XLSX.utils.book_append_sheet(wb, wx, "상품 마진");
+    }
     XLSX.writeFile(wb, `기간합산_사자창고_${perFrom.replace(/-/g, "")}_${perTo.replace(/-/g, "")}.xlsx`);
   };
 
