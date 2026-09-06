@@ -2703,6 +2703,38 @@ function App() {
     setSrvConflict(null);
   };
 
+  /* ⭐⭐ 안전장치 230 — 「내용이 같은가」 판정 «한 벌» (2026-09-07 31차 «6부» · 📌 사장님 승인)
+     🔴 무엇을 막는가 — 실서버 정밀검사(2026-09-07)에서 찾았다:
+        되돌리기에 꼭 필요한 스냅샷(「출고완료 처리 직전」·「킵 불러오기 직전」·「주문서 삭제 직전」…)
+        **168개가 이미 밀려나 사라졌다.** 「서버 것 받기 직전」이 날짜당 10개 한도의 9개를 차지했고
+        그중 6개는 «같은 내용»(md5 동일)이었다. 사장님이 날짜를 열 때마다 카드가 떠서(키 순서 ·
+        사장님 결정 2026-08-17) 「받기」를 누르시고, 그때마다 «되돌릴 것도 없는» 스냅샷이 쌓였다.
+     ⭐ 이 함수는 안전장치 186(「내용이 같습니다」 표시)이 인라인으로 갖고 있던 norm 비교를
+        «뽑은» 것이다. 186 표시와 「받기」의 스냅샷 건너뛰기가 «같은 판정»을 쓴다 (money-rules §1).
+     ⚠⚠ 데이터 유실 0 이 원칙 — 판정은 «보수적»이다:
+        · 키 순서만 무시한다. 배열 «순서»·값·키 유무는 전부 «내용»이다.
+        · 비교 중 예외가 나면 «다르다»(false)로 돌려준다 — 「못 가름」은 「같음」이 아니다.
+     ⚠ 이 함수는 «카드 판정»(1374줄 `srvStr === localStr`)에 관여하지 «않는다». 카드는 그대로 뜬다. */
+  const sameContent = (a, b) => {
+    try {
+      const norm = v => {
+        if (Array.isArray(v)) return v.map(norm);
+        if (v && typeof v === "object") {
+          const o = {};
+          Object.keys(v).sort().forEach(k => {
+            o[k] = norm(v[k]);
+          });
+          return o;
+        }
+        return v;
+      };
+      if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+      return JSON.stringify(norm(a)) === JSON.stringify(norm(b));
+    } catch (e) {
+      return false;
+    }
+  };
+
   // 충돌·선택 상황에서 「서버 것 받기」
   const takeServer = async () => {
     const r = await serverLoad(bdate);
@@ -2721,9 +2753,27 @@ function App() {
        ⚠ bdate 로 덮어쓰지 «않는다». srvSyncedDate 에 앞 날짜가 남아 있는 경우
           (날짜를 옮겼는데 새 날짜 로드 전에 충돌 카드가 뜬 상황) 화면에 앞 날짜 잔재가
           있을 수 있으므로, 그때는 «막히는 쪽»이 안전하다. 비어 있을 때만 bdate 로 메운다. */
-    takeSnap(`서버 것 받기 직전 (이 PC 내용 ${orders.filter(o => !o.canceled).length}건)`, {
-      srcDate: srvSyncedDate || bdate
-    });
+    /* ⭐⭐ 안전장치 230 — PC 내용이 서버와 «완전히 같으면» 스냅샷을 «안 찍는다».
+          되돌릴 것이 없으니 찍을 이유가 없고, 찍으면 진짜 필요한 스냅샷을 밀어낸다.
+       ⚠ mine 의 구성은 186 표시와 «같아야» 한다 — 한 키라도 빠지면 「같다」가 거짓이 된다.
+       ⚠ sameContent 가 false 면(다르거나 «못 가름») 전과 똑같이 찍는다 — 데이터 유실 0. */
+    const mine = {
+      products,
+      orders,
+      customers,
+      shipFee,
+      shipCost,
+      bdate,
+      pickState,
+      settleHeader,
+      trackHeader,
+      shipData
+    };
+    if (!sameContent(mine, r.payload)) {
+      takeSnap(`서버 것 받기 직전 (이 PC 내용 ${orders.filter(o => !o.canceled).length}건)`, {
+        srcDate: srvSyncedDate || bdate
+      });
+    }
     applyServerPayload(r);
     showToast(`✓ 서버 데이터를 불러왔습니다 · 주문 ${(r.payload.orders || []).length}건`);
   };
@@ -9891,17 +9941,7 @@ function App() {
     className: "hint"
   }, "덮어쓰기는 사장님만 할 수 있습니다")), (() => {
     try {
-      const norm = v => {
-        if (Array.isArray(v)) return v.map(norm);
-        if (v && typeof v === "object") {
-          const o = {};
-          Object.keys(v).sort().forEach(k => {
-            o[k] = norm(v[k]);
-          });
-          return o;
-        }
-        return v;
-      };
+      /* ⭐ 230 — 판정은 sameContent «한 곳»이다. 여기서 norm 을 다시 쓰지 않는다. */
       const mine = {
         products,
         orders,
@@ -9915,7 +9955,7 @@ function App() {
         shipData
       };
       const srvp = srvPick.srv && srvPick.srv.payload || {};
-      if (JSON.stringify(norm(srvp)) !== JSON.stringify(norm(mine))) return null;
+      if (!sameContent(srvp, mine)) return null;
       return /*#__PURE__*/React.createElement("div", {
         className: "srvsame"
       }, "✅ ", /*#__PURE__*/React.createElement("b", null, "두 내용이 같습니다"), " — 어느 쪽을 고르셔도 결과가 같습니다.");
