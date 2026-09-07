@@ -7911,7 +7911,14 @@ function App() {
       bdate: date
     });
     setBakArm(null);
-    showToast(from === date ? `📂 ${date} 을(를) «화면»으로 불러왔습니다 — 서버에는 아직 안 올라갑니다` : `📂 ${date} 을(를) «화면»으로 불러왔습니다 — 서버에는 아직 안 올라갑니다 · 앞 화면은 «${from}» 의 ↩ 되돌리기에 남았습니다`);
+    /* ⭐⭐ 안전장치 233 (2026-09-07 32차 «후속» · 📌 사장님 결정 「나」 · 설계안 §5-91)
+       🔴 옛 문구는 「📂 {date} 을(를) «화면»으로 불러왔습니다」라고 «단정»했는데 **사실이 아니었다** —
+          `bdate` 가 바뀌면 서버 로드가 `!first` 갈래를 타서 **서버에 있는 날짜는 서버 내용이 덮는다**
+          (32차에 `m_bak32.js` 로 재현 — 백업 3건을 불렀는데 화면은 서버 7건이었다).
+       📌 **동작은 «그대로» 둔다** — 데이터 위험이 0이고(서버 쓰기 0), 백업이 «진짜 필요한» 상황
+          (서버에서 사라진 날짜)에서는 제대로 동작한다. **안내만 사실대로 고친다.**
+       ⚠ 「서버에는 안 올라갑니다」는 «사실»이므로 남긴다. `t_bakview` 8절이 이 문구를 지킨다. */
+    showToast(from === date ? `📂 ${date} 로 화면을 옮겼습니다 — 서버에 그 날짜가 있으면 «서버 내용»이 뜹니다 · 서버에는 안 올라갑니다` : `📂 ${date} 로 화면을 옮겼습니다 — 서버에 그 날짜가 있으면 «서버 내용»이 뜹니다 · 서버에는 안 올라갑니다 · 앞 화면은 «${from}» 의 ↩ 되돌리기에 남았습니다`);
   };
   const closeChecks = useMemo(() => {
     const list = [];
@@ -12533,7 +12540,7 @@ function App() {
     onClick: () => loadBakDate(r.date)
   }, bakArm === r.date ? "한 번 더 탭 (화면을 바꿉니다)" : "화면으로 불러오기"))), /*#__PURE__*/React.createElement("div", {
     className: "hint"
-  }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "화면으로만"), " 불러옵니다 — 서버에는 «아직» 안 올라갑니다. 지금 화면 내용은 사라지니 ↩ 되돌리기로 되살릴 수 있게 ", /*#__PURE__*/React.createElement("b", null, "스냅샷을 먼저 찍습니다"), ".", /*#__PURE__*/React.createElement("br", null), "⚠ 서버에 ", /*#__PURE__*/React.createElement("b", null, "되돌리는"), " 기능은 아직 없습니다."))), orphanCusts.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "화면으로만"), " 불러옵니다 — 서버에는 «아직» 안 올라갑니다. 지금 화면 내용은 사라지니 ↩ 되돌리기로 되살릴 수 있게 ", /*#__PURE__*/React.createElement("b", null, "스냅샷을 먼저 찍습니다"), ".", /*#__PURE__*/React.createElement("br", null), "🔴 서버에 ", /*#__PURE__*/React.createElement("b", null, "«이미 있는»"), " 날짜를 고르시면 ", /*#__PURE__*/React.createElement("b", null, "«서버 내용»"), "이 뜹니다 — 백업 내용은 서버에서 ", /*#__PURE__*/React.createElement("b", null, "«사라진»"), " 날짜에서만 보입니다.", /*#__PURE__*/React.createElement("br", null), "⚠ 서버에 ", /*#__PURE__*/React.createElement("b", null, "되돌리는"), " 기능은 아직 없습니다."))), orphanCusts.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "card orphcust"
   }, /*#__PURE__*/React.createElement("div", {
     className: "cardtitle"
