@@ -2754,6 +2754,56 @@ function App() {
     }
   };
 
+  /* ⭐⭐ 안전장치 236 — 카드가 「무엇이 다른지」 알려준다 (2026-09-08 34차 · 📌 사장님 승인 · 설계안 §5-92)
+     🔴 무엇을 막는가 — 📌 **사장님 실사용(2026-09-08 15:08)**: 두 크롬 탭에서 「니니마법사」 특이사항
+        «한 칸»만 달랐는데, 카드에는 **「☁ 서버 주문 23건 / 💻 이 PC 주문 23건」**만 보였다.
+        **무엇이 다른지 단서가 없어** 되돌릴 수 없는 「덮어쓰기」를 «모르고» 고르시게 된다.
+        (`m_pick34.js` 로 재현 — 건수가 «같으면» 화면이 깜깜하다.)
+     ⭐⭐ **판정을 «새로 만들지 않는다»** — 카드 판정·186 표시·230 스냅샷이 쓰는 그 `sameContent` 를
+        «키마다» 부른다 (money-rules §1 — 같은 판정을 두 곳에 두지 않는다).
+     ⚠⚠ **`sameContent` 는 «객체»끼리만 비교한다**(`typeof a !== "object"` 면 false).
+        그래서 `shipFee` 같은 숫자·문자열은 **`{ v: … }` 로 «감싸서»** 넣는다.
+        감싸지 않으면 **«같은데도» 「다르다」로 나와 헛경고**가 된다.
+        🔴 `t_samecard` ⑥-b 가 그것을 못 박는다 — 그 절을 지우지 마라.
+     ⚠ 이 함수는 «표시»일 뿐이다. 어느 쪽을 쓸지 «고르는 판정»에는 한 글자도 관여하지 않는다. */
+  const KEY_LABEL = {
+    orders: "주문",
+    customers: "손님 칸",
+    products: "상품 목록",
+    shipFee: "배송비",
+    shipCost: "택배 원가",
+    settleHeader: "안내문구",
+    trackHeader: "안내문구",
+    shipData: "운송장",
+    pickState: "픽업 표시"
+  };
+  const diffKeys = (mine, srv) => {
+    try {
+      const s = srv || {};
+      const out = [];
+      Object.keys(KEY_LABEL).forEach(k => {
+        if (sameContent({
+          v: mine[k]
+        }, {
+          v: s[k]
+        })) return; // ⚠ 감싸기 — 위 주석 참고
+        if (k === "customers") {
+          const a = mine.customers || {},
+            b = s.customers || {};
+          const nicks = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(n => !sameContent({
+            v: a[n]
+          }, {
+            v: b[n]
+          }));
+          out.push(nicks.length ? `손님 칸 ${nicks.length}명 (${nicks.slice(0, 3).join(", ")}${nicks.length > 3 ? " 외" : ""})` : "손님 칸");
+        } else out.push(KEY_LABEL[k]);
+      });
+      return [...new Set(out)];
+    } catch (e) {
+      return [];
+    } /* 표시가 실패해도 카드는 «그대로» 떠야 한다 */
+  };
+
   // 충돌·선택 상황에서 「서버 것 받기」
   const takeServer = async () => {
     const r = await serverLoad(bdate);
@@ -9952,7 +10002,30 @@ function App() {
     className: "srvnum"
   }, "주문 ", srvPick.localCount, "건"), /*#__PURE__*/React.createElement("div", {
     className: "srvmeta"
-  }, "아직 서버에 안 올라감"))), /*#__PURE__*/React.createElement("div", {
+  }, "아직 서버에 안 올라감"))), (() => {
+    try {
+      const mine = {
+        products,
+        orders,
+        customers,
+        shipFee,
+        shipCost,
+        bdate,
+        pickState,
+        settleHeader,
+        trackHeader,
+        shipData
+      };
+      const srvp = srvPick.srv && srvPick.srv.payload || {};
+      const dk = diffKeys(mine, srvp);
+      if (!dk.length) return null;
+      return /*#__PURE__*/React.createElement("div", {
+        className: "pickdiff"
+      }, "🔎 ", /*#__PURE__*/React.createElement("b", null, "다른 곳"), " — ", dk.join(" · "));
+    } catch (e) {
+      return null;
+    }
+  })(), /*#__PURE__*/React.createElement("div", {
     className: "rpfoot",
     style: {
       marginTop: 14
@@ -9965,7 +10038,9 @@ function App() {
     onClick: forceMine
   }, "이 PC 것으로 덮어쓰기") : /*#__PURE__*/React.createElement("span", {
     className: "hint"
-  }, "덮어쓰기는 사장님만 할 수 있습니다")), (() => {
+  }, "덮어쓰기는 사장님만 할 수 있습니다")), auth.isOwner && /*#__PURE__*/React.createElement("div", {
+    className: "pickwarn"
+  }, "⚠ ", /*#__PURE__*/React.createElement("b", null, "「이 PC 것으로 덮어쓰기」"), "를 누르면 서버에 있는", " ", /*#__PURE__*/React.createElement("b", null, "「", srvPick.srv && srvPick.srv.updatedBy || "다른 사람", "」님의 주문 ", srvPick.srvCount, "건"), "이", " ", /*#__PURE__*/React.createElement("b", null, "사라집니다.")), (() => {
     try {
       /* ⭐ 230 — 판정은 sameContent «한 곳»이다. 여기서 norm 을 다시 쓰지 않는다. */
       const mine = {
@@ -13202,6 +13277,12 @@ const CSS = `
 .srvsame { margin-top: 12px; padding: 10px 12px; border-radius: 10px;
            background: #eefaf3; border: 1px solid #bfe7d2; color: #1c6b46; font-size: 13px; line-height: 1.5; }
 .srvttl { font-size: 13px; color: #8a919c; font-weight: 700; }
+/* ⭐⭐ 안전장치 236 — 「무엇이 다른지」·「덮어쓰기 경고」 (2026-09-08 34차)
+   ⚠ .pickdiff 는 «알림»(파랑), .pickwarn 은 «되돌릴 수 없는 쪽 경고»(빨강)다. 색을 뒤집지 마라. */
+.pickdiff { margin-top: 12px; padding: 10px 12px; border-radius: 10px;
+            background: #eef4ff; border: 1px solid #c3d7f7; color: #1b4a8a; font-size: 13px; line-height: 1.5; }
+.pickwarn { margin-top: 10px; padding: 10px 12px; border-radius: 10px;
+            background: #fff4f3; border: 1px solid #f3c6c0; color: #9b2c1c; font-size: 13px; line-height: 1.5; }
 .srvnum { font-size: 22px; font-weight: 800; margin: 4px 0; }
 .srvmeta { font-size: 12px; color: #8a919c; }
 .srvok { color: #0f766e; }
