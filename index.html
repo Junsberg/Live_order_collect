@@ -1503,6 +1503,22 @@ function App() {
   const dragRef = useRef({
     id: null
   });
+  /* ⭐⭐ 안전장치 237 — 상품 «순서 변경»은 「✏ 순서 편집」을 켠 뒤에만 (2026-09-08 33차 «후속2» · §5-93)
+     📌 사장님 증상 — 「클릭이 눌린 채로 지멋대로 움직여지는 게 있다」 · 「편집 눌러야 위치 변경되게」
+     🔴 **재현했다**(`t_prodsort` ④절) — 손잡이가 `pointerup` 을 «못 받으면» 드래그 상태가 «남고»,
+        그 뒤 마우스를 움직이기만 해도 순서가 제멋대로 바뀐다.
+        (손잡이는 `setPointerCapture` 로 포인터를 붙잡는데, 드래그 중 그 행이 DOM 에서 «이동»하면
+         capture 가 풀릴 수 있다. 그러면 손잡이에 건 `onPointerUp` 이 «안» 온다.)
+     ⭐ 두 겹으로 막는다 — ① **편집 모드에서만 시작** ② **«창 전체»에서 끝내기**.
+     ⚠ 임계값도 넣었다가 «계측해 보고 뺐다» — 행 높이가 이미 임계값이라 실효가 없었다(아래 주석).
+     📌 사장님 결정 「가」(2026-09-08) — 편집 중에도 **이름·가격 입력칸은 «그대로»** 쓴다.
+        「자주 잠기면 불편해」. 🔴 **입력칸을 잠그자고 다시 제안하지 마라.** */
+  const [sortMode, setSortMode] = useState(false);
+  /* ⚠⚠ 34차 계측 결과 — «움직임 임계값»은 «넣었다가 뺐다».
+     `m_thr34.js` 실측: 3·8·20·32·40px 로는 순서가 «전혀» 안 바뀌고, 행 높이(53px)를 넘겨야 바뀐다.
+     즉 **행 높이 자체가 이미 임계값**이라 6px 임계값은 «아무것도 안 막았다»(역검증이 안 잡혀 드러났다).
+     🔴 **없는 방어를 「있다」고 두면 다음 사람이 속는다** — 그래서 뺐다.
+     `t_prodsort` ③절이 「행 높이 단위로만 바뀐다」를 «앱의 성질»로 못 박는다. */
   const selectNick = n => {
     setNick(n);
     if (nickRef.current) {
@@ -1519,8 +1535,11 @@ function App() {
 
   // 상품 드래그 정렬 (포인터 이벤트: 마우스+터치 통합, 손잡이 ≡ 로만 시작)
   const onDragStart = (e, id) => {
+    if (!sortMode) return; /* 안전장치 237 ① — 편집을 켜야 순서가 바뀐다 */
     e.preventDefault();
-    dragRef.current.id = id;
+    dragRef.current = {
+      id
+    };
     setDragId(id);
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -1553,12 +1572,32 @@ function App() {
     });
   };
   const onDragEnd = e => {
-    dragRef.current.id = null;
+    dragRef.current = {
+      id: null
+    };
     setDragId(null);
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
     } catch (err) {}
   };
+  /* ⭐⭐ 안전장치 237 ② — «창 전체»에서도 드래그를 끝낸다.
+     🔴 손잡이가 `pointerup` 을 «못 받는» 경우가 있다(위 주석). 그때 이 자리가 마지막 방어다.
+     ⚠ 이것을 지우면 「눌린 채로 남아 제멋대로 움직이는」 상태가 다시 생긴다 — `t_prodsort` ④절이 잡는다. */
+  useEffect(() => {
+    const endAnywhere = () => {
+      if (dragRef.current.id == null) return;
+      dragRef.current = {
+        id: null
+      };
+      setDragId(null);
+    };
+    window.addEventListener("pointerup", endAnywhere);
+    window.addEventListener("pointercancel", endAnywhere);
+    return () => {
+      window.removeEventListener("pointerup", endAnywhere);
+      window.removeEventListener("pointercancel", endAnywhere);
+    };
+  }, []);
   const [manualOpen, setManualOpen] = useState(false);
   const [mName, setMName] = useState("");
   const [mPrice, setMPrice] = useState("");
@@ -10990,7 +11029,14 @@ function App() {
     className: "hint"
   }, "「냉감패드」 하나로 등록되고, 주문 탭에서 상품을 누르면 옵션(색상 → 사이즈)을 단계별로 골라 추가돼요. 가격 = 각 값 금액의 ", /*#__PURE__*/React.createElement("b", null, "합"), "(같으면 비워서 0원). ", /*#__PURE__*/React.createElement("b", null, "재고"), "는 조합마다 따로 입력(비우면 무제한). ", /*#__PURE__*/React.createElement("b", null, "수정하면 이미 담긴 주문의 상품명·가격도 같은 조합끼리 자동 정정"), "돼요(삭제한 조합의 기존 주문은 그대로 보존).")), products.length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "empty"
-  }, "아직 상품이 없습니다. 오늘 팔 상품을 등록하세요."), products.map(p => {
+  }, "아직 상품이 없습니다. 오늘 팔 상품을 등록하세요."), products.length > 1 && /*#__PURE__*/React.createElement("div", {
+    className: "sortbar"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn " + (sortMode ? "primary" : "ghost"),
+    onClick: () => setSortMode(v => !v)
+  }, sortMode ? "✅ 순서 편집 끝내기" : "✏ 순서 편집"), /*#__PURE__*/React.createElement("span", {
+    className: "hint"
+  }, sortMode ? "≡ 를 잡고 끌어 순서를 바꾸세요. 이름·금액은 그대로 고치실 수 있어요." : "순서를 바꾸시려면 눌러 주세요. 평소에는 ≡ 를 눌러도 안 움직입니다.")), products.map(p => {
     if (p.options && p.options.length) {
       const combos = expandProduct(p);
       const stocked = combos.filter(c => p.stocks && p.stocks[c.key] != null);
@@ -11001,8 +11047,8 @@ function App() {
       }, /*#__PURE__*/React.createElement("div", {
         className: "prow-main"
       }, /*#__PURE__*/React.createElement("span", {
-        className: "draghandle",
-        title: "드래그로 순서 변경",
+        className: "draghandle" + (sortMode ? "" : " off"),
+        title: sortMode ? "드래그로 순서 변경" : "「✏ 순서 편집」을 켜면 순서를 바꿀 수 있어요",
         onPointerDown: e => onDragStart(e, p.id),
         onPointerMove: onDragMove,
         onPointerUp: onDragEnd,
@@ -11044,8 +11090,8 @@ function App() {
     }, /*#__PURE__*/React.createElement("div", {
       className: "prow-main"
     }, /*#__PURE__*/React.createElement("span", {
-      className: "draghandle",
-      title: "드래그로 순서 변경",
+      className: "draghandle" + (sortMode ? "" : " off"),
+      title: sortMode ? "드래그로 순서 변경" : "「✏ 순서 편집」을 켜면 순서를 바꿀 수 있어요",
       onPointerDown: e => onDragStart(e, p.id),
       onPointerMove: onDragMove,
       onPointerUp: onDragEnd,
@@ -13277,6 +13323,12 @@ const CSS = `
 .srvsame { margin-top: 12px; padding: 10px 12px; border-radius: 10px;
            background: #eefaf3; border: 1px solid #bfe7d2; color: #1c6b46; font-size: 13px; line-height: 1.5; }
 .srvttl { font-size: 13px; color: #8a919c; font-weight: 700; }
+/* ⭐⭐ 안전장치 237 — 상품 순서 편집 (2026-09-08 33차 «후속2»)
+   ⚠ .draghandle.off 는 «편집이 꺼진» 상태다 — 흐리게 보이고 눌러도 안 움직인다. 지우지 마라. */
+.sortbar { display: flex; align-items: center; gap: 10px; margin: 10px 0 6px; flex-wrap: wrap; }
+.sortbar .hint { margin: 0; }
+.draghandle.off { opacity: .3; cursor: default; }
+
 /* ⭐⭐ 안전장치 236 — 「무엇이 다른지」·「덮어쓰기 경고」 (2026-09-08 34차)
    ⚠ .pickdiff 는 «알림»(파랑), .pickwarn 은 «되돌릴 수 없는 쪽 경고»(빨강)다. 색을 뒤집지 마라. */
 .pickdiff { margin-top: 12px; padding: 10px 12px; border-radius: 10px;
