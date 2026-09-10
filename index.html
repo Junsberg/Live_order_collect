@@ -1536,6 +1536,24 @@ function App() {
   };
 
   // 상품 드래그 정렬 (포인터 이벤트: 마우스+터치 통합, 손잡이 ≡ 로만 시작)
+  /* ⭐⭐ 안전장치 241 — 「⬆ 맨 위로」 (2026-09-10 33차 «후속6» · 설계안 §5-97 · 📌 사장님 요청)
+     📌 「9.9일 날짜에 보면 상품수가 100개인데 이거 상품 위치 조절하는 것도 일이네」
+     🔬 계측(`m_big34.js`) — 상품 100개 목록은 **5,300px**(화면의 **5.9배**)이고
+        **드래그 중 자동 스크롤이 «없다»**. 맨 아래를 맨 위로 올리려면 **드래그를 6번 이상** 반복해야 했다.
+     ⭐ 그래서 «한 번 클릭»으로 최상단에 올린다.
+     ⚠ **237 과 «같은 기준» — 편집 모드에서만** 동작한다. 평소에 실수로 순서가 바뀌면 안 된다.
+     ⚠ 순서만 바꾼다 — 상품이 «사라지거나 늘지» 않는다(`t_prodsort` ⑦절이 못 박는다). */
+  const moveProdTop = id => {
+    if (!sortMode) return; /* 241 — 237 과 같은 기준 */
+    setProducts(ps => {
+      const i = ps.findIndex(x => x.id === id);
+      if (i <= 0) return ps; /* 없거나 이미 맨 위 */
+      const arr = ps.slice();
+      const [x] = arr.splice(i, 1);
+      arr.unshift(x);
+      return arr;
+    });
+  };
   const onDragStart = (e, id) => {
     if (!sortMode) return; /* 안전장치 237 ① — 편집을 켜야 순서가 바뀐다 */
     e.preventDefault();
@@ -8323,7 +8341,17 @@ function App() {
            ⭐ `delOrder` 이 이미 `keepDropped` 에 기억한다(208 ①). **그 «같은 표식»을 쓴다** —
               판정을 새로 만들지 않는다 (money-rules §1).
               「안 불러온 것」과 「일부러 지운 것」은 «다른 말»이고, 그 둘을 가르는 것이 이 표식이다. */
-        const keptOrders = (prev.orders || []).filter(o => (!onScreen.has(o.id) || isKeep(o.nick)) && !keepDropped.current.has(o.id));
+        /* ⭐⭐ 안전장치 240 ① (2026-09-10 33차 «후속5» · 설계안 §5-96 · 📌 **사장님 실사용 사고**)
+           🔴 **무엇을 막는가** — 「이미 킵 목록에 있던 줄」은 **출고완료해도 안 빠졌다.**
+              올리는 쪽(`keepOrders`)은 `!o.done` 으로 막혀 있었지만, «남기는» 이쪽은 안 막혔다.
+              → 다음 방송에 «이미 보낸» 킵이 딸려와 **금액이 두 번** 잡힌다.
+           🔴 실서버 실측(2026-09-10) — 「사남매맘」 7건(**70,700원**)이 09-08 에 출고·매출로 잡혔는데
+              09-10 에 «또» 올라왔다. 같은 주문 id 가 **여섯 날짜**에 복제돼 있었다.
+           ⚠⚠ `keeps` 에 저장되는 주문에는 **`done` 필드가 «없다»** — 일단 올라가면 되돌릴 단서가 없다.
+              그래서 **화면의 «지금» 출고 상태**로 거른다. 판정을 새로 만들지 않는다(`o.done` 그대로).
+           ⚠ 224 의 «지난 날짜» 갈래는 **건드리지 않았다** — 과거 날짜에서 킵을 푸는 것은 정상이다. */
+        const doneIds = new Set(orders.filter(o => o.done).map(o => o.id));
+        const keptOrders = (prev.orders || []).filter(o => (!onScreen.has(o.id) || isKeep(o.nick)) && !keepDropped.current.has(o.id) && !doneIds.has(o.id)); /* 안전장치 240 ① */
         // 오늘 킵으로 체크된 것을 넣는다 (같은 주문 id 는 덮어씀)
         /* ⭐⭐ 2026-08-25 23차 (안전장치 191) — «지난 날짜»에서는 「직접 켠 킵」만 올린다.
               지난 날짜를 «열기만» 해도 그 화면의 keep:true 가 목록에 다시 올라가고 있었다.
@@ -8487,6 +8515,11 @@ function App() {
         showToast(`⚠ 「${off.join(", ")}」 은 킵 입금액이 0원이라 입금 표시를 껐습니다 — 받으셨으면 「입금」을 다시 눌러 주세요`);
       }, 0);
       const amt = add.reduce((t2, o) => t2 + o.price * o.qty, 0);
+      /* ⭐⭐ 안전장치 240 ② — 자동 이월도 «스냅샷»을 찍는다 (2026-09-10 33차 «후속5»)
+         📌 사장님 실사용 사고 — 「사남매 킵을 불러왔습니다 하고 토스트 뜨고 사라지더라」.
+         🔴 「킵 불러오기」 «버튼»은 스냅샷을 찍는데(6171줄) 이 «자동» 이월은 아무 기록도 안 남겼다.
+            → 잘못 딸려와도 **되돌릴 방법이 없었다.** 같은 일을 하면 같은 기록을 남긴다. */
+      takeSnap(`지난 킵 자동 이월 직전 (${bdate} · ${nicks.slice(0, 3).join(", ")}${nicks.length > 3 ? " 외" : ""})`);
       showToast(`🔖 「${nicks.join(", ")}」 지난 킵 ${add.length}건 (${won(amt)}원)을 함께 올렸습니다 — 보내실 때 「킵」을 해제하세요`);
     }, 900);
     return () => clearTimeout(t);
@@ -11102,7 +11135,9 @@ function App() {
         key: p.id,
         "data-prow": p.id
       }, /*#__PURE__*/React.createElement("div", {
-        className: "prow-main"
+        className: "prow-main" + (sortMode ? " sorting" : "")
+      }, /*#__PURE__*/React.createElement("div", {
+        className: "prow-handle"
       }, /*#__PURE__*/React.createElement("span", {
         className: "draghandle" + (sortMode ? "" : " off"),
         title: sortMode ? "드래그로 순서 변경" : "「✏ 순서 편집」을 켜면 순서를 바꿀 수 있어요",
@@ -11110,7 +11145,11 @@ function App() {
         onPointerMove: onDragMove,
         onPointerUp: onDragEnd,
         onPointerCancel: onDragEnd
-      }, "≡"), /*#__PURE__*/React.createElement("div", {
+      }, "≡"), sortMode && /*#__PURE__*/React.createElement("button", {
+        className: "btn sm topbtn",
+        title: "맨 위로 올리기",
+        onClick: () => moveProdTop(p.id)
+      }, "⬆")), /*#__PURE__*/React.createElement("div", {
         className: "opt-prod"
       }, /*#__PURE__*/React.createElement("div", {
         className: "opt-prod-name"
@@ -11145,7 +11184,9 @@ function App() {
       key: p.id,
       "data-prow": p.id
     }, /*#__PURE__*/React.createElement("div", {
-      className: "prow-main"
+      className: "prow-main" + (sortMode ? " sorting" : "")
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "prow-handle"
     }, /*#__PURE__*/React.createElement("span", {
       className: "draghandle" + (sortMode ? "" : " off"),
       title: sortMode ? "드래그로 순서 변경" : "「✏ 순서 편집」을 켜면 순서를 바꿀 수 있어요",
@@ -11153,7 +11194,11 @@ function App() {
       onPointerMove: onDragMove,
       onPointerUp: onDragEnd,
       onPointerCancel: onDragEnd
-    }, "≡"), /*#__PURE__*/React.createElement("input", {
+    }, "≡"), sortMode && /*#__PURE__*/React.createElement("button", {
+      className: "btn sm topbtn",
+      title: "맨 위로 올리기",
+      onClick: () => moveProdTop(p.id)
+    }, "⬆")), /*#__PURE__*/React.createElement("input", {
       className: "in grow bare",
       value: p.name,
       onChange: e => {
@@ -13431,6 +13476,8 @@ const CSS = `
 .sortbar { display: flex; align-items: center; gap: 10px; margin: 10px 0 6px; flex-wrap: wrap; }
 .sortbar .hint { margin: 0; }
 .draghandle.off { opacity: .3; cursor: default; }
+/* 안전장치 241 — 「⬆ 맨 위로」. 편집 모드에서만 나온다. */
+.topbtn { padding: 2px 7px; min-width: 0; line-height: 1.2; }
 
 /* ⭐⭐ 안전장치 236 — 「무엇이 다른지」·「덮어쓰기 경고」 (2026-09-08 34차)
    ⚠ .pickdiff 는 «알림»(파랑), .pickwarn 은 «되돌릴 수 없는 쪽 경고»(빨강)다. 색을 뒤집지 마라. */
@@ -13744,6 +13791,11 @@ const CSS = `
       ⚠ 재고가 없는 줄도 빈 칸을 그려야 칼럼이 유지된다. */
 .prow-main { display: grid; grid-template-columns: 20px minmax(140px, 1fr) 110px 90px 210px 56px;
              gap: 8px; align-items: center; }
+/* ⭐⭐ 안전장치 241 — 편집 모드에서만 «첫 칼럼»을 넓혀 ⬆ 를 손잡이 옆에 둔다.
+   🔴 칼럼을 안 넓히고 자식을 하나 더 두면 grid 가 다음 줄로 밀어 «행 높이가 두 배»가 된다
+      (34차 실측 53px → 120px). 상품 100개면 목록이 12,000px 이 된다. */
+.prow-main.sorting { grid-template-columns: 56px minmax(140px, 1fr) 110px 90px 210px 56px; }
+.prow-handle { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .prow-stock { font-size: 12px; color: #8a919c; text-align: right; white-space: nowrap;
               overflow: hidden; text-overflow: ellipsis; }
 .prow-stock b { font-weight: 700; }
