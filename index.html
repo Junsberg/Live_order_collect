@@ -529,6 +529,98 @@ const toEmail = id => {
   return v.includes("@") ? v : v + ID_DOMAIN; // 사장님은 실제 이메일, 매니저는 아이디
 };
 let _sb = null;
+/* ⭐⭐⭐ 안전장치 245 (2026-09-11 34차 · 설계안 §5-101 · 미결 62 · 📌 사장님 요청 · 결정 「전부 가」)
+   📱 폰은 «보기 전용» — 📌 「입력하는 일은 없을 텐데 보려고 했다가 잘못 눌러질 수도 있는 거지」
+   🔴 뿌리 — 34차 사고 두 번(09-10 22:29 사장님 폰 · 09-11 14:58 매니저 아이폰) 모두 «옛 사본을 가진 폰»이
+      켜지며 서버에 옛 내용을 올렸다. 보기만 하는 기기는 «아무것도 안 쓴다» — 그러면 그런 일이 원천적으로 없다.
+   ⭐ 판별 — 주 입력이 터치인가(`pointer: coarse` + 터치 점 1개 이상). 폰의 «데스크톱 모드»도 이것은 안 바뀐다
+      (사장님 폰은 데스크톱 모드에서 브라우저 정보가 「Linux PC」로 찍혔다 — 그래서 브라우저 정보로 가르지 않는다).
+      ⚠ 터치 노트북은 주 입력이 마우스(`pointer: fine`)라 편집 그대로다.
+   📌 결정 — 1(가) 터치면 «자동» · 설정에서 수동도 · 2(가) 「✏ 편집 켜기」는 «그 창에서만» ·
+             3(가) 편집 표시(edit_locks)도 «안» 남긴다 · 4 PC 는 편집이 기본(설정에서 보기 전용을 켤 수 있다)
+   ⭐⭐ 관문은 «두 개»이고 둘 다 «한 곳»이다 — 서버는 `sb()`, 이 기기 저장은 `window.storage`. 새 쓰기가 생겨도 조용히 빠지지 않는다. */
+const VIEW_PREF_KEY = "saja:viewPref"; // "view" = 이 기기는 보기 전용(설정에서 켠 것 · 다시 열어도 유지)
+const EDIT_BOOT_KEY = "saja:editBoot"; // 「편집 켜기」 직후 «한 번의» 새로고침만 편집으로 연다
+const EDIT_BACKUP_KEY = "saja:editBackup"; // 편집을 켜며 치운 «옛 저장본» 백업(배열 · 버리지 않는다)
+const VIEW_MSG = "보기 전용 — 이 기기에서는 저장하지 않습니다";
+const isTouchPrimary = () => {
+  try {
+    return window.matchMedia("(pointer: coarse)").matches && (navigator.maxTouchPoints || 0) > 0;
+  } catch (e) {
+    return false;
+  }
+};
+const VIEW = {
+  on: false,
+  why: ""
+};
+(() => {
+  try {
+    const boot = Number(localStorage.getItem(EDIT_BOOT_KEY) || 0);
+    if (boot) localStorage.removeItem(EDIT_BOOT_KEY); // «한 번»만 쓴다 (결정 2)
+    if (boot && Date.now() - boot < 120000) {
+      VIEW.on = false;
+      VIEW.why = "edit-once";
+      return;
+    }
+    if (localStorage.getItem(VIEW_PREF_KEY) === "view") {
+      VIEW.on = true;
+      VIEW.why = "pref";
+      return;
+    }
+    if (isTouchPrimary()) {
+      VIEW.on = true;
+      VIEW.why = "touch";
+    }
+  } catch (e) {}
+})();
+const isViewOnly = () => VIEW.on;
+/* 관문 ② — 이 기기 저장. 보기 전용이면 데이터 키는 «쓰지 않고» 성공처럼 돌려준다(화면이 「저장 실패」로 소란하지 않게).
+   ⚠ 로그인·통신량·보기 전용 설정·편집 백업 키는 통과시킨다 — 이것들은 «데이터»가 아니다. */
+(() => {
+  try {
+    const st = window.storage;
+    if (!st || st.__view245) return;
+    const PASS = /^saja:(auth|net|viewPref|editBoot|editBackup)/;
+    const set0 = st.set.bind(st);
+    const del0 = st.delete ? st.delete.bind(st) : null;
+    st.set = async (k, v) => VIEW.on && !PASS.test(String(k)) ? {
+      key: k,
+      value: v,
+      skipped: "view"
+    } : set0(k, v);
+    if (del0) st.delete = async k => VIEW.on && !PASS.test(String(k)) ? {
+      key: k,
+      deleted: false,
+      skipped: "view"
+    } : del0(k);
+    st.__view245 = true;
+  } catch (e) {}
+})();
+/* 관문 ① 이 막은 쓰기가 돌려주는 값 — 어떤 체인(.select().single() …)을 붙여도 «실패»로 끝난다 */
+const viewBlocked = () => {
+  const res = {
+    data: null,
+    error: {
+      message: VIEW_MSG,
+      code: "VIEW_ONLY"
+    }
+  };
+  let px = null;
+  px = new Proxy(function () {}, {
+    get(t, k) {
+      if (k === "then") return (a, b) => Promise.resolve(res).then(a, b);
+      if (k === "catch") return b => Promise.resolve(res).catch(b);
+      if (k === "finally") return f => Promise.resolve(res).finally(f);
+      return () => px;
+    },
+    apply() {
+      return px;
+    }
+  });
+  return px;
+};
+const READ_RPC = new Set(["load_broadcast", "load_keeps", "load_costs", "find_moved_orders"]);
 /* ⭐⭐ 2026-08-26 23차 (사장님 결정 「가」) — 서버와 주고받은 양을 «한 곳»에서 센다.
    🔴 전에는 이 함수를 부르는 곳이 «폴링 한 자리»뿐이었고 그것도 tx 인자가 0 이었다.
       → 「보냄」이 «영원히 0 MB» 였고, 저장·불러오기·스냅샷은 아예 안 세었다.
@@ -596,6 +688,29 @@ const sb = () => {
     } catch (e) {}
     bumpNet(inLen, out, false); // ⚠ 폴링이 «아니다» — 따라가기 횟수는 안 올린다
     return r;
+  };
+  /* ⭐⭐⭐ 안전장치 245 관문 ① — 보기 전용이면 «읽기만» 통과시킨다.
+     ⚠ 허용 목록(`READ_RPC`)으로 가른다 — 막을 목록으로 가르면 새 «쓰기» 함수가 생길 때 조용히 샌다.
+     ⚠ 테이블은 insert·update·upsert·delete 를 막는다(select 는 통과). 편집 표시(edit_locks)도 여기서 막힌다(결정 3). */
+  const _rpcCounted = _sb.rpc;
+  _sb.rpc = async (name, params, opts) => VIEW.on && !READ_RPC.has(name) ? {
+    data: null,
+    error: {
+      message: VIEW_MSG,
+      code: "VIEW_ONLY"
+    }
+  } : _rpcCounted(name, params, opts);
+  const _from = _sb.from.bind(_sb);
+  _sb.from = table => {
+    const q = _from(table);
+    if (!VIEW.on) return q;
+    return new Proxy(q, {
+      get(o, k) {
+        if (k === "insert" || k === "update" || k === "upsert" || k === "delete") return () => viewBlocked();
+        const v = o[k];
+        return typeof v === "function" ? v.bind(o) : v;
+      }
+    });
   };
   return _sb;
 };
@@ -1548,6 +1663,65 @@ function App() {
   };
   const [resetArm, setResetArm] = useState(false);
   const [resetAllArm, setResetAllArm] = useState(false);
+  /* ⭐⭐⭐ 안전장치 245 — 📱 보기 전용 (설계안 §5-101). 판정은 모듈의 `VIEW` «한 벌»이다 — 여기서 새로 만들지 않는다. */
+  const [viewOn, setViewOn] = useState(VIEW.on);
+  const [editArm, setEditArm] = useState(false);
+  /* 「✏ 편집 켜기」 — 2단 확인 → 이 기기의 옛 저장본을 «백업으로 옮기고» 서버 최신으로 새로 시작한다.
+     ⭐ 옛 사본으로 서버를 덮는 뿌리(34차 사고)를 여기서 끊는다 — 편집은 «서버에서 막 받은 내용» 위에서만 시작한다.
+     ⚠⚠ 백업을 «먼저» 쓰고, 실패하면 아무것도 치우지 않는다(데이터 유실 0).
+     ⚠ 편집은 «그 창에서만»(결정 2) — `EDIT_BOOT_KEY` 는 다음 기동 «한 번»에 지워진다. */
+  const enableEdit = () => {
+    if (!editArm) {
+      setEditArm(true);
+      setTimeout(() => setEditArm(false), 5000);
+      return;
+    }
+    setEditArm(false);
+    const KEYS = ["saja:session", "saja:keeps", "saja:costbook", "saja:regulars", "saja:memo", "saja:shelf", "saja:pendingdate", "saja:movewarn"];
+    try {
+      const bak = {
+        at: new Date().toISOString(),
+        why: VIEW.why,
+        data: {}
+      };
+      KEYS.forEach(k => {
+        const v = localStorage.getItem(k);
+        if (v != null) bak.data[k] = v;
+      });
+      let arr = [];
+      try {
+        const o = JSON.parse(localStorage.getItem(EDIT_BACKUP_KEY) || "[]");
+        if (Array.isArray(o)) arr = o;
+      } catch (e) {}
+      arr.push(bak);
+      localStorage.setItem(EDIT_BACKUP_KEY, JSON.stringify(arr));
+      if (localStorage.getItem(EDIT_BACKUP_KEY) == null) throw new Error("backup");
+      KEYS.forEach(k => localStorage.removeItem(k));
+      localStorage.setItem(EDIT_BOOT_KEY, String(Date.now()));
+    } catch (e) {
+      showToast("❌ 편집으로 바꾸지 못했습니다 — 이 기기 저장 공간을 확인해 주세요 (아무것도 지우지 않았습니다)");
+      return;
+    }
+    window.location.reload();
+  };
+  /* 설정 — 이 기기를 «보기 전용»으로(PC 도 · 다시 열어도 유지). 끄는 것은 「편집 켜기」와 «같은 길»로 서버 최신에서 시작한다. */
+  const setViewPref = on => {
+    try {
+      if (on) {
+        localStorage.setItem(VIEW_PREF_KEY, "view");
+        VIEW.on = true;
+        VIEW.why = "pref";
+        setViewOn(true);
+        showToast("📱 이 기기를 «보기 전용»으로 바꿨습니다 — 이제 눌러도 저장되지 않습니다");
+      } else {
+        localStorage.removeItem(VIEW_PREF_KEY);
+        showToast("🖥 보기 전용 설정을 껐습니다 — 「✏ 편집 켜기」를 한 번 더 누르면 서버 최신으로 새로 엽니다");
+        setEditArm(true);
+      }
+    } catch (e) {
+      showToast("❌ 설정을 바꾸지 못했습니다");
+    }
+  };
   const [dragId, setDragId] = useState(null);
   const [delNickArm, setDelNickArm] = useState(null);
   const [editNickFor, setEditNickFor] = useState(null);
@@ -2339,6 +2513,10 @@ function App() {
           //    묻지 않고 올리면 그 주문이 이 날짜 것으로 둔갑한다.
           // ⚠ 새로고침하면 fromDateRef 가 비므로 표식에 적어 둔 「어디서 왔는지」를 되쓴다.
           const from = fromDateRef.current || pend && pend.from || null;
+          if (isViewOnly()) {
+            setSrvState("idle");
+            return;
+          } /* 245 — 보기 전용은 «올릴 것을 고르는» 카드가 필요 없다 */
           markPendingDate(bdate, from);
           setSrvPick({
             srv: null,
@@ -2386,6 +2564,10 @@ function App() {
            후보로 내놓으면 사장님이 습관적으로 「이 PC 것으로 덮어쓰기」를 눌렀을 때
            이 날짜의 서버 자료가 앞 날짜 내용으로 덮어써진다. */
         applyServerPayload(r); // 서버 것을 쓴다
+      } else if (isViewOnly()) {
+        /* ⭐ 안전장치 245 — 보기 전용이면 «묻지 않고» 서버 것을 보여준다(이 기기 것은 올릴 수도 없다).
+           ⚠ 위 232 판정 줄은 «한 글자도» 안 건드렸다 — `t_samecard`·`t_snapsame` 이 그 줄을 본다(34차에 한 번 건드렸다가 잡혔다). */
+        applyServerPayload(r);
       } else {
         setSrvPick({
           srv: r,
@@ -9992,7 +10174,13 @@ function App() {
   }
   return /*#__PURE__*/React.createElement("div", {
     className: "app"
-  }, /*#__PURE__*/React.createElement("style", null, CSS), intro && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("style", null, CSS), viewOn && /*#__PURE__*/React.createElement("div", {
+    className: "viewbar",
+    role: "status"
+  }, /*#__PURE__*/React.createElement("span", null, "📱 보기 전용 — 눌러도 저장되지 않습니다"), /*#__PURE__*/React.createElement("button", {
+    className: "btn sm" + (editArm ? " danger" : ""),
+    onClick: enableEdit
+  }, editArm ? "한 번 더 누르면 편집 (서버 최신으로 새로 엽니다)" : "✏ 편집 켜기")), intro && /*#__PURE__*/React.createElement("div", {
     className: "intro" + (introOut ? " out" : ""),
     onClick: () => {
       setIntroOut(true);
@@ -12884,7 +13072,22 @@ function App() {
     }, c.cashIssued ? "발행완료 ✓" : "미발행"));
   })))), tab === "settings" && /*#__PURE__*/React.createElement("div", {
     className: "pane"
-  }, settingEdit === null && /*#__PURE__*/React.createElement(React.Fragment, null, auth && auth.isOwner && /*#__PURE__*/React.createElement("div", {
+  }, settingEdit === null && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("b", null, "📱 이 기기 모드"), " — 지금 ", /*#__PURE__*/React.createElement("b", null, viewOn ? "보기 전용" : "편집"), VIEW.why === "touch" && viewOn ? " (터치 화면이라 자동)" : "", /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8
+    }
+  }, !viewOn && /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    onClick: () => setViewPref(true)
+  }, "📱 이 기기에서는 저장하지 않기"), viewOn && VIEW.why === "pref" && /*#__PURE__*/React.createElement("button", {
+    className: "btn sm",
+    onClick: () => setViewPref(false)
+  }, "🖥 이 기기에서 다시 저장하기"))), auth && auth.isOwner && /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "cardtitle"
@@ -13696,6 +13899,10 @@ const CSS = `
 .print-bx-h { text-align: center; font-weight: 700; font-size: 15px; padding: 6px; border-bottom: 1.5px solid #000; background: #f0f0f0; }
 .print-box ul { list-style: none; margin: 0; padding: 6px 10px; }
 .print-box li { text-align: center; font-size: 14px; padding: 3px 0; }
+.viewbar { position: sticky; top: 0; z-index: 400; display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 10px 14px; background: #1f3a5f; color: #fff; font-weight: 700; font-size: 14px; }
+.viewbar .btn { background: #fff; color: #1f3a5f; border: none; }
+.viewbar .btn.danger { background: #e5484d; color: #fff; }
 .toaststack {
   position: fixed; top: 12px; left: 12px; z-index: 200;
   display: flex; flex-direction: column; gap: 8px;
