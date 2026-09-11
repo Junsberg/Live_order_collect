@@ -14878,6 +14878,19 @@ const CSS = `
   .tab { flex: 1 1 calc(25% - 4px); white-space: nowrap; font-size: 12px; padding: 8px 2px; overflow: hidden; min-height: 40px; }
   .badge { margin-left: 3px; padding: 1px 5px; }
 }
+/* ⭐⭐ 안전장치 246 (2026-09-11 34차 · 설계안 §5-102 · 📌 사장님 요청)
+   📱 폰(좁은 화면)에서는 «탭 줄만» 고정한다 — 상단바·보기 전용 배너는 스크롤하면 올라간다.
+   📌 「위에가 너무 고정돼서 아래 내용을 볼 수가 없네 … 고정되는 건 ①상품부터 설정까지 탭 부분만」
+   🔬 실측(390px) — 고정 영역이 화면 844px 중 «415px»(상단바 314 + 탭 101)였고, 배너(68px)가 상단바 위를 덮었다.
+   ⚠ PC(641px 이상)는 «한 픽셀도» 안 바뀐다 — t_mobtop ③ 대조군이 지킨다.
+   ⚠ 이 규칙은 CSS «맨 끝»에 둔다 — .tabs 의 top: var(--topbar-h) 보다 «뒤»에 있어야 이긴다. 옮기지 마라.
+   ⚠⚠ 이 주석 안에 백틱을 쓰지 마라 — CSS 는 «템플릿 문자열 안»이라 빌드가 깨진다(34차에 또 밟았다).
+   ⚠ 폰의 «데스크톱 모드»(화면 폭 980px)는 PC 배치 그대로다 — 폭으로 가른다(보기 전용 판별과 다르다). */
+@media (max-width: 640px) {
+  .topbar { position: relative; }
+  .viewbar { position: relative; }
+  .tabs { top: 0; }
+}
 `;
 const _root = ReactDOM.createRoot(document.getElementById('root'));
 _root.render(React.createElement(App));
