@@ -2262,6 +2262,12 @@ function App() {
         tell(false);
         return;
       } // 고르는 중이면 올리지 않는다
+      /* ⭐ 안전장치 245 — 보기 전용이면 저장을 «시도»하지 않는다. 시도하면 관문이 막아 「저장 막힘」 상태가 되고,
+            그러면 폴링이 「확인만」 갈래로 빠져 서버를 «안» 따라온다(34차 `m_viewpoll34` 실측). */
+      if (isViewOnly()) {
+        tell(false);
+        return;
+      }
       // ⚠ 날짜를 바꾼 직후 — 서버에 그 날짜가 뭐가 있는지 확인하기 전에는 절대 올리지 않는다.
       //    확인 없이 올리면 앞 날짜의 주문이 새 날짜에 그대로 기록된다.
       if (srvSyncedDate !== bdate) {
@@ -2423,7 +2429,9 @@ function App() {
             날짜를 눌러 보고 곧바로 다른 날짜로 넘어가면 이 경로로 빈 행이 만들어진다.
             서버에는 안 올리되 로컬 저장은 그대로 한다 (안내문구 수정 등이 걸려 있을 수 있다). */
       const placeChanged = srvPlaceRef.current !== place;
-      if (srvSyncedRef.current !== str && srvRevRef.current == null && isBlankDay(payload)) {
+      if (isViewOnly()) {
+        /* ⭐ 안전장치 245 — 보기 전용은 날짜를 옮길 때도 올리지 않는다(관문이 막지만 «시도»부터 안 한다). */
+      } else if (srvSyncedRef.current !== str && srvRevRef.current == null && isBlankDay(payload)) {
         await saveKey("saja:session", str, "방송 데이터");
       } else if (srvSyncedRef.current !== str || placeChanged) {
         setDateBusy(true);
@@ -2679,6 +2687,14 @@ function App() {
   /* 통신량을 «스스로» 센다 (사장님 요청 2026-08-22).
      ⚠ Supabase 사용량 API 는 관리자 키가 필요해 앱에서 못 부른다 (설계안 5-17).
         그래서 «앱이 받은 바이트»를 세어 보여준다 — 실제 값과 조금 다를 수 있다. */
+  /* ⭐⭐ 안전장치 245 — 보기 전용은 «항상» 서버를 따라간다 (📌 사장님 질문 2026-09-11 · 결정 「가」).
+        보기 전용에는 지킬 «내 입력»이 없다(눌러도 저장 안 됨). 그래서 pollOnce 안의 「안 올린 내 변경이면 안 받는다」와
+        「막힌 동안 확인만」을 건너뛰고, 서버가 새것이거나 «내 화면이 서버와 다르면»(잘못 누름) 서버 것으로 되돌린다.
+        ⚠ PC(편집)는 «한 글자도» 안 바뀐다 — `vo` 가 거짓이면 옛 갈래 그대로다(`t_poll` 이 지킨다).
+        ⚠ 3분 쉬기(통신량 가드)는 보기 전용에도 «그대로» 적용한다.
+        ⚠⚠ 이 설명을 pollOnce «안»에 넣지 마라 — `t_poll` 이 함수 본문을 4,000자 안에서 떼어 읽는다(34차에 한 번 넘겼다). */
+  const viewDirty = (str, place) => srvSyncedRef.current !== str || srvPlaceRef.current !== place; // 245
+  const VIEW_BACK_MSG = "📱 보기 전용 — 서버 내용으로 되돌렸습니다";
   const pollOnce = async () => {
     if (pollBusy.current) return; // ③ 앞 요청이 아직 안 끝났다
     if (typeof document !== "undefined" && document.hidden) return; // ② 안 보고 있다
@@ -2687,7 +2703,8 @@ function App() {
     /* ⭐⭐ 195 — 여기서 «되돌아가지» 않는다. 아래 「확인만 하는 갈래」로 간다.
           🔴 24차 실측: 전에는 여기서 멈춰 충돌 뒤 폴링이 «영영» 안 돌았다.
              실서버 2026-08-26 매니저 폴링이 14:54 이후 0 이었던 것이 이 자리다. */
-    const stuck = srvState === "fail" || srvState === "conflict";
+    const vo = isViewOnly(); // 245
+    const stuck = !vo && (srvState === "fail" || srvState === "conflict");
     const live = liveRef.current;
     if (srvSyncedDate !== live.bdate) return; // 날짜를 바꾼 직후에는 손대지 않는다
     /* ① 3분 무활동이면 쉰다 — 켜두고 자리를 비워도 통신량이 안 는다 */
@@ -2738,8 +2755,9 @@ function App() {
       trackHeader: live.trackHeader,
       shipData: live.shipData
     });
-    if (srvSyncedRef.current !== str) return;
-    if (srvPlaceRef.current !== live.place) return;
+    const dirty = viewDirty(str, live.place);
+    if (!vo && srvSyncedRef.current !== str) return;
+    if (!vo && srvPlaceRef.current !== live.place) return;
     pollBusy.current = true;
     try {
       lastPollAtRef.current = Date.now(); // ⭐ 194 — 실제로 읽은 자리
@@ -2753,15 +2771,16 @@ function App() {
       bumpNet(0, 0, true); // ⭐ 바이트는 rpc 래퍼가 «이미» 셌다 — 여기서는 «따라가기 횟수»만 올린다
       if (srvPick) return; // 기다리는 사이에 카드가 떴다
       if (liveRef.current.bdate !== live.bdate) return; // 기다리는 사이에 날짜가 바뀌었다
-      if (srvSyncedRef.current !== str) return; // 기다리는 사이에 내가 입력했다
-      if (srvRevRef.current != null && Number(r.rev) <= Number(srvRevRef.current)) return; // 새것이 아니다
+      if (!vo && srvSyncedRef.current !== str) return; // 기다리는 사이에 내가 입력했다
+      const notNewer = srvRevRef.current != null && Number(r.rev) <= Number(srvRevRef.current);
+      if (notNewer && !(vo && dirty)) return; // 새것이 아니다
       const before = (liveRef.current.orders || []).length;
       setSrvNewer(null); // ⭐ 195 — 받아왔으니 알림은 내린다
       applyServerPayload(r);
       const after = (r.payload && r.payload.orders || []).length;
       const who = r.updatedBy ? `${r.updatedBy}님이 ` : "";
       const diff = after - before;
-      showToast(diff > 0 ? `🔄 ${who}넣은 주문 ${diff}건을 받았습니다` : `🔄 ${who}바꾼 내용을 받았습니다`);
+      showToast(notNewer ? VIEW_BACK_MSG : diff > 0 ? `🔄 ${who}넣은 주문 ${diff}건을 받았습니다` : `🔄 ${who}바꾼 내용을 받았습니다`);
     } finally {
       pollBusy.current = false;
     }
