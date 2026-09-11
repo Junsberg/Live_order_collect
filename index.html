@@ -1666,6 +1666,47 @@ function App() {
   /* ⭐⭐⭐ 안전장치 245 — 📱 보기 전용 (설계안 §5-101). 판정은 모듈의 `VIEW` «한 벌»이다 — 여기서 새로 만들지 않는다. */
   const [viewOn, setViewOn] = useState(VIEW.on);
   const [editArm, setEditArm] = useState(false);
+  /* ⭐⭐ 안전장치 245 «입력칸 잠금» — 📌 사장님 「입력하는 칸이 다 열리긴 하네」 → 결정 「가」(2026-09-11)
+     보기 전용이면 입력칸에 «포커스가 가지 않게» 한다 → 폰 키보드가 안 뜨고 틀린 값이 화면에 남지 않는다.
+     ⭐ 되는 것 — 검색칸(`data-viewok`) · 날짜 고르기(`type=date`) · 로그인칸. «보기»에 필요하다.
+     ⚠ 버튼(입금·킵 칩 등)은 막지 않는다 — 탭 이동·「주문 상품」·펼치기 같은 «보기» 기능이 같이 막히기 때문(결정 「가」).
+        눌러도 저장은 관문 ①② 가 막는다.
+     ⚠⚠ 새 검색칸을 만들면 `data-viewok` 를 붙여라 — 안 붙이면 보기 전용에서 검색이 안 된다. */
+  const viewInputOk = el => {
+    if (!el || !el.tagName) return true;
+    const tg = el.tagName;
+    if (tg !== "INPUT" && tg !== "TEXTAREA" && tg !== "SELECT") return true;
+    const ty = (el.getAttribute("type") || "").toLowerCase();
+    if (ty === "date" || ty === "password" || ty === "search") return true;
+    if (el.closest && el.closest("[data-viewok]")) return true;
+    if (el.hasAttribute && el.hasAttribute("data-viewok")) return true;
+    return false;
+  };
+  const viewToastAt = useRef(0);
+  useEffect(() => {
+    if (!viewOn) return undefined;
+    const onFocus = e => {
+      if (viewInputOk(e.target)) return;
+      try {
+        e.target.blur();
+      } catch (err) {}
+      if (Date.now() - viewToastAt.current > 4000) {
+        viewToastAt.current = Date.now();
+        showToast("📱 보기 전용 — 입력은 PC에서 해 주세요 (고쳐야 하면 맨 위 「✏ 편집 켜기」)");
+      }
+    };
+    const onKey = e => {
+      if (!viewInputOk(e.target)) e.preventDefault();
+    };
+    document.addEventListener("focusin", onFocus, true);
+    document.addEventListener("keydown", onKey, true);
+    document.addEventListener("beforeinput", onKey, true);
+    return () => {
+      document.removeEventListener("focusin", onFocus, true);
+      document.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("beforeinput", onKey, true);
+    };
+  }, [viewOn]);
   /* 「✏ 편집 켜기」 — 2단 확인 → 이 기기의 옛 저장본을 «백업으로 옮기고» 서버 최신으로 새로 시작한다.
      ⭐ 옛 사본으로 서버를 덮는 뿌리(34차 사고)를 여기서 끊는다 — 편집은 «서버에서 막 받은 내용» 위에서만 시작한다.
      ⚠⚠ 백업을 «먼저» 쓰고, 실패하면 아무것도 치우지 않는다(데이터 유실 0).
@@ -10082,6 +10123,7 @@ function App() {
     }, "⚠ 서버에 연결할 수 없습니다. 인터넷을 확인하고 새로고침해주세요."), /*#__PURE__*/React.createElement("input", {
       className: "in",
       placeholder: "아이디 또는 이메일",
+      "data-viewok": "1",
       value: loginId,
       autoFocus: true,
       onChange: e => {
@@ -11638,6 +11680,7 @@ function App() {
   }, /*#__PURE__*/React.createElement("input", {
     className: "in prodq",
     placeholder: "🔍 상품 검색 (몇 개 주문)",
+    "data-viewok": "1",
     value: prodQ,
     onChange: e => setProdQ(e.target.value),
     onKeyDown: endEdit
@@ -12077,6 +12120,7 @@ function App() {
   }, /*#__PURE__*/React.createElement("input", {
     className: "in search",
     placeholder: "🔍 닉네임 검색",
+    "data-viewok": "1",
     value: settleSearch,
     onChange: e => setSettleSearch(e.target.value),
     onKeyDown: endEdit
@@ -12714,6 +12758,7 @@ function App() {
       marginTop: 12
     },
     placeholder: "🔍 닉네임 또는 이름 검색",
+    "data-viewok": "1",
     value: shipSearch,
     onChange: e => setShipSearch(e.target.value),
     onKeyDown: endEdit
@@ -13230,6 +13275,7 @@ function App() {
   }, "다시 불러오기"))), findState === "ok" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("input", {
     className: "in",
     placeholder: "닉네임 · 이름 · 연락처 · 운송장 번호",
+    "data-viewok": "1",
     value: findQ,
     onChange: e => setFindQ(e.target.value)
   }), /*#__PURE__*/React.createElement("div", {
