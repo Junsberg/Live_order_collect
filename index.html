@@ -1110,7 +1110,12 @@ function App() {
   const keepSrvOk = useRef(false); // 서버에서 한 번이라도 읽는 데 성공했나
   const keepFirstAdopt = useRef(true); // 첫 채택인가 (로컬 전용 킵을 합쳐야 하는 시점)
   const presentRef = useRef([]); // 오늘 화면에 있는 사람 (effect 의 낡은 값 방지)
-
+  /* ⭐⭐ 안전장치 242 (2026-09-11 34차 · 설계안 §5-98 · 📌 사장님 실사용 사고 · 결정 「가」)
+     「이 기기가 서버에서 «본 적 있는» 킵 손님」 표식. 앱을 켤 때 로컬에만 있는 손님을
+     «새로 건 킵»(올린다)과 «남이 서버에서 지운 킵»(올리지 않는다)으로 가르는 유일한 단서다.
+     null = 표식 없음·못 읽음 → «모른다» → 올리지 않고 백업한다(사장님 결정 「가」). */
+  const keepSeenRef = useRef(null);
+  const keepSeenSaved = useRef("");
   const keepsRpc = async (name, params) => {
     const c = sb();
     if (!c) return {
@@ -1197,18 +1202,65 @@ function App() {
       /* ⭐ 첫 채택에서만 「로컬에만 있는 사람」을 합친다 (1회 이관).
             안 합치면 사장님 PC 에만 있던 킵이 화면에서 사라진 것처럼 보인다.
             합쳐두면 다음 저장에서 규칙⑤(at 없음 = 없을 때만 넣음)로 서버에 올라간다. */
+      /* ⭐⭐ 안전장치 242 — «남이 서버에서 지운» 킵은 합치지 않는다 (2026-09-11 34차 · §5-98)
+         🔴 무엇을 막는가 — 오래 안 쓴 기기(폰·태블릿·매니저 아이폰)를 켜면 그 기기 로컬의 «옛» 킵이
+            여기서 합쳐지고, 서버 규칙⑤(행이 «없으면» 넣는다)로 **지운 킵이 되살아났다.**
+            📌 2026-09-10 22:29:54 사장님 둘째 기기 → 「사남매맘」 7건(출고 끝남)이 되살아나 오늘로 딸려옴(70,700원).
+            📌 「가나」는 킵 목록에서 «세 번» 지우셨다(08-22 · 09-02 · 09-10) — 매번 이 길로 돌아왔다.
+         ⭐ 가르는 기준 — 이 기기가 «서버에서 본 적 있는» 손님인가(`keepSeenRef`).
+            · 본 적 «없다» → 이 기기에서 새로 건 킵(서버가 꺼졌을 때 등) → **지금처럼 올린다**(받은 돈 보호)
+            · 본 적 «있다» → 남이 서버에서 지웠다 → **올리지 않는다**
+            · 표식이 «없거나 못 읽음» → 모른다 → **올리지 않는다** (📌 사장님 결정 「가」 · 2026-09-11)
+         ⚠⚠ 올리지 않은 것은 «버리지 않는다» — `saja:keepsOrphan` 에 백업하고 이름과 함께 알린다.
+            킵에는 받은 돈(keepPaid)이 들어 있을 수 있다. 조용히 없애면 안 된다. */
       const have = new Set((r.list || []).map(x => x.nick));
       const mine = keepsRef.current || {
         orders: [],
         customers: {}
       };
+      const seen = Array.isArray(keepSeenRef.current) ? new Set(keepSeenRef.current) : null;
+      const isNew = nk => !!seen && !seen.has(nk); /* 242 — 본 적 없는 손님만 «새 킵» */
+      const orphan = {
+        orders: [],
+        customers: {}
+      };
       (mine.orders || []).forEach(o => {
-        if (!have.has(o.nick)) next.orders.push(o);
+        if (have.has(o.nick)) return;
+        if (isNew(o.nick)) next.orders.push(o);else orphan.orders.push(o);
       });
       Object.entries(mine.customers || {}).forEach(([nk, c]) => {
-        if (!have.has(nk)) next.customers[nk] = c;
+        if (have.has(nk)) return;
+        if (isNew(nk)) next.customers[nk] = c;else orphan.customers[nk] = c;
       });
       keepFirstAdopt.current = false;
+      const orphanNicks = [...new Set([...orphan.orders.map(o => o.nick), ...Object.keys(orphan.customers)])];
+      if (orphanNicks.length) {
+        (async () => {
+          const prevR = await loadKey("saja:keepsOrphan");
+          let arr = [];
+          if (prevR.ok && prevR.value) {
+            try {
+              const v = JSON.parse(prevR.value);
+              if (Array.isArray(v)) arr = v;
+            } catch (e) {}
+          }
+          arr.push({
+            at: new Date().toISOString(),
+            ...orphan
+          });
+          saveKey("saja:keepsOrphan", JSON.stringify(arr), "킵 백업");
+        })();
+        showToast(`⚠ 이 기기에만 남아 있던 킵 「${orphanNicks.join(", ")}」 은 서버에 없어 올리지 않았습니다 (다른 기기에서 지운 것일 수 있습니다) — 이 기기에 백업해 두었습니다`);
+      }
+    }
+    /* 242 — 「서버에서 본 손님」 표식을 남긴다(바뀔 때만). 다음에 켤 때 가르는 단서다. */
+    {
+      const seenNow = JSON.stringify([...new Set((r.list || []).map(x => x.nick))].sort());
+      if (seenNow !== keepSeenSaved.current) {
+        keepSeenSaved.current = seenNow;
+        keepSeenRef.current = JSON.parse(seenNow);
+        saveKey("saja:keepsSeen", seenNow, "킵 표식");
+      }
     }
     setKeeps(prev => keepSig(prev) === keepSig(next) ? prev : next);
     if (r.skipped && r.skipped.length) {
@@ -8291,6 +8343,17 @@ function App() {
         orders: k.orders || [],
         customers: k.customers || {}
       });
+      /* ⭐ 안전장치 242 — 표식은 `loadKey` 로 읽는다. 「없음」과 「못 읽음」을 뭉개지 않는다(project-map 4-2).
+            어느 쪽이든 «모른다»(null)로 두고, 모르면 올리지 않는다. */
+      const sr = await loadKey("saja:keepsSeen");
+      let seenV = null;
+      if (sr.ok && sr.value) {
+        try {
+          const v = JSON.parse(sr.value);
+          if (Array.isArray(v)) seenV = v;
+        } catch (e) {}
+      }
+      keepSeenRef.current = seenV;
       keepsLoaded.current = true;
       setKeepSrvTick(n => n + 1);
     })();
@@ -8439,10 +8502,52 @@ function App() {
         지난 방송 매출·결산이 조용히 틀어진다 (「킵 불러오기」 버튼이 날짜를 2단 확인받는 이유).
      ⚠ 킵은 손님 단위 플래그다 — 따라온 킵이 킵이면 그 손님의 오늘 주문도 함께 킵이 되고,
         해제하면 한꺼번에 합류한다 (2026-08-03 사장님 확인). */
+  /* ⭐⭐ 안전장치 243 (2026-09-11 34차 · 설계안 §5-99 · 📌 결정 「가」) — 두 번째 겹
+     「그 킵 줄이 다른 날짜에서 «이미 출고완료»됐는가」를 서버에 묻는다.
+     ⚠ 판정을 «새로 만들지 않는다» — 219·224 가 쓰는 서버 함수 `find_moved_orders` 를 그대로 쓴다.
+        (실서버는 id 마다 «가장 늦은 다른 날짜» 하나를 준다 — 오늘 쪽에서는 그것이 직전 날짜다.)
+     ⚠ 못 읽으면 `ok:false` — 부르는 쪽이 «가져오지 않는다»(📌 224 「모르면 잠근다」와 같은 방향). */
+  const shippedElsewhere = async ids => {
+    if (!ids.length) return {
+      ok: true,
+      done: new Map()
+    };
+    const c = sb();
+    if (!c || !serverOn()) return {
+      ok: false
+    };
+    try {
+      const {
+        data,
+        error
+      } = await c.rpc("find_moved_orders", {
+        p_date: bdate,
+        p_ids: ids
+      });
+      if (error || !Array.isArray(data)) return {
+        ok: false
+      };
+      const done = new Map();
+      data.forEach(r => {
+        if (r && r.order_id && r.done) done.set(r.order_id, String(r.moved_date || ""));
+      });
+      return {
+        ok: true,
+        done
+      };
+    } catch (e) {
+      return {
+        ok: false
+      };
+    }
+  };
+  const [carryRetry, setCarryRetry] = useState(0);
+  const carryWarned = useRef(new Set());
   useEffect(() => {
     if (!keepsLoaded.current || !loaded) return;
     if (bdate !== today) return;
-    const t = setTimeout(() => {
+    let dead = false;
+    const t = setTimeout(async () => {
       const have = new Set(orders.map(o => o.id));
       const mine = new Set(settleNickList);
       /* ⭐⭐ 안전장치 204 — 「불러오기」 버튼과 «같은 판정»을 쓴다.
@@ -8450,7 +8555,29 @@ function App() {
       /* ⭐⭐ 안전장치 204 — 「불러오기」 버튼과 «같은 판정»을 쓴다.
             여기를 빼먹으면 「손님이 새로 주문해서 따라온 킵」만 안 잠기는 구멍이 된다.
          ⭐⭐ 안전장치 208 (26차) — 이 날짜에서 «일부러 지운» 킵은 다시 가져오지 않는다. */
-      const add = withKeepLock((keeps.orders || []).filter(o => mine.has(o.nick) && !have.has(o.id) && !keepDropped.current.has(o.id)));
+      const cand = (keeps.orders || []).filter(o => mine.has(o.nick) && !have.has(o.id) && !keepDropped.current.has(o.id));
+      if (!cand.length) return;
+      /* ⭐⭐ 안전장치 243 — «다른 날짜에서 이미 출고완료»된 줄은 가져오지 않는다.
+         🔴 2026-09-10 — 09-08 에 출고한 「사남매맘」 7건(70,700원)이 킵 목록에 «되살아나» 오늘로 딸려왔다.
+            242 가 «되살아나는 길»을 막지만, 어떤 길로든 목록에 들어온 출고 줄은 여기서 한 번 더 막는다.
+         ⚠ 서버를 못 읽으면 «이번엔 가져오지 않는다» — 5초 뒤 다시 묻는다(📌 사장님 결정 「가」). */
+      const chk = await shippedElsewhere(cand.map(o => o.id));
+      if (dead) return;
+      if (!chk.ok) {
+        if (serverOn()) setTimeout(() => {
+          if (!dead) setCarryRetry(n => n + 1);
+        }, 5000);
+        return;
+      }
+      const shipped = cand.filter(o => chk.done.has(o.id));
+      const fresh = shipped.filter(o => !carryWarned.current.has(o.id));
+      if (fresh.length) {
+        fresh.forEach(o => carryWarned.current.add(o.id));
+        const nk = [...new Set(fresh.map(o => o.nick))];
+        const dt = [...new Set(fresh.map(o => chk.done.get(o.id)).filter(Boolean))];
+        showToast(`⚠ 「${nk.join(", ")}」 킵 목록의 ${fresh.length}건은 ${dt.join(", ") || "다른 날짜"} 에 «이미 출고»돼 가져오지 않았습니다 — 킵 목록을 확인해 주세요`);
+      }
+      const add = withKeepLock(cand.filter(o => !chk.done.has(o.id)));
       if (!add.length) return;
       const nicks = [...new Set(add.map(o => o.nick))];
       setOrders(prev => {
@@ -8522,8 +8649,11 @@ function App() {
       takeSnap(`지난 킵 자동 이월 직전 (${bdate} · ${nicks.slice(0, 3).join(", ")}${nicks.length > 3 ? " 외" : ""})`);
       showToast(`🔖 「${nicks.join(", ")}」 지난 킵 ${add.length}건 (${won(amt)}원)을 함께 올렸습니다 — 보내실 때 「킵」을 해제하세요`);
     }, 900);
-    return () => clearTimeout(t);
-  }, [keeps, settleNickList, orders, bdate, today, loaded]);
+    return () => {
+      dead = true;
+      clearTimeout(t);
+    };
+  }, [keeps, settleNickList, orders, bdate, today, loaded, carryRetry]);
   useEffect(() => {
     if (!keepsLoaded.current) return;
     const t = setTimeout(async () => {
