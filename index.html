@@ -9026,7 +9026,11 @@ function App() {
         어제 날짜가 「과거」로 잡혀 정작 필요할 때 막힌다. 날짜를 보여주고 사람이 판단하게 한다.
         (단골 배송지를 자동으로 안 채우고 보여주기만 하는 것과 같은 방식) */
   const [keepLoadArm, setKeepLoadArm] = useState(false);
-  const loadKeeps = () => {
+  /* ⚠ 35차 — 아래가 `async` 가 되면서 「두 번째 누름」이 «겹칠» 수 있게 됐다.
+        `exist` 는 클로저의 `orders` 라 두 번 돌면 같은 줄이 두 번 들어간다(자동 이월에는 seen 가드가 있다).
+        서버를 기다리는 동안 한 번 더 눌려도 아무 일이 없게 «한 번에 하나»로 막는다. */
+  const keepLoadBusy = useRef(false);
+  const loadKeeps = async () => {
     if (!keepPending.length) {
       showToast("불러올 킵 주문건이 없습니다.");
       return;
@@ -9037,54 +9041,99 @@ function App() {
       return;
     }
     setKeepLoadArm(false);
-    /* ⚠ 스냅샷을 찍는다. 「화면에서 사라지는 작업만 찍는다」는 원칙의 예외다.
-          늘어나는 작업이지만, 지난 날짜에 잘못 넣으면 어느 주문이 새로 들어온 건지
-          사람이 구분해 지우고 원래 날짜에 다시 넣어야 해서 되돌릴 방법이 사실상 없다. */
-    takeSnap(`킵 불러오기 직전 (${bdate} · ${keepPendingNicks.slice(0, 3).join(", ")})`);
-    const exist = new Set(orders.map(o => o.id));
-    /* ⭐⭐ 안전장치 204 — 킵으로 «입금까지 받은» 분의 주문은 «잠근 채» 올린다.
-          미입금 킵은 지금과 똑같이 그대로 올라온다 (사장님: 「미입금이라면 그냥 그대로」). */
-    const add = withKeepLock(keepPending.filter(o => !exist.has(o.id)));
-    /* ⭐⭐ 안전장치 208 (26차) — 「불러오기」는 «사장님이 일부러» 누르는 것이라
-          지웠던 킵도 다시 가져온다. 그 기억을 여기서 지운다.
-       ⚠ 자동 이월(useEffect)은 «자동»이라 안 가져온다 — 그 둘을 가르는 것이 이 방어의 핵심이다.
-          「사람이 누른 것」과 「앱이 알아서 한 것」을 같게 다루면 지운 것이 조용히 돌아온다. */
-    add.forEach(o => keepDropped.current.delete(o.id));
-    setOrders(prev => [...prev, ...add]);
-    setCustomers(prev => {
-      const next = {
-        ...prev
-      };
-      keepPendingNicks.forEach(nk => {
-        const src = (keeps.customers || {})[nk];
-        /* ⭐⭐ 안전장치 208 (2026-08-31 26차 · 미결 44 · **사장님 실사용 보고**)
-           🔴 전에는 `!next[nk]` 라, 오늘 그 손님 «칸이 이미 있으면» 킵 cust 를 «통째로 건너뛰었다».
-              그러면 킵으로 받아둔 돈(keepPaid)과 「배송비 이미 받음」(shipPaid)이 **안 따라온다.**
-              잠금(withKeepLock)은 `keeps.customers` 를 보므로 «잠기기는 하는데» 돈은 0이 된다.
-              → 실서버 2026-08-31 「가실이」가 정확히 그 상태였다 (keepPaid 0 · keepLock 1건).
-                08-28 에는 14,000원이 그대로 있는데 오늘 화면으로 «안 따라왔다».
-                그래서 지난 킵 금액이 오늘 청구액과 합산돼 보였다 (사장님 보고 그대로).
-           ⭐ 「자동 이월」이 쓰는 규칙과 **«같은 규칙»**이다 (money-rules §1 — 판정을 두 곳에 두지 않는다).
-              오늘 값이 우선이되, **돈이 걸린 칸은 지난 킵 값을 잃지 않는다.**
-           ⚠ 돈을 «지어내지 않는다» — 둘 다 0이면 0이다. 미입금 킵은 그대로 0으로 남는다. */
-        const cur = next[nk] || {};
-        /* ⚠ `src` 가 없으면 «아무것도 하지 않는다» — 원래 코드의 가드다.
-              킵 목록에 그 손님 cust 가 없을 수 있고, 그때 빈 값으로 덮으면 오늘 값이 날아간다. */
-        if (!src) return;
-        next[nk] = {
-          ...EMPTY_CUST,
-          ...src,
-          ...cur,
-          keep: true,
-          keepPaid: Number(cur.keepPaid) || Number(src.keepPaid) || 0,
-          keepPaidLast: Number(cur.keepPaidLast) || Number(src.keepPaidLast) || 0,
-          shipPaid: !!(cur.shipPaid || src.shipPaid)
-        };
+    if (keepLoadBusy.current) return;
+    keepLoadBusy.current = true;
+    try {
+      const exist = new Set(orders.map(o => o.id));
+      const cand = keepPending.filter(o => !exist.has(o.id));
+      /* ⭐⭐ 안전장치 247 (2026-09-12 35차 · 설계안 §5-103 · 미결 63 · 📌 사장님 결정 「가」)
+         🔴 무엇을 막나 — 243 은 «자동 이월»에만 걸려 있었다. 두 경로는 «서로 겹치지 않는다»:
+            · 자동 이월 : 오늘 «주문이 있는» 손님(`mine.has`)  · 오늘 날짜만
+            · 이 버튼   : 오늘 «주문이 없는» 손님(`keepPending`) · 지난 날짜에서도 눌린다
+            → 사장님이 «직접» 누르시면 다른 날짜에서 이미 출고된 줄이 그대로 들어왔다
+              (2026-09-10 사남매맘 7건 70,700원과 «같은 모양»의 자리).
+         ⚠ 판정을 «새로 만들지 않는다» — 243 과 «같은» `shippedElsewhere`(= 서버 `find_moved_orders`).
+         ⚠⚠ 서버 확인이 «스냅샷보다 먼저»다. 옛 코드는 스냅샷을 먼저 찍었는데, 그대로 두고 막기만 하면
+            「아무 일도 안 했는데 되돌리기 기록만 쌓이는」 상태가 된다(`t_keepresur` ⑧-b 가 못 박는다).
+         ⚠ 못 읽으면 «안 가져온다». 자동 이월은 5초 뒤 스스로 다시 묻지만 이건 사장님이 «한 번»
+            누르시는 것이라 재시도하지 않고 사실대로 알린다 (224 「모르면 잠근다」와 같은 방향). */
+      const chk = await shippedElsewhere(cand.map(o => o.id));
+      if (!chk.ok) {
+        showToast("⚠ 지금은 서버를 못 읽어 킵을 불러올 수 없습니다 — 잠시 뒤 다시 눌러 주세요");
+        return;
+      }
+      const shipped = cand.filter(o => chk.done.has(o.id));
+      if (shipped.length) {
+        const snk = [...new Set(shipped.map(o => o.nick))];
+        const sdt = [...new Set(shipped.map(o => chk.done.get(o.id)).filter(Boolean))];
+        showToast(`⚠ 「${snk.join(", ")}」 킵 목록의 ${shipped.length}건은 ${sdt.join(", ") || "다른 날짜"} 에 «이미 출고»돼 가져오지 않았습니다 — 킵 목록을 확인해 주세요`);
+      }
+      /* ⭐⭐ 안전장치 204 — 킵으로 «입금까지 받은» 분의 주문은 «잠근 채» 올린다.
+            미입금 킵은 지금과 똑같이 그대로 올라온다 (사장님: 「미입금이라면 그냥 그대로」). */
+      const add = withKeepLock(cand.filter(o => !chk.done.has(o.id)));
+      /* ⚠ 35차 — 가져올 것이 하나도 없으면 «아무것도 하지 않는다». 위에서 이미 알렸다.
+            여기서 스냅샷·손님 칸 병합을 하면 「안 가져왔는데 킵 손님 칸만 생기는」 상태가 된다. */
+      if (!add.length) {
+        if (!shipped.length) showToast("불러올 킵 주문건이 없습니다.");
+        return;
+      }
+      /* ⚠ 스냅샷을 찍는다. 「화면에서 사라지는 작업만 찍는다」는 원칙의 예외다.
+            늘어나는 작업이지만, 지난 날짜에 잘못 넣으면 어느 주문이 새로 들어온 건지
+            사람이 구분해 지우고 원래 날짜에 다시 넣어야 해서 되돌릴 방법이 사실상 없다. */
+      /* ⚠ 35차 — 「직전」이려면 «담기 직전»이어야 한다. 서버 확인보다 앞에 두면 안 된다(위 247 주석). */
+      const addNicks = [...new Set(add.map(o => o.nick))];
+      takeSnap(`킵 불러오기 직전 (${bdate} · ${addNicks.slice(0, 3).join(", ")})`);
+      /* ⭐⭐ 안전장치 208 (26차) — 「불러오기」는 «사장님이 일부러» 누르는 것이라
+            지웠던 킵도 다시 가져온다. 그 기억을 여기서 지운다.
+         ⚠ 자동 이월(useEffect)은 «자동»이라 안 가져온다 — 그 둘을 가르는 것이 이 방어의 핵심이다.
+            「사람이 누른 것」과 「앱이 알아서 한 것」을 같게 다루면 지운 것이 조용히 돌아온다. */
+      add.forEach(o => keepDropped.current.delete(o.id));
+      /* ⚠ 35차 — 자동 이월과 «같은» 중복 가드(seen). async 가 되면서 겹칠 여지가 생겼다. */
+      setOrders(prev => {
+        const seen = new Set(prev.map(o => o.id));
+        return [...prev, ...add.filter(o => !seen.has(o.id))];
       });
-      return next;
-    });
-    const amt = add.reduce((t, o) => t + o.price * o.qty, 0);
-    showToast(`✓ 킵 주문건 ${keepPendingNicks.length}명 · ${add.length}건 (${won(amt)}원)을 불러왔습니다 — 보내실 분은 「킵」을 해제하세요`);
+      setCustomers(prev => {
+        const next = {
+          ...prev
+        };
+        /* ⚠ 35차 — 병합 대상은 «실제로 들어온 줄»의 닉네임이다(자동 이월과 «같은 규칙»).
+              247 이 전부 걸러낸 손님까지 병합하면 주문 없이 킵 칸만 생긴다. */
+        addNicks.forEach(nk => {
+          const src = (keeps.customers || {})[nk];
+          /* ⭐⭐ 안전장치 208 (2026-08-31 26차 · 미결 44 · **사장님 실사용 보고**)
+             🔴 전에는 `!next[nk]` 라, 오늘 그 손님 «칸이 이미 있으면» 킵 cust 를 «통째로 건너뛰었다».
+                그러면 킵으로 받아둔 돈(keepPaid)과 「배송비 이미 받음」(shipPaid)이 **안 따라온다.**
+                잠금(withKeepLock)은 `keeps.customers` 를 보므로 «잠기기는 하는데» 돈은 0이 된다.
+                → 실서버 2026-08-31 「가실이」가 정확히 그 상태였다 (keepPaid 0 · keepLock 1건).
+                  08-28 에는 14,000원이 그대로 있는데 오늘 화면으로 «안 따라왔다».
+                  그래서 지난 킵 금액이 오늘 청구액과 합산돼 보였다 (사장님 보고 그대로).
+             ⭐ 「자동 이월」이 쓰는 규칙과 **«같은 규칙»**이다 (money-rules §1 — 판정을 두 곳에 두지 않는다).
+                오늘 값이 우선이되, **돈이 걸린 칸은 지난 킵 값을 잃지 않는다.**
+             ⚠ 돈을 «지어내지 않는다» — 둘 다 0이면 0이다. 미입금 킵은 그대로 0으로 남는다. */
+          const cur = next[nk] || {};
+          /* ⚠ `src` 가 없으면 «아무것도 하지 않는다» — 원래 코드의 가드다.
+                킵 목록에 그 손님 cust 가 없을 수 있고, 그때 빈 값으로 덮으면 오늘 값이 날아간다. */
+          if (!src) return;
+          next[nk] = {
+            ...EMPTY_CUST,
+            ...src,
+            ...cur,
+            keep: true,
+            keepPaid: Number(cur.keepPaid) || Number(src.keepPaid) || 0,
+            keepPaidLast: Number(cur.keepPaidLast) || Number(src.keepPaidLast) || 0,
+            shipPaid: !!(cur.shipPaid || src.shipPaid)
+          };
+        });
+        return next;
+      });
+      const amt = add.reduce((t, o) => t + o.price * o.qty, 0);
+      /* ⚠ 35차 — 「N명」은 «실제로 들어온» 사람 수다. 247 이 전부 걸러낸 손님까지 세면
+            안 들어온 사람을 불러왔다고 알리게 된다. */
+      showToast(`✓ 킵 주문건 ${addNicks.length}명 · ${add.length}건 (${won(amt)}원)을 불러왔습니다 — 보내실 분은 「킵」을 해제하세요`);
+    } finally {
+      keepLoadBusy.current = false;
+    }
   };
 
   /* ---------- 단골 배송지 사전 (L-1) ----------
@@ -9264,13 +9313,38 @@ function App() {
       setRegulars(prev => pullRegulars(prev, rg.data, cut));
     })();
   }, [auth]);
+
+  /* ⭐⭐ 안전장치 248 (2026-09-12 35차 · 설계안 §5-104 · 미결 64 · 📌 사장님 결정 「나」)
+     🔴 무엇이 문제였나 — 이 적립은 그 날짜의 입금 손님에게 `last: now` 를 «무조건» 찍었다.
+        그래서 «지난 날짜를 열기만 해도» 그 시절 배송지가 «지금 것»이 됐다.
+        🔬 재현(`m_reg35.js`) — 30일 전 방송을 열자 옛주소 last 30일 전 → 지금 ·
+           전화 010-9999-9999 → 010-1111-1111 · 이름·uses 까지 되돌아갔고,
+           그 뒤 「지난 배송지 불러오기」 제안 «맨 위»가 옛 주소로 뒤집혔다([대조군]과 반대).
+        🔬 실서버 자국 — `last_used` 가 «같은 초»에 6·7·10·18행씩 몰려 있었다
+           (09-10 21:00:53 · 09-11 14:58:45 …). 정상 행은 초 단위로 흩어져 있다.
+     ⚠⚠ 여기는 «오배송»이 걸린 자리다 — 최근에 고친 연락처가 옛 번호로 되돌아간다.
+     ⭐ 판정을 «새로 만들지 않는다» — `pullRegulars` 가 쓰는 「최신 우선 · uses 는 큰 쪽 ·
+        last 는 큰 쪽」과 «같은 규칙»이다 (money-rules §1).
+     📌 사장님 결정 「나」 — 지난 날짜에서도 적립은 «한다». 방송 끝나고 자정을 넘겨 어제 날짜로
+        작업하시는 일이 잦아 「지난 날짜면 아예 안 한다」는 기능을 죽인다(`t_regsrv` ㉸-c 가 지킨다).
+     ⚠ `regularsRef` — 의존성에 `regulars` 를 넣으면 `last` 가 매번 커져 «무한 루프»가 된다.
+        224 가 `movedRef` 로 「지금 값」을 읽은 것과 «같은 방식»이다. 되돌리지 마라. */
+  const regularsRef = useRef(regulars);
+  useEffect(() => {
+    regularsRef.current = regulars;
+  }, [regulars]);
   useEffect(() => {
     if (!regLoaded.current || !loaded) return;
     const t = setTimeout(() => {
       const now = Date.now();
+      /* ⚠ 보고 있는 날짜가 오늘이 아니면 «그 날짜»로 찍는다 — 미래로는 절대 안 간다.
+            타임존을 박지 않는다(기기 로컬로 파싱). 못 읽으면 now 로 둔다(옛 동작). */
+      const stamp = bdate === today ? now : Math.min(now, new Date(`${bdate}T23:59:59`).getTime() || now);
       let touched = false;
+      /* ⚠ 「지금 값」을 읽는다 — 낡은 사본으로 덮으면 서버에서 «막 받아온» 다른 배송지가 사라진다
+            (35차 재현에서 실제로 사라졌다 · `t_regsrv` ㉸ 마지막 단정). */
       const next = {
-        ...regulars
+        ...regularsRef.current
       };
       // ⚠ 마감되면 paid 가 풀리므로 nickList·c.paid 만 보면 출고한 손님 배송지가 단골로 안 쌓인다
       settleNickList.forEach(nk => {
@@ -9288,16 +9362,28 @@ function App() {
           const prev = entry.addrs[hit];
           // 같은 주소면 최신 정보로 갱신하고 사용 횟수를 올린다 (하루 한 번만)
           const sameDay = prev.lastDate === bdate;
-          entry.addrs[hit] = {
-            name: c.name || prev.name,
-            phone: c.phone,
+          /* ⭐⭐ 248 — «내가 보고 있는 날짜»가 기존 기록보다 최신일 때만 내용을 덮는다.
+                옛 날짜를 열었을 뿐인데 최근에 고친 이름·전화·요청사항이 되돌아가면 안 된다.
+             ⚠ 「시각」과 「방송 날짜」를 «둘 다» 본다 — 둘 중 하나라도 기존이 더 최신이면 안 덮는다.
+                🔬 35차 실서버 실측 — 122행 전부 `last_date` 가 있고, 그중 **93행**이
+                   「시각이 날짜보다 미래」였다(= 지난 날짜를 열어 시각만 밀린 자국).
+                   시각 하나만 보면 그 밀린 값에 속는다. 모르면 «안 덮는» 쪽이다(224 방향). */
+          const prevLast = Number(prev.last) || 0;
+          const newer = stamp >= prevLast && (!prev.lastDate || String(bdate) >= String(prev.lastDate));
+          const merged = {
+            name: newer ? c.name || prev.name : prev.name,
+            phone: newer ? c.phone : prev.phone,
             addr: c.addr,
-            req: c.req || "",
-            uses: sameDay ? prev.uses : (prev.uses || 1) + 1,
-            last: now,
-            lastDate: bdate
+            req: newer ? c.req || "" : prev.req || "",
+            /* ⭐ uses 는 «큰 쪽» — 로컬에 기록이 없는 기기에서 지난 날짜를 열면 1로 «줄어들었다» */
+            uses: Math.max(Number(prev.uses) || 1, sameDay ? Number(prev.uses) || 1 : (Number(prev.uses) || 1) + 1),
+            /* ⭐ last 도 «큰 쪽» — 지난 날짜를 열어도 제안 순서가 안 뒤집힌다 */
+            last: Math.max(prevLast, stamp),
+            lastDate: newer ? bdate : prev.lastDate || bdate
           };
-          if (!sameDay || prev.phone !== c.phone || prev.name !== c.name || prev.req !== (c.req || "")) touched = true;
+          entry.addrs[hit] = merged;
+          /* ⚠ `last` 는 저장 여부 판정에서 «뺀다» — 넣으면 오늘 날짜에서 매초 저장이 일어난다. */
+          if (prev.name !== merged.name || prev.phone !== merged.phone || (prev.req || "") !== merged.req || (Number(prev.uses) || 1) !== merged.uses || (prev.lastDate || "") !== merged.lastDate) touched = true;
         } else {
           entry.addrs.push({
             name: c.name || "",
@@ -9305,7 +9391,7 @@ function App() {
             addr: c.addr,
             req: c.req || "",
             uses: 1,
-            last: now,
+            last: stamp,
             lastDate: bdate
           });
           touched = true;
@@ -9316,7 +9402,7 @@ function App() {
       if (touched) setRegulars(next);
     }, 1200); // 입력 중에 계속 쌓이지 않게 넉넉히 기다린다
     return () => clearTimeout(t);
-  }, [customers, settleNickList, orders, loaded, bdate]);
+  }, [customers, settleNickList, orders, loaded, bdate, today]);
 
   // 그 닉네임의 지난 배송지 (오늘 것과 같은 주소는 제외 — 이미 채워져 있으니 보여줄 필요 없다)
   const regularsFor = nk => {
