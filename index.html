@@ -4812,7 +4812,10 @@ function App() {
     activeOrders.forEach(o => {
       const c = cust(o.nick);
       if (!c.notified) return;
-      if (isShipped(o.nick)) return; // 이미 나간 건은 포장할 필요가 없다
+      /* ⚠ 35차 — 여기 있던 `if (isShipped(o.nick)) return;` 을 뺐다. «실효가 없었다» —
+            `activeOrders` 가 이미 `!o.done` 으로 마감분을 빼므로 이 목록의 사람은
+            «미출고 주문이 있다» → `isShipped` 는 항상 false 였다(`m_ship35.js` 로 계측).
+         🔴 되살리지 마라 — 없는 방어를 있다고 두면 다음 사람이 속는다(33차 `DRAG_MIN` 과 같은 유형). */
       m[o.name] = m[o.name] || {
         paid: 0,
         unpaid: 0,
@@ -4833,8 +4836,8 @@ function App() {
     return m;
   }, [activeOrders, customers, shippedNicks]);
 
-  // 이미 나간 수량 — 총량 파악용으로 따로 보여준다
-  const shippedQty = useMemo(() => activeOrders.filter(o => cust(o.nick).notified && isShipped(o.nick)).reduce((t, o) => t + o.qty, 0), [activeOrders, customers, shippedNicks]);
+  /* ⚠ 35차 — 「이미 나간 수량」은 `paidAnyOf` 뒤로 «옮겼다»(선언 순서 때문).
+        아래 「안전장치 250」 블록을 봐라. */
 
   // 택배 출고 대상 = 입금 완료자. 단 픽업수령(직접 방문)은 택배를 안 보내므로 제외.
   const paidLines = useMemo(() => activeOrders.filter(o => {
@@ -4861,11 +4864,15 @@ function App() {
   // ⚠ 기본(전체) 모드에서도 출고완료 건은 뺀다. 잘못 다운받으면 이중 발송이 된다.
   //    필요하면 「선택」 모드에서 직접 체크해 넣을 수 있다.
   const shipLines = useMemo(() => {
-    if (!shipSelectMode) return paidLines.filter(o => !isShipped(o.nick));
+    /* ⚠ 35차 — 여기 있던 `.filter((o) => !isShipped(o.nick))` 을 뺐다. «실효가 없었다» —
+          `paidLines ⊂ activeOrders` 이고 `activeOrders` 가 마감분을 이미 뺀다(`m_ship35.js` 계측).
+       🔴 출고완료된 사람이 빠지는 «진짜 방어»는 `activeOrders` 의 `!o.done` 이다.
+          `t_free` ④⑦ 이 그것을 «동작»으로 지킨다. 되살리지 마라. */
+    if (!shipSelectMode) return paidLines;
     return paidLines.filter(o => shipSelected[o.nick]);
   }, [paidLines, shipSelectMode, shipSelected, shippedNicks]);
-  const shipNickCount = shipSelectMode ? paidNicks.filter(n => shipSelected[n]).length : paidNicks.filter(n => !isShipped(n)).length;
-  const shippedNickCount = paidNicks.filter(n => isShipped(n)).length;
+  /* ⚠ 35차 — 전체 모드 쪽의 `!isShipped(n)` 을 뺐다(실효 없음 · 위 pivot 주석과 같은 이유). */
+  const shipNickCount = shipSelectMode ? paidNicks.filter(n => shipSelected[n]).length : paidNicks.length;
   const nickProductSummary = nick => paidLines.filter(o => o.nick === nick).map(o => `${o.name}${o.qty > 1 ? ` ${o.qty}개` : ""}`).join(", ");
 
   // 창고 픽업: 상품명 가나다순 정렬 + 총 픽업 수량
@@ -5582,6 +5589,48 @@ function App() {
   };
   const paidAnyOf = n => cust(n).paid || doneOrders.some(o => o.nick === n && o.donePaid !== false);
   const receiptFeeOf = n => feeOf(n) + doneOrders.filter(o => o.nick === n).reduce((s, o) => s + (Number(o.doneFee) || 0), 0);
+  /* ⭐⭐ 안전장치 250 (2026-09-12 35차 4부 · 설계안 §5-106 · 📌 사장님 「안전이 1순위」)
+     🔴 무엇이 문제였나 — 「이미 나간 수량·인원」 안내가 **언제나 0**이어서 «한 번도» 안 떴다.
+        옛 정의가 `activeOrders`·`paidNicks` 기반이었는데 그 목록은 마감분(`o.done`)을 이미 빼므로
+        `isShipped` 가 항상 false 였다(🔬 `m_ship35.js` 계측).
+        → 「출고완료 N개 (이미 나감)」 · 「이미 출고된 N명은 자동으로 빠집니다」 ·
+          「전체 선택 (미출고만)」 · 「📦 출고완료 N명」이 전부 죽어 있었다.
+     🟢 **데이터 유실은 아니었다** — 빠지는 동작은 `activeOrders` 가 제대로 한다.
+        위험은 **「사장님이 이유를 모르는 채 숫자가 적게 보이는 것」**이다(빠진 사람을 놓칠 수 있다).
+     ⚠⚠ **마감되면 `customers` 의 `paid`·`notified` 가 «풀린다»**(소스 3310).
+        그것만 보는 판정은 또 0이 된다. 마감 때 주문에 적어둔 `doneCust` 를 봐야 한다.
+     ⭐ **판정을 «새로 만들지 않았다»** — 입금은 기존 `paidAnyOf`, 안내는 `doneCust.notified`,
+        「전부 나갔는가」는 기존 `isShipped` 를 쓴다(money-rules §1).
+        ⭐ `isShipped` 는 여기서는 «실효가 있다» — `doneOrders` 기반이기 때문이다.
+     ⚠ 매출·정산·요약본과 무관하다 — «화면 안내 숫자»만 쓴다. `CALC_VER` 7 그대로. */
+  const doneCustOf = n => {
+    const h = doneOrders.find(o => o.nick === n && o.doneCust);
+    return h ? h.doneCust : null;
+  };
+  const notifiedAnyOf = n => {
+    const d = doneCustOf(n);
+    return cust(n).notified || (d ? !!d.notified : false);
+  };
+  const pickupAnyOf = n => {
+    const d = doneCustOf(n);
+    return cust(n).pickup || (d ? !!d.pickup : false);
+  };
+  // 이미 나간 수량 — 총량 파악용으로 따로 보여준다
+  const shippedQty = useMemo(() => doneOrders.filter(o => !o.canceled && notifiedAnyOf(o.nick)).reduce((t, o) => t + o.qty, 0), [doneOrders, customers]);
+  /* 이미 나가서 출고 목록에서 «자동으로 빠진» 사람 — 왜 적게 보이는지 알리는 데 쓴다.
+     ⚠ 픽업은 애초에 택배로 안 보내므로 «빠졌다»고 알릴 대상이 아니다(헛경고 방지). */
+  const shippedNickList = useMemo(() => {
+    const set = new Set();
+    doneOrders.forEach(o => {
+      if (o.canceled || set.has(o.nick)) return;
+      if (pickupAnyOf(o.nick)) return;
+      if (!paidAnyOf(o.nick)) return;
+      if (!isShipped(o.nick)) return; // 부분 출고는 여전히 목록에 남아 있다
+      set.add(o.nick);
+    });
+    return [...set];
+  }, [doneOrders, customers, shippedNicks]);
+  const shippedNickCount = shippedNickList.length;
   const cashIssuedCount = cashList.filter(n => cust(n).cashIssued).length;
 
   // 출고 라인을 「받는분 이름」 가나다순으로 정렬.
@@ -12689,17 +12738,16 @@ function App() {
     onClick: () => {
       const all = {};
       paidNicks.forEach(n => {
-        if (!isShipped(n)) all[n] = true;
+        all[n] = true;
       });
       setShipSelected(all);
     }
-  }, "전체 선택", shippedNickCount > 0 ? " (미출고만)" : ""), /*#__PURE__*/React.createElement("button", {
+  }, "전체 선택"), /*#__PURE__*/React.createElement("button", {
     className: "btn ghost sm",
     onClick: () => setShipSelected({})
   }, "전체 해제")), paidNicks.map(n => /*#__PURE__*/React.createElement("label", {
-    className: "shipsel-row" + (shipSelected[n] ? " on" : "") + (isShipped(n) ? " shipped" : ""),
-    key: n,
-    title: isShipped(n) ? "이미 운송장이 붙어 나간 건입니다. 다시 보내려면 체크하세요." : ""
+    className: "shipsel-row" + (shipSelected[n] ? " on" : ""),
+    key: n
   }, /*#__PURE__*/React.createElement("input", {
     type: "checkbox",
     checked: !!shipSelected[n],
@@ -12709,9 +12757,7 @@ function App() {
     }))
   }), /*#__PURE__*/React.createElement("span", {
     className: "ss-nick"
-  }, n), isShipped(n) && /*#__PURE__*/React.createElement("span", {
-    className: "shippedbadge"
-  }, "출고완료"), /*#__PURE__*/React.createElement("span", {
+  }, n), /*#__PURE__*/React.createElement("span", {
     className: "ss-prod"
   }, nickProductSummary(n))))))), /*#__PURE__*/React.createElement("div", {
     className: "dlrow"
@@ -14790,11 +14836,13 @@ const CSS = `
   font-weight: 800; color: #14508f; background: #e4eefb; border: 1px solid #a9c9f0; white-space: nowrap; }
 .keepbadge.sm { margin-left: 6px; padding: 1px 7px; font-size: 11px; font-weight: 800; }
 
-/* 출고완료 (7/27) — 이미 운송장이 붙어 나간 건 */
-.shipsel-row.shipped { opacity: .55; background: #f6f7f9; }
-.shipsel-row.shipped.on { opacity: 1; background: #eaf3ff; }
-.shippedbadge { padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 800;
-  color: #4a515c; background: #e6e9ee; white-space: nowrap; }
+/* 출고완료 (7/27) — 이미 운송장이 붙어 나간 건
+   ⚠ 안전장치 250 (35차 4부 · 36차 마무리 · 사장님 승인) — 「흐린 줄」과 「나감 배지」의
+     스타일 세 규칙을 «뺐다». 그 클래스를 «붙이는 코드»가 0건이 되어 영영 안 걸리는
+     규칙이었다. 실효 없는 것을 남기면 다음 사람이 속는다(33차 DRAG_MIN 과 같은 유형).
+     🔴 되살리지 마라 — t_free ⑨ 가 「안 돌아왔다」를 지킨다.
+     ⚠ 이름을 여기 적지 않는다 — 적으면 배포본 «조각 대조»에 오탐이 생긴다(36차에 겪었다).
+   🟢 아래 두 줄은 «살아 있는» 표시다(250 이 살린 안내 숫자). 지우지 마라. */
 .shippednote { color: #0f766e; }
 .whshipped { color: #0f766e; }
 .whship { margin-left: auto; font-size: 13px; color: #8a919c; white-space: nowrap; }
