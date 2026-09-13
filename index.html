@@ -3264,12 +3264,25 @@ function App() {
     const apply = () => {
       const h = Math.round(el.getBoundingClientRect().height);
       if (h > 0) document.documentElement.style.setProperty("--topbar-h", h + "px");
+      /* ⭐⭐ 안전장치 251 (2026-09-13 36차 · 📌 사장님 증상) — 탭 줄 «실제» 높이도 같이 잰다.
+         왜 — 폰에서는 토스트를 「고정된 줄 아래」에서 시작시켜야 하는데, 그 줄 높이가
+              폭에 따라 달라진다(🔬 실측: 640px 이하 101px · 640px 82px).
+         🔴 고정 숫자를 박지 마라 — 탭이 한 줄 늘면 같은 결함이 «되돌아온다».
+         ⚠ 상단바와 «같은 자리»에서 잰다. 새 effect 를 만들지 마라(두 벌이 된다). */
+      const tb = document.querySelector(".tabs");
+      if (tb) {
+        const th = Math.round(tb.getBoundingClientRect().height);
+        if (th > 0) document.documentElement.style.setProperty("--tabs-h", th + "px");
+      }
     };
     apply();
     let ro = null;
     try {
       ro = new ResizeObserver(apply);
       ro.observe(el);
+      /* 251 — 탭 줄도 함께 본다(글자 수가 바뀌면 접히면서 높이가 달라진다) */
+      const tb0 = document.querySelector(".tabs");
+      if (tb0) ro.observe(tb0);
     } catch (e) {}
     window.addEventListener("resize", apply);
     window.addEventListener("orientationchange", apply);
@@ -14166,8 +14179,13 @@ const CSS = `
   gap: 10px; padding: 10px 14px; background: #1f3a5f; color: #fff; font-weight: 700; font-size: 14px; }
 .viewbar .btn { background: #fff; color: #1f3a5f; border: none; }
 .viewbar .btn.danger { background: #e5484d; color: #fff; }
+/* ⭐⭐ 안전장치 251 (2026-09-13 36차 · 📌 사장님 증상 · 설계안 §5-107)
+   「⚠·❌ 로 시작하는 토스트」는 «자동으로 안 사라지고 ✕ 로만» 닫힌다. 그러므로 «언제나 닿아야» 한다.
+   🔬 재현 — z-index 200 이라 보기 전용 배너(400)·「어느 쪽을 쓸지」 카드(220)·인쇄 미리보기(300)에
+      «가려» ✕ 를 누를 수 없었다(m_toast36.js 로 계측 — 그 자리에 「✏ 편집 켜기」가 잡혔다).
+   🔴 450 을 낮추지 마라 — 배너보다 «위»여야 한다. 인트로 스플래시(9999)는 그대로 위다. */
 .toaststack {
-  position: fixed; top: 12px; left: 12px; z-index: 200;
+  position: fixed; top: 12px; left: 12px; z-index: 450;
   display: flex; flex-direction: column; gap: 8px;
   max-width: min(360px, calc(100vw - 24px));
 }
@@ -15090,6 +15108,14 @@ const CSS = `
   .topbar { position: relative; }
   .viewbar { position: relative; }
   .tabs { top: 0; }
+  /* ⭐⭐ 안전장치 251 (2026-09-13 36차 · 📌 사장님 증상 「위치가 같아서 끄질 못하네」)
+     폰에서는 위쪽을 «둘»이 번갈아 차지한다 — 맨 위에서는 보기 전용 배너(0~68px),
+     내린 뒤에는 탭 줄(0~101px · 246 으로 top 0 에 붙는다). 토스트가 top 12 면 둘 다와 겹쳤다.
+     🔑 «탭 줄 높이 + 여백» 아래에서 시작시키면 두 상황을 «한 번에» 피한다
+        (배너 68px < 탭 101px 이므로 탭 기준이 더 넉넉하다 — 🔬 m_fix36.js 전수 계측).
+     🔴 값을 고정 숫자로 바꾸지 마라 — 그 변수는 JS 가 «실측»으로 채운다(--tabs-h).
+     ⚠ PC 자리(top 12)는 «한 픽셀도» 안 바꾼다 — t_mobtop ⑥ 대조군이 지킨다. */
+  .toaststack { top: calc(var(--tabs-h, 101px) + 12px); }
 }
 `;
 const _root = ReactDOM.createRoot(document.getElementById('root'));
