@@ -985,6 +985,27 @@ function App() {
   const [paidOnly, setPaidOnly] = useState(false);
   const [settleHeader, setSettleHeader] = useState(SETTLE_HEADER);
   const [trackHeader, setTrackHeader] = useState(TRACK_HEADER);
+  /* ⭐⭐ 안전장치 255 (2026-09-15 39차 · 설계안 §5-111 · 📌 사장님 결정 「가」)
+     🔴 무엇을 막는가 — 「기본값으로 복원」이 **한 번 누르면 그 자리에서** 사장님이 쓰신 안내문구를
+        기본값으로 되돌렸다. 묻지도 않고 되돌리기 기록도 안 남겼다.
+        🔬 39차 실서버 실측 — 방송 27개 «전부» 문구가 있고 가짓수 5(최대 255자)다.
+           사장님이 «실제로» 고쳐 쓰고 계시고, 정산 문구에는 계좌 안내가 들어간다.
+     ⚠ **위험 크기는 정직하게** — 「되돌릴 수 없다」까지는 아니다. 문구는 방송 payload 에 함께
+        저장되므로 지난 방송을 열면 옛 문구가 보인다. 그래서 «실수로 누르는 것»만 막는다.
+     ⭐ 237(「✏ 편집 켜기」)·보관함 삭제와 «같은 2단 방식»이다 — 카드를 새로 만들지 않는다.
+     ⚠ 📌 결정 「가」 — **되돌리기 기록은 «안» 쓴다**(날짜당 5개 한도를 아낀다).
+     ⚠⚠ 정산·운송장은 «따로» 무장된다 — 한쪽을 눌러도 다른 쪽은 그대로여야 한다.
+     ⚠ 무장은 스스로 풀린다 — 켜둔 채 잊으면 다음 클릭이 바로 먹는다. */
+  const [hdrResetArm, setHdrResetArm] = useState(null); // "settle" | "track"
+  const resetHeader = which => {
+    if (hdrResetArm !== which) {
+      setHdrResetArm(which);
+      setTimeout(() => setHdrResetArm(c => c === which ? null : c), 4000);
+      return;
+    }
+    setHdrResetArm(null);
+    if (which === "settle") setSettleHeader(SETTLE_HEADER);else setTrackHeader(TRACK_HEADER);
+  };
   const [traceUrl, setTraceUrl] = useState(TRACE_URL_DEFAULT); // 방송 데이터와 무관한 설정 (별도 키)
   const traceLoaded = useRef(false);
   const [settingEdit, setSettingEdit] = useState(null); // null | "settle" | "track"
@@ -13702,10 +13723,10 @@ function App() {
       marginTop: 8
     }
   }, /*#__PURE__*/React.createElement("button", {
-    className: "btn",
+    className: "btn" + (hdrResetArm === "settle" ? " danger" : ""),
     disabled: settleHeader === SETTLE_HEADER,
-    onClick: () => setSettleHeader(SETTLE_HEADER)
-  }, "기본값으로 복원")), /*#__PURE__*/React.createElement("div", {
+    onClick: () => resetHeader("settle")
+  }, hdrResetArm === "settle" ? "한 번 더 누르면 기본값으로" : "기본값으로 복원")), /*#__PURE__*/React.createElement("div", {
     className: "hint"
   }, "계좌·상호가 바뀌면 여기서 수정하세요. 이 문구 다음에 「<정산서> + 주문내역 + 합계」가 자동으로 붙습니다. (수정 즉시 저장됨)")), /*#__PURE__*/React.createElement("div", {
     className: "card"
@@ -13742,10 +13763,10 @@ function App() {
       marginTop: 8
     }
   }, /*#__PURE__*/React.createElement("button", {
-    className: "btn",
+    className: "btn" + (hdrResetArm === "track" ? " danger" : ""),
     disabled: trackHeader === TRACK_HEADER,
-    onClick: () => setTrackHeader(TRACK_HEADER)
-  }, "기본값으로 복원")), /*#__PURE__*/React.createElement("div", {
+    onClick: () => resetHeader("track")
+  }, hdrResetArm === "track" ? "한 번 더 누르면 기본값으로" : "기본값으로 복원")), /*#__PURE__*/React.createElement("div", {
     className: "hint"
   }, "이 문구 다음에 「[운송장 정보] + 택배사 + 송장번호」가 자동으로 붙습니다. 택배사는 업로드한 파일에 따라 ", /*#__PURE__*/React.createElement("b", null, "롯데택배 / CJ대한통운"), "으로 알아서 들어갑니다. (수정 즉시 저장됨)")), /*#__PURE__*/React.createElement("div", {
     className: "card"
