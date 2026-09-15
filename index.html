@@ -9913,21 +9913,12 @@ function App() {
   };
   const loadFromShelf = it => {
     setShelfOpen(false);
-    // 저장해둔 원가 정보를 사전에 합친다 (기존 값은 덮지 않음 — 최근에 고친 값이 우선)
-    if (it.costBook && Object.keys(it.costBook).length) {
-      setCostBook(prev => {
-        const next = {
-          ...prev
-        };
-        Object.entries(it.costBook).forEach(([k, v]) => {
-          if (!next[k]) next[k] = v;
-        });
-        return next;
-      });
-    }
+    /* ⭐⭐ 안전장치 254 — 파일 경로와 «같은 자리»에서 합친다(판정을 두 벌로 두지 않는다).
+       저장해둔 원가는 카드에 실어 나르고, 누른 뒤에 합쳐진다. 기존 값은 여전히 안 덮는다. */
     setProdImport({
       name: it.name,
-      list: it.products || []
+      list: it.products || [],
+      costBook: it.costBook || null
     });
   };
   const delFromShelf = it => {
@@ -10016,35 +10007,51 @@ function App() {
         showToast("❌ 파일에 상품이 없습니다");
         return;
       }
-      if (d.costBook && Object.keys(d.costBook).length) {
-        setCostBook(prev => {
-          const next = {
-            ...prev
-          };
-          Object.entries(d.costBook).forEach(([k, v]) => {
-            if (!next[k]) next[k] = v;
-          });
-          return next;
-        });
-      }
+      /* ⭐⭐ 안전장치 254 — 원가는 «여기서» 합치지 않는다. 카드에 실어 나르고
+         「교체/추가」를 «누른 뒤»에 applyProdImport 가 합친다(「취소」면 아무 일도 안 일어난다). */
       setProdImport({
         name: file.name || "상품목록",
-        list
+        list,
+        costBook: d.costBook || null
       });
     } catch (err) {
       showToast("❌ 불러오기 실패: " + (err.message || "파일을 읽을 수 없습니다."));
     }
   };
 
-  // 교체: 기존 목록을 버리고 새 목록으로 / 추가: 이름+금액이 같으면 건너뛰고 나머지만 추가
+  /* 교체: 기존 목록을 버리고 새 목록으로 / 추가: 이름+금액이 같으면 건너뛰고 나머지만 추가
+     ⭐⭐ 안전장치 254 (2026-09-14 38차 · 설계안 §5-110 · 📌 사장님 결정 「다」)
+     🔴 무엇을 막는가 ① — 전에는 «파일을 고르는 순간»(그리고 보관함에서 여는 순간) 원가를 합쳤다.
+        그래서 사장님이 「취소」를 누르셔도 원가장부가 이미 바뀌어 있었고, 되돌릴 길이 «없었다».
+        원가는 마진 계산에 쓰이고 서버로도 올라간다. 🔬 38차 재현 — 카드만 뜬 시점에 이미 합쳐져 있었다.
+        ⭐ 「취소하면 아무 일도 안 일어난다」는 233·236·249 가 지켜온 원칙이다. 그 줄에 맞춘다.
+     🔴 무엇을 막는가 ② — 「추가」 갈래에 되돌리기 기록이 «없었다»(「교체」에만 있었다).
+        100종짜리 목록을 잘못 더하면 손으로 지워야 했다.
+     ⚠⚠ 기존 값을 «안» 덮는 조건은 그대로다 — 최근에 고친 원가가 옛 파일 값으로 되돌아가면 안 된다.
+     ⚠ 더할 것이 «없으면»(전부 중복) 기록도 안 남긴다 — 249 의 「빈 화면에서는 스냅샷도 없다」와 같은 방향
+       (날짜당 5개 한도를 낭비하지 않는다). */
   const applyProdImport = mode => {
     if (!prodImport) return;
     const incoming = prodImport.list.map(p => ({
       ...p,
       id: p.id || uid()
     }));
+    const cb = prodImport.costBook;
+    const mergeCost = () => {
+      if (!cb || !Object.keys(cb).length) return;
+      setCostBook(prev => {
+        const next = {
+          ...prev
+        };
+        Object.entries(cb).forEach(([k, v]) => {
+          if (!next[k]) next[k] = v;
+        });
+        return next;
+      });
+    };
     if (mode === "replace") {
       takeSnap("상품목록 교체 직전");
+      mergeCost();
       setProducts(incoming);
       showToast(`⚠ 상품 ${incoming.length}종으로 교체 — 기존 상품 목록은 사라졌습니다`);
     } else {
@@ -10053,6 +10060,8 @@ function App() {
         ...p,
         id: uid()
       }));
+      if (add.length) takeSnap(`상품목록 추가 직전 (기존 ${products.length}종)`);
+      mergeCost();
       setProducts(prev => [...prev, ...add]);
       showToast(add.length ? `✓ ${add.length}종 추가했습니다. (중복 ${incoming.length - add.length}종 제외)` : "추가할 새 상품이 없습니다. (전부 중복)");
     }
