@@ -3467,8 +3467,20 @@ function App() {
     const dayStart = new Date(`${bdate}T00:00:00+09:00`).getTime(); // 보는 날짜 00:00 KST
     return Number(o.ts) > 0 && Number(o.ts) < dayStart; // 이 방송날 «이전»에 담긴 줄
   };
+  /* ⭐ 안전장치 257 (2026-09-16 40차 «2부» · 📌 사장님 「문구도 나눠주는게 좋지. 그게 보기 좋은거 아냐?」)
+     지킨 줄을 «어떻게 부를지»만 나눈다 — 출고완료(o.done) / 그 밖은 지난 킵. 판정(holdsPrice)은 그대로다.
+     ⚠ 나누는 곳은 여기 «한 곳»이다 — 일반 가격 칸(220)과 옵션 수정 저장(256)이 같이 쓴다. 검사: t_pricelabel.js */
+  const holdLabel = o => o && o.done ? "출고완료" : "지난 킵";
+  const holdGroups = list => ["출고완료", "지난 킵"].map(label => {
+    const g = (list || []).filter(o => holdLabel(o) === label);
+    return {
+      label,
+      n: g.length,
+      nicks: [...new Set(g.map(o => o.nick))]
+    };
+  }).filter(g => g.n > 0);
   /* 「무엇을 안 바꿨는가」를 화면에 남긴다 — 토스트로 알리고 끝내면 누를 것이 없다(216 교훈). */
-  const [priceHold, setPriceHold] = useState(null); // { pid, name, from, to, ids, nicks }
+  const [priceHold, setPriceHold] = useState(null); // { pid, name, from, to, ids, nicks, groups, (옵션) toById, lines }
   /* ⭐⭐ 2026-09-03 29차 (안전장치 219 · 미결 30) — 「이 킵은 어느 날짜로 넘어갔는가」를 서버에서 찾아 주문 줄에 붙인다.
      🔴 23차(191·191-b)는 «되살아나는 것»만 막았고, 원본 날짜에는 「넘어감」 흔적이 없었다.
      ⭐ 28차 실측 — 킵 주문은 다음 방송으로 넘어가도 `id`·`ts` 가 그대로다(08-27 「사남매맘」 5건 중 4건이
@@ -3937,6 +3949,7 @@ function App() {
         stocks
       } : p));
       if (held.length) {
+        const groups = holdGroups(held); // ⭐ 257 — 출고완료 / 지난 킵
         setPriceHold({
           pid: optEditId,
           name: base,
@@ -3944,15 +3957,17 @@ function App() {
           to: 0,
           ids: held.map(o => o.id),
           nicks: [...new Set(held.map(o => o.nick))],
+          groups,
           toById: Object.fromEntries(held.map(o => [o.id, pick(o).price])),
           lines: held.map(o => ({
             nick: o.nick,
             name: pick(o).name,
             from: o.price,
-            to: pick(o).price
+            to: pick(o).price,
+            kind: holdLabel(o)
           }))
         });
-        showToast(`⚠ 옵션 상품 "${base}" 수정됨 · 기존 주문도 정정되었습니다 (지난 킵 ${held.length}건은 가격을 지켰습니다)`);
+        showToast(`⚠ 옵션 상품 "${base}" 수정됨 · 기존 주문도 정정되었습니다 (${groups.map(g => `${g.label} ${g.n}건`).join(" · ")}은 가격을 지켰습니다)`);
       } else {
         showToast(`⚠ 옵션 상품 "${base}" 수정됨 · 기존 주문도 정정되었습니다`);
       }
@@ -9991,15 +10006,44 @@ function App() {
   };
 
   // 상품목록만 별도 엑셀로 저장. 눈으로 보는 시트 + 복원용 숨김 시트(옵션·조합재고 포함)
+  /* ⭐⭐ 안전장치 258 (2026-09-16 40차 «2부» · 📌 사장님 「상품 엑셀 다운 받을 때 회계탭에 입력한 원가 마진도 나오면
+        좋을거같아. 물론 회계탭에 입력한 상품명이랑 동일한게 나와야해」)
+     ⭐ 판정은 새로 만들지 않는다 — 회계 탭과 «같은» costOf · hasCost · marginOf 를 부른다(money-rules §1).
+        열쇠도 회계와 같은 「상품명|판매가」다. 개당 값은 수량 1 로 부른 것이다.
+     ⭐ 옵션 상품은 «조합 줄»을 아래에 붙인다 — 이름은 expandProduct 가 짓는 것(= 주문 줄 · 회계 줄 이름) 그대로다.
+     ⚠ 원가가 없으면 칸을 «비운다»(회계처럼 100% 로 채우면 목록에서는 거짓말이 된다) · 「미입력」에
+        같은 이름이 «다른 가격»으로 있으면 그 가격을 알려 준다(판정은 그대로 — 알림뿐이다).
+     ⚠ 복원용 숨김 시트는 그대로다 — 불러오기는 숨김 시트만 읽는다(조합 줄이 상품으로 들어오지 않는다).
+     검사: t_prodxls.js */
+  const costCells = (name, price) => {
+    if (!hasCost(name, price)) {
+      const nm = String(name || "").trim();
+      const other = Object.keys(costBook || {}).filter(k => k.slice(0, k.lastIndexOf("|")) === nm && Number(k.slice(k.lastIndexOf("|") + 1)) !== (Number(price) || 0)).map(k => Number(k.slice(k.lastIndexOf("|") + 1)));
+      return ["", "", "", "", "", other.length ? `미입력 (${other.map(x => won(x) + "원").join(" · ")}일 때 원가 있음)` : "미입력"];
+    }
+    const c = costOf(name, price) || {};
+    const m = marginOf(name, price, 1);
+    const pr = Number(price) || 0;
+    return [Number(c.cost) > 0 ? Number(c.cost) : "", Number(c.feeRate) > 0 ? Number(c.feeRate) : "", pr - m, m, pr ? Math.round(m / pr * 100) + "%" : "", "입력됨"];
+  };
   const exportProductsXlsx = () => {
     if (products.length === 0) {
       showToast("저장할 상품이 없습니다.");
       return;
     }
-    const rows = [["상품명", "금액", "수량", "옵션"]];
+    const rows = [["상품명", "금액", "수량", "옵션", "공급가", "수수료%", "개당 원가", "개당 마진", "마진율", "원가입력"]];
     products.forEach(p => {
       const opt = (p.options || []).map(g => `${g.label || "옵션"}: ${(g.values || []).map(v => v.name + (v.price ? `(+${v.price})` : "")).join(" / ")}`).join(" | ");
-      rows.push([p.name, p.price || 0, p.stock === null || p.stock === undefined ? "무제한" : p.stock, opt]);
+      const qty = p.stock === null || p.stock === undefined ? "무제한" : p.stock;
+      if (p.options && p.options.length) {
+        rows.push([p.name, p.price || 0, qty, opt, "", "", "", "", "", "옵션별 ↓"]);
+        expandProduct(p).forEach(c => {
+          const cq = p.stocks && p.stocks[c.key] != null ? p.stocks[c.key] : "";
+          rows.push([c.name, c.price || 0, cq, "↳ 옵션 조합", ...costCells(c.name, c.price)]);
+        });
+      } else {
+        rows.push([p.name, p.price || 0, qty, opt, ...costCells(p.name, p.price)]);
+      }
     });
     const ws = XLSX.utils.aoa_to_sheet(rows);
     ws["!cols"] = [{
@@ -10010,10 +10054,24 @@ function App() {
       wch: 10
     }, {
       wch: 60
+    }, {
+      wch: 10
+    }, {
+      wch: 9
+    }, {
+      wch: 10
+    }, {
+      wch: 10
+    }, {
+      wch: 8
+    }, {
+      wch: 30
     }];
     for (let r = 2; r <= rows.length; r++) {
-      const c = ws["B" + r];
-      if (c) c.z = "#,##0";
+      ["B", "E", "G", "H"].forEach(col => {
+        const c = ws[col + r];
+        if (c && typeof c.v === "number") c.z = "#,##0";
+      });
     }
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "상품목록");
@@ -11659,16 +11717,31 @@ function App() {
     className: "pricehold"
   }, /*#__PURE__*/React.createElement("div", {
     className: "phmsg"
-  }, "🏷 ", /*#__PURE__*/React.createElement("b", null, "「", priceHold.name, "」"), " ", priceHold.lines ? /*#__PURE__*/React.createElement("span", null, "옵션 가격 수정") : /*#__PURE__*/React.createElement("span", null, won(priceHold.from), " → ", /*#__PURE__*/React.createElement("b", null, won(priceHold.to), "원")), " ·", " ", /*#__PURE__*/React.createElement("b", null, "지난 킵 ", priceHold.ids.length, "건은 안 바꿨습니다"), " ", "(", priceHold.nicks.slice(0, 4).join(", "), priceHold.nicks.length > 4 ? " 외" : "", ")", priceHold.lines && /*#__PURE__*/React.createElement("div", {
+  }, "🏷 ", /*#__PURE__*/React.createElement("b", null, "「", priceHold.name, "」"), " ", priceHold.lines ? /*#__PURE__*/React.createElement("span", null, "옵션 가격 수정") : /*#__PURE__*/React.createElement("span", null, won(priceHold.from), " → ", /*#__PURE__*/React.createElement("b", null, won(priceHold.to), "원")), " ·", (() => {
+    const gs = priceHold.groups && priceHold.groups.length ? priceHold.groups : [{
+      label: "지난 킵",
+      n: priceHold.ids.length,
+      nicks: priceHold.nicks
+    }];
+    const who = ns => ns.slice(0, 4).join(", ") + (ns.length > 4 ? " 외" : "");
+    return gs.length > 1 ? /*#__PURE__*/React.createElement("span", null, " ", /*#__PURE__*/React.createElement("b", null, gs.map(g => `${g.label} ${g.n}건(${who(g.nicks)})`).join(" · "), "은 안 바꿨습니다")) : /*#__PURE__*/React.createElement("span", null, " ", /*#__PURE__*/React.createElement("b", null, gs[0].label, " ", gs[0].n, "건은 안 바꿨습니다"), " ", "(", who(gs[0].nicks), ")");
+  })(), priceHold.lines && /*#__PURE__*/React.createElement("div", {
     className: "phlines"
   }, priceHold.lines.slice(0, 4).map((l, i) => /*#__PURE__*/React.createElement("div", {
     key: i
-  }, l.nick, " · ", l.name, " ", won(l.from), " → ", /*#__PURE__*/React.createElement("b", null, won(l.to), "원"))), priceHold.lines.length > 4 && /*#__PURE__*/React.createElement("div", null, "외 ", priceHold.lines.length - 4, "건")), /*#__PURE__*/React.createElement("div", {
-    className: "hint"
-  }, "담을 때 가격을 지킵니다. 그때 받은 돈과 어긋나지 않게 하기 위해서입니다.")), /*#__PURE__*/React.createElement("button", {
+  }, l.kind ? `[${l.kind}] ` : "", l.nick, " · ", l.name, " ", won(l.from), " → ", /*#__PURE__*/React.createElement("b", null, won(l.to), "원"))), priceHold.lines.length > 4 && /*#__PURE__*/React.createElement("div", null, "외 ", priceHold.lines.length - 4, "건")), (() => {
+    /* ⭐ 257 — 왜 지키는지도 나눠 말한다. 출고완료가 없으면 옛 문구 그대로다. */
+    const labels = (priceHold.groups || []).map(g => g.label);
+    const hasDone = labels.includes("출고완료"),
+      hasKeep = labels.includes("지난 킵") || !labels.length;
+    const msg = hasDone && hasKeep ? "출고완료 줄은 그날 매출이, 지난 킵 줄은 그때 받은 돈이 흔들리지 않게 담을 때 가격을 지킵니다." : hasDone ? "이미 보낸 줄은 그날 매출이 흔들리지 않게 담을 때 가격을 지킵니다." : "담을 때 가격을 지킵니다. 그때 받은 돈과 어긋나지 않게 하기 위해서입니다.";
+    return /*#__PURE__*/React.createElement("div", {
+      className: "hint"
+    }, msg);
+  })()), /*#__PURE__*/React.createElement("button", {
     className: "btn primary sm",
     onClick: () => {
-      takeSnap(`가격 변경 — 지난 킵 ${priceHold.ids.length}건도 바꾸기 직전 (${priceHold.name})`);
+      takeSnap(`가격 변경 — 안 바꾼 ${priceHold.ids.length}건도 바꾸기 직전 (${priceHold.name})`); // ⭐ 257 — 출고완료도 담기므로 「지난 킵」이라 부르지 않는다
       const ids = new Set(priceHold.ids);
       const np = priceHold.to;
       /* ⭐ 안전장치 256 — 옵션 카드는 «줄마다» 새 가격(toById)을 쓴다. 일반 카드(220)는 한 값(np) 그대로다. */
@@ -11677,7 +11750,7 @@ function App() {
         ...o,
         price: tb && tb[o.id] != null ? tb[o.id] : np
       } : o));
-      showToast(tb ? `🏷 지난 킵 ${priceHold.ids.length}건도 새 옵션 가격으로 바꿨습니다` : `🏷 지난 킵 ${priceHold.ids.length}건도 ${won(np)}원으로 바꿨습니다`);
+      showToast(tb ? `🏷 안 바꾼 ${priceHold.ids.length}건도 새 옵션 가격으로 바꿨습니다` : `🏷 안 바꾼 ${priceHold.ids.length}건도 ${won(np)}원으로 바꿨습니다`);
       setPriceHold(null);
     }
   }, "이 ", priceHold.ids.length, "건도 바꾸기"), /*#__PURE__*/React.createElement("button", {
@@ -11955,8 +12028,9 @@ function App() {
             from: p.price,
             to: newPrice,
             ids: held.map(o => o.id),
-            nicks: [...new Set(held.map(o => o.nick))]
-          });
+            nicks: [...new Set(held.map(o => o.nick))],
+            groups: holdGroups(held)
+          }); // ⭐ 257 — 출고완료 / 지난 킵
         }
       }
     }), /*#__PURE__*/React.createElement("input", {
