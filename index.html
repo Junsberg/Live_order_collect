@@ -7090,7 +7090,17 @@ function App() {
     }
     const c = cust(nick);
     takeSnap(`📦 박스 추가 직전 (${nick} ${tgt.seq}-${tgt.nextBox - 1}차)`);
-    setShipData(prev => [...prev, {
+    /* ⭐⭐ 안전장치 259 (2026-09-16 41차 · 📌 사장님 결정 「가」 · 설계안 §5-115)
+       🔴 무엇을 막는가 — 📌 사장님 실사용(09-16 16:53): 박스를 넣은 뒤 «새로고침할 때마다»
+          「🔎 다른 곳 — 운송장」 카드가 뜨고, 「서버 것 쓰기」마다 같은 내용 스냅샷이 쌓였다(27초에 4개).
+          박스는 «이미 출고완료된 차수»에 붙어 자동 마감이 이 줄을 건너뛰므로 마감 표시가 끝내 안 채워지는데,
+          불러올 때는 migrateTrk 가 그것을 채운다 → PC ≠ 서버 → 카드. 「받기」도 채운 값을 동기됨으로 적어
+          서버가 안 바뀌니 반복된다(m_box41.js 재현 · [대조군] 박스 없음 → 카드 0).
+       ⭐ 그래서 줄을 «불러올 때와 같은 함수»로 만든다 — 저장되는 모양 == 불러온 뒤 모양.
+          판정을 여기서 새로 적지 마라(표시를 손으로 넣지 마라 · money-rules §1).
+       ⚠ 마감·배송비는 안 바뀐다 — 박스 줄의 차수는 «지금 차수»보다 작아 마감 후보가 아니다(t_boxsync ⑤).
+       ⚠ ✎ 직접 수정·합포장·업로드에는 걸지 마라 — 그쪽 줄은 «마감되어야» 해서 표시를 미리 넣으면 마감을 막는다. */
+    const row = migrateTrk([{
       nick,
       seq: tgt.seq,
       box: tgt.nextBox,
@@ -7101,7 +7111,8 @@ function App() {
       tracking: val,
       consign: !!boxAdd.consign,
       manual: true
-    }]);
+    }], {}).shipData[0];
+    setShipData(prev => [...prev, row]);
     setBoxAdd({
       nick: "",
       carrier: "",
