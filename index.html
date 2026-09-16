@@ -3899,13 +3899,31 @@ function App() {
           price: c.price
         };
       });
-      setOrders(os => os.map(o => {
-        if (o.productId !== optEditId) return o;
+      /* ⭐⭐ 안전장치 256 (2026-09-16 40차 · 📌 사장님 결정 「가」) — 옵션 «수정 저장»도 지킬 줄의 «가격»은 안 바꾼다
+         🔴 무엇을 막는가 — 이 자리는 그 상품의 줄을 «전부» 새 가격으로 덮었다. 출고완료 줄(그날 매출·결산·요약본)과
+            킵입금 잠금 줄(받은 돈)까지 바뀌었다. 일반 가격 칸(220)은 막혀 있는데 여기만 «빠져» 있었다(m_opt40.js 재현).
+         ⭐ 판정은 새로 만들지 않는다 — 220 의 holdsPrice 를 그대로 부른다(money-rules §1).
+         ⭐ 이름은 지킨 줄에도 따라간다(220 과 같다 · 미결 54). 가격만 «그대로» 두고 카드로 묻는다.
+         ⚠ 옵션은 조합마다 새 가격이 달라 카드에 «줄마다» 새 가격(toById)을 담는다 — 한 값으로 덮으면 틀린다.
+         ⚠ 대상 목록은 «지금 화면의 orders» 로 센다(220 과 같은 방식). 검사: t_optprice.js */
+      const pick = o => {
+        if (o.productId !== optEditId) return null;
         const idKey = optOldMap[o.name];
-        if (idKey == null) return o;
-        const nu = newByIdKey[idKey];
+        if (idKey == null) return null;
+        return newByIdKey[idKey] || null;
+      };
+      const held = orders.filter(o => {
+        const nu = pick(o);
+        return !!nu && nu.price !== o.price && holdsPrice(o);
+      });
+      const heldIds = new Set(held.map(o => o.id));
+      setOrders(os => os.map(o => {
+        const nu = pick(o);
         if (!nu) return o;
-        return {
+        return heldIds.has(o.id) ? {
+          ...o,
+          name: nu.name
+        } : {
           ...o,
           name: nu.name,
           price: nu.price
@@ -3918,7 +3936,26 @@ function App() {
         options: groups,
         stocks
       } : p));
-      showToast(`⚠ 옵션 상품 "${base}" 수정됨 · 기존 주문도 정정되었습니다`);
+      if (held.length) {
+        setPriceHold({
+          pid: optEditId,
+          name: base,
+          from: 0,
+          to: 0,
+          ids: held.map(o => o.id),
+          nicks: [...new Set(held.map(o => o.nick))],
+          toById: Object.fromEntries(held.map(o => [o.id, pick(o).price])),
+          lines: held.map(o => ({
+            nick: o.nick,
+            name: pick(o).name,
+            from: o.price,
+            to: pick(o).price
+          }))
+        });
+        showToast(`⚠ 옵션 상품 "${base}" 수정됨 · 기존 주문도 정정되었습니다 (지난 킵 ${held.length}건은 가격을 지켰습니다)`);
+      } else {
+        showToast(`⚠ 옵션 상품 "${base}" 수정됨 · 기존 주문도 정정되었습니다`);
+      }
     } else {
       setProducts(ps => [...ps, {
         id: uid(),
@@ -11622,7 +11659,11 @@ function App() {
     className: "pricehold"
   }, /*#__PURE__*/React.createElement("div", {
     className: "phmsg"
-  }, "🏷 ", /*#__PURE__*/React.createElement("b", null, "「", priceHold.name, "」"), " ", won(priceHold.from), " → ", /*#__PURE__*/React.createElement("b", null, won(priceHold.to), "원"), " ·", " ", /*#__PURE__*/React.createElement("b", null, "지난 킵 ", priceHold.ids.length, "건은 안 바꿨습니다"), " ", "(", priceHold.nicks.slice(0, 4).join(", "), priceHold.nicks.length > 4 ? " 외" : "", ")", /*#__PURE__*/React.createElement("div", {
+  }, "🏷 ", /*#__PURE__*/React.createElement("b", null, "「", priceHold.name, "」"), " ", priceHold.lines ? /*#__PURE__*/React.createElement("span", null, "옵션 가격 수정") : /*#__PURE__*/React.createElement("span", null, won(priceHold.from), " → ", /*#__PURE__*/React.createElement("b", null, won(priceHold.to), "원")), " ·", " ", /*#__PURE__*/React.createElement("b", null, "지난 킵 ", priceHold.ids.length, "건은 안 바꿨습니다"), " ", "(", priceHold.nicks.slice(0, 4).join(", "), priceHold.nicks.length > 4 ? " 외" : "", ")", priceHold.lines && /*#__PURE__*/React.createElement("div", {
+    className: "phlines"
+  }, priceHold.lines.slice(0, 4).map((l, i) => /*#__PURE__*/React.createElement("div", {
+    key: i
+  }, l.nick, " · ", l.name, " ", won(l.from), " → ", /*#__PURE__*/React.createElement("b", null, won(l.to), "원"))), priceHold.lines.length > 4 && /*#__PURE__*/React.createElement("div", null, "외 ", priceHold.lines.length - 4, "건")), /*#__PURE__*/React.createElement("div", {
     className: "hint"
   }, "담을 때 가격을 지킵니다. 그때 받은 돈과 어긋나지 않게 하기 위해서입니다.")), /*#__PURE__*/React.createElement("button", {
     className: "btn primary sm",
@@ -11630,11 +11671,13 @@ function App() {
       takeSnap(`가격 변경 — 지난 킵 ${priceHold.ids.length}건도 바꾸기 직전 (${priceHold.name})`);
       const ids = new Set(priceHold.ids);
       const np = priceHold.to;
+      /* ⭐ 안전장치 256 — 옵션 카드는 «줄마다» 새 가격(toById)을 쓴다. 일반 카드(220)는 한 값(np) 그대로다. */
+      const tb = priceHold.toById || null;
       setOrders(os => os.map(o => ids.has(o.id) ? {
         ...o,
-        price: np
+        price: tb && tb[o.id] != null ? tb[o.id] : np
       } : o));
-      showToast(`🏷 지난 킵 ${priceHold.ids.length}건도 ${won(np)}원으로 바꿨습니다`);
+      showToast(tb ? `🏷 지난 킵 ${priceHold.ids.length}건도 새 옵션 가격으로 바꿨습니다` : `🏷 지난 킵 ${priceHold.ids.length}건도 ${won(np)}원으로 바꿨습니다`);
       setPriceHold(null);
     }
   }, "이 ", priceHold.ids.length, "건도 바꾸기"), /*#__PURE__*/React.createElement("button", {
@@ -14899,6 +14942,7 @@ const CSS = `
 .pricehold { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   border: 1px solid #ffd28a; background: #fff8ec; border-radius: 10px; padding: 10px 12px; margin: 8px 0 12px; }
 .pricehold .phmsg { flex: 1; min-width: 220px; font-size: 13px; line-height: 1.5; }
+.pricehold .phlines { margin-top: 4px; font-size: 12px; color: #6b4a00; }   /* 안전장치 256 — 옵션 줄마다 원래 가격과 새 가격 */
 .movedbadge { background: #e8f0fe; color: #1a4fa0; }        /* 안전장치 219 — 넘어갔지만 미출고 */
 .movedbadge.moveddone { background: #e6f4ea; color: #1e6b3a; } /* 안전장치 219 — 넘어가서 출고됨 */
 .seqbadge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
