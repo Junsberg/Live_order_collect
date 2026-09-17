@@ -2502,6 +2502,21 @@ function App() {
         srvPlaceRef.current = place;
       }
     }
+    /* ⭐⭐ 안전장치 261 (2026-09-17 41차 «3부» · 📌 사장님 결정 「가」 · 설계안 §5-117)
+       🔴 무엇을 막는가 — 날짜를 바꾸면 화면의 «앞 날짜 내용»이 «새 날짜»로 이 PC 에 저장된다(서버엔 안 올림).
+          새 날짜를 읽는 데 0.7초보다 오래 걸리면 그 상태가 남고, 그때 새로고침하면 앱이 「처음 연 것」으로 알아
+          빈 날짜에는 «묻지 않고» 앞 날짜 주문을 올렸고(30차 09-04 사고와 같은 결과) · 자료 있는 날짜에는 그 주문을
+          「이 PC 주문 · 아직 안 올라감」 후보로 내놓았다(m_date41.js · t_datereload ②③⑤).
+       ⭐ 그래서 222 표식을 «날짜를 바꾸는 순간» 남긴다 — «기다려서» 쓴다.
+       ⚠⚠ 못 쓰면 날짜를 «안» 바꾼다 — 표식 없이 넘어가면 새로고침 한 번에 위 사고가 난다(t_datereload ④).
+       ⚠ 표식은 여전히 openSaveGate 한 곳에서만 지운다(222 원칙) · 보기 전용은 관문 ② 가 «성공처럼» 건너뛴다. */
+    if (!(await saveKey(PENDING_KEY, JSON.stringify({
+      date: next,
+      from: bdate
+    }), "날짜 표식"))) {
+      showToast(`⚠ 날짜를 바꾸지 못했습니다 — 이 PC 저장소에 기록하지 못했습니다 (${bdate} 그대로)`);
+      return;
+    }
     fromDateRef.current = bdate; // ⭐ 옮기기 확인 카드에 「어디서 왔는지」를 찍기 위해
     setBdate(next);
   };
@@ -2655,6 +2670,27 @@ function App() {
         trackHeader,
         shipData
       };
+      /* ⭐⭐ 안전장치 261 — 「처음 연 것」이어도 222 표식이 «이 날짜»를 가리키면 «날짜를 바꾸던 중»이다.
+            그때 화면은 앞 날짜 내용이라 이 날짜의 후보가 될 수 없다(아래 !first 와 같은 이유).
+         ⚠ 표식을 «못 읽거나» 깨졌으면 switching 은 거짓 — 지금처럼 «묻는다»(자동으로 버리지 않는다 · t_datereload ⑥).
+         ⚠ 아래 232 판정 줄은 «한 글자도» 안 건드렸다 — `t_samecard`·`t_snapsame` 이 그 줄을 본다.
+         ⚠⚠ 여기서 sameContent 를 «또» 부르지 마라 — 부르는 곳이 다섯이어야 한다(`t_snapsame` ④ · 판정 한 벌).
+            내용이 같으면 어차피 아래 첫 갈래가 먼저 걸리므로 표식만 읽어 둔다. */
+      let switching = null;
+      if (first && !localEmpty) {
+        const pr = await loadKey(PENDING_KEY);
+        if (!alive) return;
+        if (pr.ok && pr.value != null) {
+          try {
+            const pd = JSON.parse(pr.value);
+            if (pd && pd.date === bdate) switching = {
+              from: pd.from || null
+            };
+          } catch (e) {
+            switching = null;
+          }
+        }
+      }
       if (sameContent(mine, r.payload) || localEmpty || !first) {
         /* ⚠ !first = 사용자가 날짜를 바꾼 경우.
            이때 화면에 남아 있는 건 「앞 날짜」의 내용이므로 이 날짜의 후보가 될 수 없다.
@@ -2664,6 +2700,13 @@ function App() {
       } else if (isViewOnly()) {
         /* ⭐ 안전장치 245 — 보기 전용이면 «묻지 않고» 서버 것을 보여준다(이 기기 것은 올릴 수도 없다).
            ⚠ 위 232 판정 줄은 «한 글자도» 안 건드렸다 — `t_samecard`·`t_snapsame` 이 그 줄을 본다(34차에 한 번 건드렸다가 잡혔다). */
+        applyServerPayload(r);
+      } else if (switching) {
+        /* ⭐⭐ 261 — 서버 것을 쓴다(새로고침이 없었을 때와 «같은» 결과). 버리는 화면은 «출처 = 앞 날짜»로 남긴다 —
+              날짜를 바꾸던 사이(인터넷이 끊겼을 때 등) 넣은 것이 있어도 되살릴 길을 둔다. 되돌리기 목록이 출처 날짜를 경고한다(183). */
+        takeSnap(`날짜 바꾸던 중이던 화면 (${switching.from || "앞 날짜"} 내용 — ${bdate} 서버 것으로 바꾸기 직전)`, {
+          srcDate: switching.from
+        });
         applyServerPayload(r);
       } else {
         setSrvPick({
