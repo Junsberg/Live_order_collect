@@ -3857,6 +3857,38 @@ function App() {
   };
 
   /* ---------- 상품 ---------- */
+  /* ⭐⭐ 안전장치 262 (2026-10-15 42차 · 📌 사장님 「상품명 왼쪽에 작은 칸으로 날짜 … 27-01-13 … 직접 수기 입력 ·
+        옵션 상품은 상품당 하나 · 상품탭에서만 · 목록보관함·엑셀에도 넣어야 불러올 때 그대로」)
+     ⭐ 유통기한은 상품 객체의 «따로 칸» `exp` 다 — 상품명(name)에 섞지 않는다.
+        상품명은 주문 줄 이름 · 원가 열쇠(「상품명|판매가」) · 재고 판정이 쓴다. 섞으면 셋이 어긋난다.
+     ⭐ 보관함 · 상품 엑셀 숨김 시트 · 서버 payload · 스냅샷은 products 를 «통째로» 싣는다 — 따로 길을 내지 않는다.
+     ⚠ 비우면 키를 «지운다» — 빈 문자열로 남기면 옛 상품과 모양이 달라진다.
+     ⚠ 주문 탭·정산 탭에는 보이지 않는다(결정 — 상품탭에서만). 검사: t_expiry.js */
+  const setProdExp = (pid, raw) => {
+    const v = String(raw == null ? "" : raw).slice(0, 12);
+    setProducts(ps => ps.map(x => {
+      if (x.id !== pid) return x;
+      if (v.trim() === "") {
+        const {
+          exp,
+          ...rest
+        } = x;
+        return rest;
+      }
+      return {
+        ...x,
+        exp: v
+      };
+    }));
+  };
+  const expInput = p => /*#__PURE__*/React.createElement("input", {
+    className: "in bare pexp",
+    placeholder: "유통기한",
+    maxLength: 12,
+    title: "유통기한 (직접 입력 · 예: 27-01-13)",
+    value: p.exp || "",
+    onChange: e => setProdExp(p.id, e.target.value)
+  });
   const addProduct = () => {
     const name = pName.trim();
     const price = parseInt(pPrice, 10);
@@ -10112,18 +10144,20 @@ function App() {
       showToast("저장할 상품이 없습니다.");
       return;
     }
-    const rows = [["상품명", "금액", "수량", "옵션", "공급가", "수수료%", "개당 원가", "개당 마진", "마진율", "원가입력"]];
+    /* ⭐ 262 — 「유통기한」은 «맨 끝» 열이다(옛 열 10개의 자리를 안 옮긴다). 조합 줄에는 반복하지 않는다(상품당 하나).
+       불러오기는 여전히 숨김 시트만 읽는다 — exp 는 products 안에 이미 실려 있다. */
+    const rows = [["상품명", "금액", "수량", "옵션", "공급가", "수수료%", "개당 원가", "개당 마진", "마진율", "원가입력", "유통기한"]];
     products.forEach(p => {
       const opt = (p.options || []).map(g => `${g.label || "옵션"}: ${(g.values || []).map(v => v.name + (v.price ? `(+${v.price})` : "")).join(" / ")}`).join(" | ");
       const qty = p.stock === null || p.stock === undefined ? "무제한" : p.stock;
       if (p.options && p.options.length) {
-        rows.push([p.name, p.price || 0, qty, opt, "", "", "", "", "", "옵션별 ↓"]);
+        rows.push([p.name, p.price || 0, qty, opt, "", "", "", "", "", "옵션별 ↓", p.exp || ""]);
         expandProduct(p).forEach(c => {
           const cq = p.stocks && p.stocks[c.key] != null ? p.stocks[c.key] : "";
-          rows.push([c.name, c.price || 0, cq, "↳ 옵션 조합", ...costCells(c.name, c.price)]);
+          rows.push([c.name, c.price || 0, cq, "↳ 옵션 조합", ...costCells(c.name, c.price), ""]);
         });
       } else {
-        rows.push([p.name, p.price || 0, qty, opt, ...costCells(p.name, p.price)]);
+        rows.push([p.name, p.price || 0, qty, opt, ...costCells(p.name, p.price), p.exp || ""]);
       }
     });
     const ws = XLSX.utils.aoa_to_sheet(rows);
@@ -10147,6 +10181,8 @@ function App() {
       wch: 8
     }, {
       wch: 30
+    }, {
+      wch: 11
     }];
     for (let r = 2; r <= rows.length; r++) {
       ["B", "E", "G", "H"].forEach(col => {
@@ -12013,10 +12049,12 @@ function App() {
       }, "⬆")), /*#__PURE__*/React.createElement("div", {
         className: "opt-prod"
       }, /*#__PURE__*/React.createElement("div", {
+        className: "opt-prod-head"
+      }, expInput(p), /*#__PURE__*/React.createElement("div", {
         className: "opt-prod-name"
       }, p.name, " ", /*#__PURE__*/React.createElement("span", {
         className: "opt-badge"
-      }, "옵션")), p.options.map((g, gi) => /*#__PURE__*/React.createElement("div", {
+      }, "옵션"))), p.options.map((g, gi) => /*#__PURE__*/React.createElement("div", {
         className: "opt-prod-g",
         key: gi
       }, /*#__PURE__*/React.createElement("b", null, g.label || `옵션${gi + 1}`, ":"), " ", g.values.map(v => v.name + (v.price ? ` (${won(v.price)})` : "")).join(" / "))), stocked.length > 0 && /*#__PURE__*/React.createElement("div", {
@@ -12059,7 +12097,9 @@ function App() {
       className: "btn sm topbtn",
       title: "맨 위로 올리기",
       onClick: () => moveProdTop(p.id)
-    }, "⬆")), /*#__PURE__*/React.createElement("input", {
+    }, "⬆")), /*#__PURE__*/React.createElement("div", {
+      className: "prow-name"
+    }, expInput(p), /*#__PURE__*/React.createElement("input", {
       className: "in grow bare",
       value: p.name,
       onChange: e => {
@@ -12074,7 +12114,7 @@ function App() {
           name: newName
         } : o));
       }
-    }), /*#__PURE__*/React.createElement("input", {
+    })), /*#__PURE__*/React.createElement("input", {
       className: "in price bare",
       type: "number",
       value: p.price,
@@ -14685,6 +14725,14 @@ const CSS = `
       (34차 실측 53px → 120px). 상품 100개면 목록이 12,000px 이 된다. */
 .prow-main.sorting { grid-template-columns: 56px minmax(140px, 1fr) 110px 90px 210px 56px; }
 .prow-handle { display: flex; align-items: center; gap: 4px; min-width: 0; }
+/* ⭐ 262 — 유통기한 칸 + 상품명을 «한 칼럼»에. 칸은 작게, 비어 있으면 점선으로만 보인다. */
+.prow-name, .opt-prod-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.in.pexp { flex: 0 0 84px; width: 84px; padding: 5px 6px; font-size: 13px; text-align: center;
+           color: #b45309; font-variant-numeric: tabular-nums; border: 1px dashed #d9dde3; border-radius: 7px; background: transparent; }
+.in.pexp::placeholder { color: #c0c6cf; }
+/* ⚠ 옵션 줄은 이름이 글자(22px)라 칸이 더 높으면 줄이 9px 늘었다(42차 실측 75 → 84px) — 위아래 여백을 줄인다. */
+.opt-prod-head .in.pexp { padding: 1px 6px; font-size: 12.5px; }
+.in.pexp:focus { background: #fff; border-style: solid; border-color: #16191f; }
 .prow-stock { font-size: 12px; color: #8a919c; text-align: right; white-space: nowrap;
               overflow: hidden; text-overflow: ellipsis; }
 .prow-stock b { font-weight: 700; }
